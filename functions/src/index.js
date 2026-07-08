@@ -110,7 +110,7 @@ exports.createEmployeeAccounts = onCall(async (request) => {
   };
 });
 
-exports.createManagedAccount = onCall(async (request) => {
+exports.createManagedAccount = onCall({ region: "us-central1", cors: true }, async (request) => {
   ensureAuthenticated(request);
   await ensureSuperAdmin(request.auth.uid);
 
