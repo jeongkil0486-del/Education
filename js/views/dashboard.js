@@ -5,7 +5,10 @@
  */
 
 import { authStore, ROLES }   from "../core/auth.js";
-import { trainingsDB, completionsDB, assignmentsDB, announcementsDB } from "../core/db.js";
+import {
+  trainingsDB, completionsDB, assignmentsDB, announcementsDB,
+  companiesDB, branchesDB, usersDB,
+} from "../core/db.js";
 import { formatDate, isOverdue, isExpiringSoon, daysFromNow } from "../utils/date.js";
 import { router } from "../core/router.js";
 
@@ -13,7 +16,7 @@ export async function render(container) {
   const role = authStore.role;
 
   if (role === ROLES.SUPER_ADMIN) {
-    renderSuperAdminDashboard(container);       // 동기 — DB 읽기 없음
+    await renderSuperAdminDashboard(container);  // DB 카운트 포함
   } else if (role === ROLES.HQ_ADMIN) {
     await renderHQAdminDashboard(container);
   } else if (role === ROLES.INSTRUCTOR) {
@@ -24,9 +27,11 @@ export async function render(container) {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   ① 슈퍼관리자 대시보드 — DB 읽기 없이 즉시 렌더링
+   ① 슈퍼관리자 대시보드
+   — 먼저 "–"로 즉시 렌더링, 이후 DB 카운트 비동기 반영
 ═══════════════════════════════════════════════════════════ */
-function renderSuperAdminDashboard(container) {
+async function renderSuperAdminDashboard(container) {
+  // 즉시 구조 렌더링 (카드는 "–" 상태)
   container.innerHTML = `
     <div class="section-header">
       <div>
@@ -36,10 +41,26 @@ function renderSuperAdminDashboard(container) {
     </div>
 
     <div class="dashboard-grid">
-      ${statCard({ label: "회사",         icon: iconBuilding(), variant: "primary" })}
-      ${statCard({ label: "지점",         icon: iconMapPin(),   variant: "info"    })}
-      ${statCard({ label: "관리자",       icon: iconShield(),   variant: "warning" })}
-      ${statCard({ label: "전체 사용자",  icon: iconUsers(),    variant: "neutral" })}
+      <div class="stat-card" id="sc-companies">
+        <div class="stat-card__icon stat-card__icon--primary">${iconBuilding()}</div>
+        <div class="stat-card__label">회사</div>
+        <div class="stat-card__value">–</div>
+      </div>
+      <div class="stat-card" id="sc-branches">
+        <div class="stat-card__icon stat-card__icon--info">${iconMapPin()}</div>
+        <div class="stat-card__label">지점</div>
+        <div class="stat-card__value">–</div>
+      </div>
+      <div class="stat-card" id="sc-admins">
+        <div class="stat-card__icon stat-card__icon--warning">${iconShield()}</div>
+        <div class="stat-card__label">관리자·강사</div>
+        <div class="stat-card__value">–</div>
+      </div>
+      <div class="stat-card" id="sc-users">
+        <div class="stat-card__icon stat-card__icon--neutral">${iconUsers()}</div>
+        <div class="stat-card__label">전체 사용자</div>
+        <div class="stat-card__value">–</div>
+      </div>
     </div>
 
     <div class="dashboard-main">
@@ -57,10 +78,23 @@ function renderSuperAdminDashboard(container) {
       <div class="card">
         <div class="card__header"><div class="card__title">시스템 정보</div></div>
         <div class="card__body">
-          <div class="info-row"><span class="info-row__label">플랫폼</span><span class="info-row__value">TAS Web Training v1.0</span></div>
-          <div class="info-row"><span class="info-row__label">환경</span><span class="info-row__value">Firebase + Vercel</span></div>
-          <div class="info-row"><span class="info-row__label">로그인 UID</span><span class="info-row__value" style="font-family:var(--font-mono);font-size:var(--text-xs)">${authStore.uid ?? "–"}</span></div>
-          <div class="info-row"><span class="info-row__label">역할</span><span class="info-row__value">슈퍼관리자 (System Admin)</span></div>
+          <div class="info-row">
+            <span class="info-row__label">플랫폼</span>
+            <span class="info-row__value">TAS Web Training v1.0</span>
+          </div>
+          <div class="info-row">
+            <span class="info-row__label">환경</span>
+            <span class="info-row__value">Firebase + Vercel</span>
+          </div>
+          <div class="info-row">
+            <span class="info-row__label">로그인 UID</span>
+            <span class="info-row__value"
+              style="font-family:var(--font-mono);font-size:var(--text-xs)">${authStore.uid ?? "–"}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-row__label">역할</span>
+            <span class="info-row__value">슈퍼관리자 (System Admin)</span>
+          </div>
         </div>
       </div>
     </div>
@@ -70,6 +104,28 @@ function renderSuperAdminDashboard(container) {
   container.querySelectorAll("[data-path]").forEach(el =>
     el.addEventListener("click", () => router.push(el.dataset.path))
   );
+
+  // DB 카운트 비동기 반영 — Permission denied여도 화면 안 죽음
+  const [companies, branches, users] = await Promise.all([
+    safeLoad(() => companiesDB.list(),   []),
+    safeLoad(() => branchesDB.listAll(), []),
+    safeLoad(() => usersDB.listAll(),    []),
+  ]);
+
+  const admins = users.filter(u => u.role === "hq_admin" || u.role === "instructor");
+
+  setStatValue("sc-companies", companies.length);
+  setStatValue("sc-branches",  branches.length);
+  setStatValue("sc-admins",    admins.length);
+  setStatValue("sc-users",     users.length);
+}
+
+/** stat 카드 값만 교체 */
+function setStatValue(cardId, value) {
+  const card = document.getElementById(cardId);
+  if (!card) return;
+  const el = card.querySelector(".stat-card__value");
+  if (el) el.textContent = value;
 }
 
 function quickBtn(path, icon, label) {
