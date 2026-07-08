@@ -85,6 +85,12 @@ const routes = [
     allow: [ROLES.HQ_ADMIN],
     view: () => import("../views/templates.js").then(m => m.render),
   },
+  {
+    path: "notification-settings",
+    title: "알림 설정",
+    allow: [ROLES.HQ_ADMIN],
+    view: () => import("../views/notification-settings.js").then(m => m.render),
+  },
 
   // ── Instructor
   {
