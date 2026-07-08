@@ -66,6 +66,7 @@ export const usersDB = {
   delete:  (uid)       => remove(r("users", uid)),
   /** companyId로 필터링 */
   list:    (companyId) => getList("users", "companyId", companyId),
+  listByRole: (role)   => getList("users", "role", role),
   /** 전체 조회 (슈퍼관리자용) */
   listAll: ()          => getList("users"),
   /** 빠른 카운트 */

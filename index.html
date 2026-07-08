@@ -159,6 +159,7 @@
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
     import { getAuth }       from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
     import { getDatabase }   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+    import { getFunctions }  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-functions.js";
     import { getAnalytics, isSupported } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-analytics.js";
 
     // ── Firebase config: TAS Learning Hub 전용 프로젝트 ──
@@ -176,10 +177,11 @@
     const firebaseApp = initializeApp(firebaseConfig);
     const auth        = getAuth(firebaseApp);
     const db          = getDatabase(firebaseApp);
+    const functions   = getFunctions(firebaseApp);
     const analytics   = await isSupported().then(ok => ok ? getAnalytics(firebaseApp) : null).catch(() => null);
 
     // Make globally accessible for modules
-    window.__firebase = { app: firebaseApp, auth, db, analytics };
+    window.__firebase = { app: firebaseApp, auth, db, functions, analytics };
 
     // Bootstrap app after Firebase is ready
     const { boot } = await import("./js/core/app.js");

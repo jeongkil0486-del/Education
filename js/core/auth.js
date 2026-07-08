@@ -74,7 +74,7 @@ class AuthStore {
       throw Object.assign(new Error("Invalid employee number"), { code: "auth/invalid-email" });
     }
     // Firebase Auth는 이메일 형식이 필요하므로, 화면에는 사번만 받고 내부 인증용 이메일로 변환한다.
-    return `${normalized}@tas-learning-hub.local`;
+    return `${normalized}@tas.local`;
   }
 
   async signInWithEmpNo(empNo, password) {
