@@ -80,11 +80,11 @@ async function renderSuperAdminDashboard(container) {
         <div class="card__body">
           <div class="info-row">
             <span class="info-row__label">플랫폼</span>
-            <span class="info-row__value">TAS Web Training v1.0</span>
+            <span class="info-row__value">TAS 교육 허브 v1.0</span>
           </div>
           <div class="info-row">
             <span class="info-row__label">환경</span>
-            <span class="info-row__value">Firebase + Vercel</span>
+            <span class="info-row__value">Firebase 및 Vercel</span>
           </div>
           <div class="info-row">
             <span class="info-row__label">로그인 UID</span>
@@ -93,7 +93,7 @@ async function renderSuperAdminDashboard(container) {
           </div>
           <div class="info-row">
             <span class="info-row__label">역할</span>
-            <span class="info-row__value">슈퍼관리자 (System Admin)</span>
+            <span class="info-row__value">슈퍼관리자</span>
           </div>
         </div>
       </div>

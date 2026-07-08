@@ -1,155 +1,134 @@
-/**
- * TAS Learning Hub — Notifications Module
- * - Bell icon with unread count
- * - Notification dropdown panel
- * - Alert banner for employees (overdue / expiring soon)
- */
-
 import { authStore, ROLES } from "../core/auth.js";
-import { completionsDB, trainingsDB, assignmentsDB } from "../core/db.js";
+import { completionsDB, assignmentsDB } from "../core/db.js";
+import { TEXT } from "../constants/text.js";
 import { formatDate, daysFromNow } from "../utils/date.js";
 
 export async function initNotifications() {
-  document.getElementById("btn-notifications")
-    ?.addEventListener("click", e => {
-      e.stopPropagation();
-      togglePanel();
-    });
+  const title = document.querySelector("#notif-panel .dropdown__header span");
+  const markAllReadButton = document.getElementById("btn-mark-all-read");
+  if (title) title.textContent = TEXT.notifications.title;
+  if (markAllReadButton) {
+    markAllReadButton.textContent = TEXT.notifications.markAllRead;
+  }
 
-  document.getElementById("btn-mark-all-read")
-    ?.addEventListener("click", markAllRead);
+  document.getElementById("btn-notifications")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    togglePanel();
+  });
+
+  document.getElementById("btn-mark-all-read")?.addEventListener("click", markAllRead);
 
   await loadNotifications();
 }
 
-/* ── Load & render ───────────────────────────────────────── */
 async function loadNotifications() {
-  const role = authStore.role;
-
-  if (role === ROLES.EMPLOYEE) {
+  if (authStore.role === ROLES.EMPLOYEE) {
     await loadEmployeeNotifications();
-  } else if (role === ROLES.HQ_ADMIN) {
-    await loadAdminNotifications();
+    return;
+  }
+
+  if (authStore.role === ROLES.HQ_ADMIN) {
+    renderNotifications([]);
   }
 }
 
 async function loadEmployeeNotifications() {
-  const uid         = authStore.uid;
-  const assignments = await assignmentsDB.forUser(uid);
-  const completions = await completionsDB.forUser(uid);
-  const completedIds = new Set(completions.map(c => c.trainingId));
+  const assignments = await assignmentsDB.forUser(authStore.uid);
+  const completions = await completionsDB.forUser(authStore.uid);
+  const completedIds = new Set(completions.map((item) => item.trainingId));
 
-  const pending     = assignments.filter(a => !completedIds.has(a.trainingId));
-  const now         = Date.now();
-  const overdue     = pending.filter(a => a.deadline && a.deadline < now);
-  const expiringSoon = pending.filter(a =>
-    a.deadline && a.deadline >= now && daysFromNow(a.deadline) <= 3
-  );
+  const pending = assignments.filter((item) => !completedIds.has(item.trainingId));
+  const now = Date.now();
+  const overdue = pending.filter((item) => item.deadline && item.deadline < now);
+  const expiringSoon = pending.filter((item) => item.deadline && item.deadline >= now && daysFromNow(item.deadline) <= 3);
 
-  const notifs = [
-    ...overdue.map(a => ({
-      id: a.trainingId,
+  const notifications = [
+    ...overdue.map((item) => ({
+      id: item.trainingId,
       type: "danger",
-      text: `[기한 초과] ${a.trainingTitle ?? "교육"}이 기한을 초과했습니다.`,
-      time: "–",
+      text: `${TEXT.notifications.overduePrefix} ${TEXT.notifications.overdueMessage(item.trainingTitle ?? "교육")}`,
+      time: "방금",
       read: false,
     })),
-    ...expiringSoon.map(a => ({
-      id: a.trainingId,
+    ...expiringSoon.map((item) => ({
+      id: item.trainingId,
       type: "warning",
-      text: `[마감 임박] "${a.trainingTitle ?? "교육"}" 수료기한이 ${daysFromNow(a.deadline)}일 남았습니다.`,
-      time: formatDate(a.deadline),
+      text: `${TEXT.notifications.expiringPrefix} ${TEXT.notifications.expiringMessage(item.trainingTitle ?? "교육", daysFromNow(item.deadline))}`,
+      time: formatDate(item.deadline),
       read: false,
     })),
   ];
 
-  renderNotifications(notifs);
+  renderNotifications(notifications);
 
-  // Alert banner
   if (overdue.length > 0) {
-    showAlertBanner(
-      `기한이 초과된 교육이 ${overdue.length}건 있습니다.`,
-      "danger"
-    );
+    showAlertBanner(TEXT.notifications.overdueBanner(overdue.length), "danger");
   } else if (expiringSoon.length > 0) {
-    showAlertBanner(
-      `수료기한이 3일 이내인 교육이 ${expiringSoon.length}건 있습니다.`,
-      "warning"
-    );
+    showAlertBanner(TEXT.notifications.expiringBanner(expiringSoon.length), "warning");
   }
 }
 
-async function loadAdminNotifications() {
-  // Placeholder — real impl queries overdue assignments across all employees
-  const notifs = [];
-  renderNotifications(notifs);
-}
-
-/* ── Render ──────────────────────────────────────────────── */
-function renderNotifications(notifs) {
-  const list  = document.getElementById("notif-list");
+function renderNotifications(items) {
+  const list = document.getElementById("notif-list");
   const badge = document.getElementById("notif-badge");
+  const unreadCount = items.filter((item) => !item.read).length;
 
-  const unread = notifs.filter(n => !n.read).length;
-
-  // Badge
-  if (unread > 0) {
+  if (unreadCount > 0) {
     badge?.classList.remove("hidden");
-    badge && (badge.textContent = unread > 9 ? "9+" : unread);
+    if (badge) badge.textContent = unreadCount > 9 ? "9+" : String(unreadCount);
   } else {
     badge?.classList.add("hidden");
   }
 
-  // List
   if (!list) return;
 
-  if (notifs.length === 0) {
-    list.innerHTML = `<div class="empty-state" style="padding:var(--space-8) var(--space-4)">새 알림이 없습니다</div>`;
+  if (!items.length) {
+    list.innerHTML = `<div class="empty-state" style="padding:var(--space-8) var(--space-4)">${TEXT.notifications.empty}</div>`;
     return;
   }
 
-  list.innerHTML = notifs.map(n => `
-    <div class="notif-item ${n.read ? "" : "notif-item--unread"}" data-id="${n.id}">
-      <div class="notif-item__dot" style="${dotColor(n.type)}"></div>
+  list.innerHTML = items.map((item) => `
+    <div class="notif-item ${item.read ? "" : "notif-item--unread"}" data-id="${item.id}">
+      <div class="notif-item__dot" style="${dotColor(item.type)}"></div>
       <div class="notif-item__body">
-        <div class="notif-item__text">${n.text}</div>
-        <div class="notif-item__time">${n.time}</div>
+        <div class="notif-item__text">${item.text}</div>
+        <div class="notif-item__time">${item.time}</div>
       </div>
     </div>
   `).join("");
 }
 
 function dotColor(type) {
-  const map = {
-    danger:  "background:var(--color-danger)",
+  const colors = {
+    danger: "background:var(--color-danger)",
     warning: "background:var(--color-warning)",
-    info:    "background:var(--brand-400)",
+    info: "background:var(--brand-400)",
     success: "background:var(--color-success)",
   };
-  return map[type] ?? "";
+  return colors[type] ?? "";
 }
 
 function markAllRead() {
-  document.querySelectorAll(".notif-item--unread")
-    .forEach(el => el.classList.remove("notif-item--unread"));
+  document.querySelectorAll(".notif-item--unread").forEach((element) => {
+    element.classList.remove("notif-item--unread");
+  });
   document.getElementById("notif-badge")?.classList.add("hidden");
 }
 
 function togglePanel() {
-  const panel = document.getElementById("notif-panel");
-  panel?.classList.toggle("hidden");
+  document.getElementById("notif-panel")?.classList.toggle("hidden");
 }
 
-/* ── Alert banner ────────────────────────────────────────── */
 function showAlertBanner(text, type = "warning") {
-  const el = document.getElementById("alert-banner");
-  if (!el) return;
-  el.className = `alert-banner alert-banner--${type}`;
-  el.innerHTML = `
+  const element = document.getElementById("alert-banner");
+  if (!element) return;
+
+  element.className = `alert-banner alert-banner--${type}`;
+  element.innerHTML = `
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
       <path d="M8 1L1 14h14L8 1zm0 4v4m0 2h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
     </svg>
     <span>${text}</span>
   `;
-  el.classList.remove("hidden");
+  element.classList.remove("hidden");
 }

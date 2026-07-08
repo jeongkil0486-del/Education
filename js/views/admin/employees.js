@@ -1,4 +1,5 @@
 import { branchesDB, usersDB } from "../../core/db.js";
+import { TEXT } from "../../constants/text.js";
 import { createEmployeeAccounts, deleteEmployeeAccount } from "../../core/admin-api.js";
 import { modal } from "../../utils/modal.js";
 import { toast } from "../../utils/toast.js";
@@ -8,35 +9,37 @@ let employees = [];
 let branches = [];
 let pendingUploadRows = [];
 
+const t = TEXT.employeeAdmin;
+
 export async function render(container) {
   container.innerHTML = `
     <div class="section-header">
       <div>
-        <div class="section-title">Employee Management</div>
-        <div class="section-subtitle">Create, bulk upload, and delete employee accounts.</div>
+        <div class="section-title">${t.title}</div>
+        <div class="section-subtitle">${t.subtitle}</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn--secondary" id="btn-download-template">Download Template</button>
-        <button class="btn btn--primary" id="btn-upload-employees">Excel Upload</button>
+        <button class="btn btn--secondary" id="btn-download-template">${t.downloadTemplate}</button>
+        <button class="btn btn--primary" id="btn-upload-employees">${t.excelUpload}</button>
       </div>
     </div>
 
     <div class="dashboard-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:var(--space-4)">
-      ${statCard("Employees", "employee-count")}
-      ${statCard("Active", "employee-active-count")}
-      ${statCard("Branches", "employee-branch-count")}
+      ${statCard(t.stats.employees, "employee-count")}
+      ${statCard(t.stats.active, "employee-active-count")}
+      ${statCard(t.stats.branches, "employee-branch-count")}
     </div>
 
     <div class="filter-bar">
       <select class="form-control" id="employee-branch-filter" style="max-width:220px">
-        <option value="">All Branches</option>
+        <option value="">${t.allBranches}</option>
       </select>
       <div class="input-group filter-bar__search">
         <svg class="input-group__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
           <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.25"/>
           <path d="M11 11l3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
         </svg>
-        <input class="form-control" type="search" id="employee-search" placeholder="Search name, employee no, branch" />
+        <input class="form-control" type="search" id="employee-search" placeholder="${t.searchPlaceholder}" />
       </div>
     </div>
 
@@ -128,8 +131,8 @@ function renderTable(list) {
   if (!list.length) {
     wrap.innerHTML = `
       <div class="empty-state" style="padding:var(--space-16)">
-        <div class="empty-state__title">No employees found</div>
-        <div>Use Excel upload to create employee accounts in bulk.</div>
+        <div class="empty-state__title">${t.emptyTitle}</div>
+        <div>${t.emptyDescription}</div>
       </div>
     `;
     return;
@@ -139,13 +142,13 @@ function renderTable(list) {
     <table class="data-table">
       <thead>
         <tr>
-          <th>Emp No</th>
-          <th>Name</th>
-          <th>Branch</th>
-          <th>Position</th>
-          <th>Login</th>
-          <th>Status</th>
-          <th>Created</th>
+          <th>${t.table.empNo}</th>
+          <th>${t.table.name}</th>
+          <th>${t.table.branch}</th>
+          <th>${t.table.position}</th>
+          <th>${t.table.login}</th>
+          <th>${t.table.status}</th>
+          <th>${t.table.createdAt}</th>
           <th style="width:96px"></th>
         </tr>
       </thead>
@@ -159,7 +162,7 @@ function renderTable(list) {
             <td class="cell--mono">${esc(item.email ?? `${item.empNo}@tas.local`)}</td>
             <td>
               <span class="chip ${item.active === false || item.disabled ? "chip--danger" : "chip--success"}">
-                ${item.active === false || item.disabled ? "Inactive" : "Active"}
+                ${item.active === false || item.disabled ? t.status.inactive : t.status.active}
               </span>
             </td>
             <td>${formatDate(item.createdAt)}</td>
@@ -170,7 +173,7 @@ function renderTable(list) {
                 data-name="${attr(item.name)}"
                 style="color:var(--color-danger)"
               >
-                Delete
+                ${TEXT.common.delete}
               </button>
             </td>
           </tr>
@@ -188,7 +191,7 @@ function openUploadModal() {
   pendingUploadRows = [];
 
   modal.open({
-    title: "Employee Excel Upload",
+    title: t.uploadModal.title,
     size: "xl",
     body: `
       <div style="display:flex;flex-direction:column;gap:var(--space-4)">
@@ -196,37 +199,37 @@ function openUploadModal() {
           <div class="card__body" style="display:flex;flex-direction:column;gap:var(--space-4)">
             <div class="form-row">
               <div class="form-group">
-                <label class="form-label">Default Branch</label>
+                <label class="form-label">${t.uploadModal.defaultBranch}</label>
                 <select class="form-control" id="upload-default-branch">
-                  <option value="">Use branch column from file</option>
+                  <option value="">${t.uploadModal.useFileBranch}</option>
                   ${branches.map((branch) => `
                     <option value="${branch.id}">${esc(branchLabel(branch))}</option>
                   `).join("")}
                 </select>
-                <div class="form-hint">If a row has no branch value, the selected default branch will be used.</div>
+                <div class="form-hint">${t.uploadModal.defaultBranchHint}</div>
               </div>
               <div class="form-group">
-                <label class="form-label form-label--required">Excel File</label>
+                <label class="form-label form-label--required">${t.uploadModal.file}</label>
                 <input class="form-control" id="upload-file" type="file" accept=".xlsx,.xls,.csv" />
-                <div class="form-hint">Required columns: employee number, name, branch, position. Initial password is set to employee number.</div>
+                <div class="form-hint">${t.uploadModal.fileHint}</div>
               </div>
             </div>
             <div style="font-size:var(--text-xs);color:var(--gray-500);line-height:1.7">
-              Example columns: employee number / name / branch / position<br/>
-              Branch values can be branch code such as PUS, TAE, ICN, CJU or the branch name itself.
+              ${t.uploadModal.example}<br/>
+              ${t.uploadModal.branchExample}
             </div>
           </div>
         </div>
         <div id="upload-preview" class="card">
           <div class="card__body" style="color:var(--gray-500)">
-            Select a file to preview validation results before upload.
+            ${t.uploadModal.previewIdle}
           </div>
         </div>
       </div>
     `,
     actions: [
-      { label: "Close", variant: "secondary", onClick: () => modal.close() },
-      { label: "Create Employees", variant: "primary", onClick: submitBulkUpload },
+      { label: TEXT.common.close, variant: "secondary", onClick: () => modal.close() },
+      { label: t.uploadModal.action, variant: "primary", onClick: submitBulkUpload },
     ],
   });
 
@@ -246,8 +249,8 @@ async function handleFileSelection(event) {
   } catch (err) {
     console.error("[employees] parse failed", err);
     pendingUploadRows = [];
-    toast.error("Failed to read Excel file.");
-    renderUploadMessage("Could not parse the selected file. Please check the file format and headers.");
+    toast.error(t.uploadModal.parseFailed);
+    renderUploadMessage(t.uploadModal.parseFailedDetail);
   }
 }
 
@@ -263,30 +266,30 @@ function renderUploadPreview(rows) {
   previewEl.innerHTML = `
     <div class="card__header">
       <div>
-        <div class="card__title">Upload Preview</div>
-        <div class="card__subtitle">Valid ${valid.length} / Invalid ${invalid.length}</div>
+        <div class="card__title">${t.uploadModal.previewTitle}</div>
+        <div class="card__subtitle">${t.uploadModal.validSummary(valid.length, invalid.length)}</div>
       </div>
     </div>
     <div class="card__body" style="display:flex;flex-direction:column;gap:var(--space-4)">
       ${invalid.length ? `
         <div style="padding:var(--space-4);border-radius:var(--radius-md);background:var(--color-danger-bg);color:#7a1a1e;font-size:var(--text-xs);line-height:1.7">
-          ${invalid.map((row) => `Row ${row.rowNumber}: ${esc(row.error)}`).join("<br/>")}
+          ${invalid.map((row) => `${t.uploadModal.row} ${row.rowNumber}: ${esc(row.error)}`).join("<br/>")}
         </div>
       ` : `
         <div style="padding:var(--space-4);border-radius:var(--radius-md);background:var(--brand-50);color:var(--brand-500);font-size:var(--text-xs)">
-          Validation passed. Upload will create Firebase Authentication accounts and Realtime Database profiles together.
+          ${t.uploadModal.validationPassed}
         </div>
       `}
       <div class="table-wrap">
         <table class="data-table">
           <thead>
             <tr>
-              <th>Row</th>
-              <th>Emp No</th>
-              <th>Name</th>
-              <th>Branch</th>
-              <th>Position</th>
-              <th>Status</th>
+              <th>${t.uploadModal.row}</th>
+              <th>${t.table.empNo}</th>
+              <th>${t.table.name}</th>
+              <th>${t.table.branch}</th>
+              <th>${t.table.position}</th>
+              <th>${t.table.status}</th>
             </tr>
           </thead>
           <tbody>
@@ -297,13 +300,13 @@ function renderUploadPreview(rows) {
                 <td>${esc(row.name ?? "")}</td>
                 <td>${esc(row.branchName ?? row.branchInput ?? "")}</td>
                 <td>${esc(row.position ?? "")}</td>
-                <td><span class="chip ${row.valid ? "chip--success" : "chip--danger"}">${row.valid ? "Ready" : "Error"}</span></td>
+                <td><span class="chip ${row.valid ? "chip--success" : "chip--danger"}">${row.valid ? t.uploadModal.ready : t.uploadModal.error}</span></td>
               </tr>
             `).join("")}
           </tbody>
         </table>
       </div>
-      ${preview.length > 20 ? `<div class="form-hint">Only the first 20 rows are shown in preview.</div>` : ""}
+      ${preview.length > 20 ? `<div class="form-hint">${t.uploadModal.previewOnly}</div>` : ""}
     </div>
   `;
 }
@@ -321,7 +324,7 @@ function renderUploadMessage(message) {
 
 async function submitBulkUpload() {
   if (!pendingUploadRows.length) {
-    toast.error("Please choose an Excel file first.");
+    toast.error(t.uploadModal.noFile);
     return;
   }
 
@@ -330,12 +333,12 @@ async function submitBulkUpload() {
   const invalid = normalized.filter((row) => !row.valid);
 
   if (invalid.length) {
-    toast.error("There are invalid rows in the file.");
+    toast.error(t.uploadModal.invalidRows);
     renderUploadPreview(pendingUploadRows);
     return;
   }
 
-  modal.setLoading("Create Employees", true);
+  modal.setLoading(t.uploadModal.action, true);
   try {
     const payload = normalized.map((row) => ({
       empNo: row.empNo,
@@ -347,41 +350,41 @@ async function submitBulkUpload() {
     }));
 
     const result = await createEmployeeAccounts({ employees: payload });
-    toast.success(`Created ${result.createdCount}, skipped ${result.skippedCount}.`);
+    toast.success(t.uploadModal.createSuccess(result.createdCount, result.skippedCount));
     modal.close();
     await loadData();
     openUploadResultModal(result);
   } catch (err) {
     console.error("[employees] create failed", err);
-    toast.error(err?.message ?? "Failed to create employees.");
-    modal.setLoading("Create Employees", false);
+    toast.error(err?.message ?? t.uploadModal.createFailed);
+    modal.setLoading(t.uploadModal.action, false);
   }
 }
 
 function openUploadResultModal(result) {
   modal.open({
-    title: "Upload Result",
+    title: t.uploadModal.resultTitle,
     size: "lg",
     body: `
       <div style="display:flex;flex-direction:column;gap:var(--space-4)">
         <div class="dashboard-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:0">
-          ${inlineStat("Created", result.createdCount)}
-          ${inlineStat("Skipped", result.skippedCount)}
-          ${inlineStat("Failed", result.failedCount)}
+          ${inlineStat(t.uploadModal.created, result.createdCount)}
+          ${inlineStat(t.uploadModal.skipped, result.skippedCount)}
+          ${inlineStat(t.uploadModal.failed, result.failedCount)}
         </div>
         <div class="card">
           <div class="card__body" style="font-size:var(--text-sm);line-height:1.7">
-            Login email format: <code style="font-family:var(--font-mono)">empNo@tas.local</code><br/>
-            Initial password: <code style="font-family:var(--font-mono)">empNo</code>
+            ${t.uploadModal.loginFormat}: <code style="font-family:var(--font-mono)">empNo@tas.local</code><br/>
+            ${t.uploadModal.initialPassword}: <code style="font-family:var(--font-mono)">empNo</code>
           </div>
         </div>
-        ${renderResultList("Created Employees", result.created, "chip--success")}
-        ${renderResultList("Skipped Employees", result.skipped, "chip--warning")}
-        ${renderResultList("Failed Employees", result.failed, "chip--danger")}
+        ${renderResultList(t.uploadModal.createdEmployees, result.created, "chip--success")}
+        ${renderResultList(t.uploadModal.skippedEmployees, result.skipped, "chip--warning")}
+        ${renderResultList(t.uploadModal.failedEmployees, result.failed, "chip--danger")}
       </div>
     `,
     actions: [
-      { label: "OK", variant: "primary", onClick: () => modal.close() },
+      { label: TEXT.common.close, variant: "primary", onClick: () => modal.close() },
     ],
   });
 }
@@ -396,8 +399,8 @@ function renderResultList(title, items, chipClass) {
       <div class="card__body" style="display:flex;flex-direction:column;gap:var(--space-2)">
         ${items.slice(0, 30).map((item) => `
           <div style="display:flex;justify-content:space-between;gap:var(--space-3);font-size:var(--text-sm)">
-            <span>${esc(item.empNo ?? item.uid ?? "-")} - ${esc(item.name ?? "")}</span>
-            <span class="chip ${chipClass}">${esc(item.message ?? "Done")}</span>
+            <span>${esc(item.empNo ?? item.uid ?? "-")} ${t.branchLabelSeparator} ${esc(item.name ?? "")}</span>
+            <span class="chip ${chipClass}">${esc(item.message ?? t.uploadModal.done)}</span>
           </div>
         `).join("")}
       </div>
@@ -407,30 +410,29 @@ function renderResultList(title, items, chipClass) {
 
 function confirmDeleteEmployee(uid, name) {
   modal.open({
-    title: "Delete Employee",
+    title: t.deleteModal.title,
     size: "sm",
     body: `
       <p style="font-size:var(--text-sm);color:var(--gray-600);line-height:1.7">
-        Delete employee <strong>${esc(name)}</strong>?<br/>
-        This removes both the Firebase Authentication account and the Realtime Database profile.
+        ${t.deleteModal.description(`<strong>${esc(name)}</strong>`)}
       </p>
     `,
     actions: [
-      { label: "Cancel", variant: "secondary", onClick: () => modal.close() },
+      { label: TEXT.common.cancel, variant: "secondary", onClick: () => modal.close() },
       {
-        label: "Delete",
+        label: TEXT.common.delete,
         variant: "danger",
         onClick: async () => {
-          modal.setLoading("Delete", true);
+          modal.setLoading(TEXT.common.delete, true);
           try {
             await deleteEmployeeAccount({ uid });
-            toast.success("Employee account deleted.");
+            toast.success(t.deleteModal.success);
             modal.close();
             await loadData();
           } catch (err) {
             console.error("[employees] delete failed", err);
-            toast.error(err?.message ?? "Failed to delete employee.");
-            modal.setLoading("Delete", false);
+            toast.error(err?.message ?? t.deleteModal.failed);
+            modal.setLoading(TEXT.common.delete, false);
           }
         },
       },
@@ -455,10 +457,10 @@ function normalizeUploadRow(sourceRow, index, defaultBranchId) {
   const branch = resolveBranch(branchInput, defaultBranchId);
 
   if (!empNo) {
-    return { rowNumber: index + 2, valid: false, error: "Missing employee number." };
+      return { rowNumber: index + 2, valid: false, error: t.uploadModal.missingEmpNo };
   }
   if (!name) {
-    return { rowNumber: index + 2, empNo, valid: false, error: "Missing employee name." };
+    return { rowNumber: index + 2, empNo, valid: false, error: t.uploadModal.missingName };
   }
   if (!branch) {
     return {
@@ -467,7 +469,7 @@ function normalizeUploadRow(sourceRow, index, defaultBranchId) {
       name,
       branchInput,
       valid: false,
-      error: "Branch could not be matched.",
+      error: t.uploadModal.branchNotMatched,
     };
   }
 
@@ -504,12 +506,12 @@ function resolveBranch(branchInput, defaultBranchId) {
 async function downloadTemplate() {
   const XLSX = await import("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm");
   const rows = [
-    { "employee number": "100001", name: "Hong Gil Dong", branch: "PUS", position: "Staff" },
-    { "employee number": "100002", name: "Kim Chul Soo", branch: "TAE", position: "Senior Staff" },
+    { "employee number": "100001", name: "홍길동", branch: "PUS", position: "사원" },
+    { "employee number": "100002", name: "김철수", branch: "TAE", position: "주임" },
   ];
   const worksheet = XLSX.utils.json_to_sheet(rows);
   const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, "Employees");
+  XLSX.utils.book_append_sheet(workbook, worksheet, "직원목록");
   XLSX.writeFile(workbook, "employee-upload-template.xlsx");
 }
 
@@ -532,7 +534,7 @@ function inlineStat(label, value) {
 }
 
 function branchLabel(branch) {
-  return branch.code ? `${branch.code} - ${branch.name}` : (branch.name ?? branch.id);
+  return branch.code ? `${branch.code}${t.branchLabelSeparator}${branch.name}` : (branch.name ?? branch.id);
 }
 
 function readField(row, keys) {

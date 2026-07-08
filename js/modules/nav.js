@@ -1,76 +1,77 @@
 import { authStore, ROLES } from "../core/auth.js";
+import { TEXT } from "../constants/text.js";
 import { router } from "../core/router.js";
 
 const NAV_CONFIG = {
   [ROLES.SUPER_ADMIN]: [
     {
-      group: "System",
+      group: TEXT.nav.groups.system,
       items: [
-        { path: "dashboard", label: "Dashboard", icon: iconGrid() },
-        { path: "admin/companies", label: "Companies", icon: iconBuilding() },
-        { path: "admin/branches", label: "Branches", icon: iconMapPin() },
-        { path: "admin/accounts", label: "Accounts", icon: iconUsers() },
-        { path: "admin/employees", label: "Employees", icon: iconUserPlus() },
-        { path: "admin/settings", label: "Settings", icon: iconSettings() },
+        { path: "dashboard", label: TEXT.routes.dashboard, icon: iconGrid() },
+        { path: "admin/companies", label: TEXT.routes.companies, icon: iconBuilding() },
+        { path: "admin/branches", label: TEXT.routes.branches, icon: iconMapPin() },
+        { path: "admin/accounts", label: TEXT.routes.accounts, icon: iconUsers() },
+        { path: "admin/employees", label: TEXT.routes.adminEmployees, icon: iconUserPlus() },
+        { path: "admin/settings", label: TEXT.routes.adminSettings, icon: iconSettings() },
       ],
     },
   ],
   [ROLES.HQ_ADMIN]: [
     {
-      group: "Operations",
+      group: TEXT.nav.groups.operations,
       items: [
-        { path: "dashboard", label: "Dashboard", icon: iconGrid() },
-        { path: "trainings", label: "Trainings", icon: iconBook() },
-        { path: "materials", label: "Materials", icon: iconFile() },
-        { path: "templates", label: "Templates", icon: iconLayers() },
+        { path: "dashboard", label: TEXT.routes.dashboard, icon: iconGrid() },
+        { path: "trainings", label: TEXT.routes.trainings, icon: iconBook() },
+        { path: "materials", label: TEXT.routes.materials, icon: iconFile() },
+        { path: "templates", label: TEXT.routes.templates, icon: iconLayers() },
       ],
     },
     {
-      group: "People",
+      group: TEXT.nav.groups.people,
       items: [
-        { path: "employees", label: "Employees", icon: iconUsers() },
-        { path: "statistics", label: "Statistics", icon: iconChart() },
+        { path: "employees", label: TEXT.routes.employees, icon: iconUsers() },
+        { path: "statistics", label: TEXT.routes.statistics, icon: iconChart() },
       ],
     },
     {
-      group: "Communication",
+      group: TEXT.nav.groups.communication,
       items: [
-        { path: "announcements", label: "Announcements", icon: iconBell() },
-        { path: "notification-settings", label: "Notifications", icon: iconSettings() },
+        { path: "announcements", label: TEXT.routes.announcements, icon: iconBell() },
+        { path: "notification-settings", label: TEXT.routes.notificationSettings, icon: iconSettings() },
       ],
     },
   ],
   [ROLES.INSTRUCTOR]: [
     {
-      group: "Teaching",
+      group: TEXT.nav.groups.teaching,
       items: [
-        { path: "dashboard", label: "Dashboard", icon: iconGrid() },
-        { path: "my-trainings", label: "Assigned Trainings", icon: iconBook() },
-        { path: "materials", label: "Materials", icon: iconFile() },
-        { path: "lesson-plan", label: "Lesson Plan", icon: iconPencil() },
-        { path: "slideshow", label: "Slideshow", icon: iconPlay() },
+        { path: "dashboard", label: TEXT.routes.dashboard, icon: iconGrid() },
+        { path: "my-trainings", label: TEXT.nav.assignedTrainings, icon: iconBook() },
+        { path: "materials", label: TEXT.routes.materials, icon: iconFile() },
+        { path: "lesson-plan", label: TEXT.routes.lessonPlan, icon: iconPencil() },
+        { path: "slideshow", label: TEXT.routes.slideshow, icon: iconPlay() },
       ],
     },
     {
-      group: "Info",
+      group: TEXT.nav.groups.info,
       items: [
-        { path: "announcements", label: "Announcements", icon: iconBell() },
+        { path: "announcements", label: TEXT.routes.announcements, icon: iconBell() },
       ],
     },
   ],
   [ROLES.EMPLOYEE]: [
     {
-      group: "Learning",
+      group: TEXT.nav.groups.learning,
       items: [
-        { path: "dashboard", label: "Dashboard", icon: iconGrid() },
-        { path: "my-trainings", label: "My Trainings", icon: iconBook() },
-        { path: "my-history", label: "History", icon: iconHistory() },
+        { path: "dashboard", label: TEXT.routes.dashboard, icon: iconGrid() },
+        { path: "my-trainings", label: TEXT.routes.myTrainings, icon: iconBook() },
+        { path: "my-history", label: TEXT.routes.myHistory, icon: iconHistory() },
       ],
     },
     {
-      group: "Info",
+      group: TEXT.nav.groups.info,
       items: [
-        { path: "announcements", label: "Announcements", icon: iconBell() },
+        { path: "announcements", label: TEXT.routes.announcements, icon: iconBell() },
       ],
     },
   ],

@@ -1,13 +1,7 @@
 import { authStore } from "../core/auth.js";
+import { TEXT } from "../constants/text.js";
 import { router } from "../core/router.js";
 import { toast } from "../utils/toast.js";
-
-const ROLE_LABELS = {
-  super_admin: "Super Admin",
-  hq_admin: "HQ Admin",
-  instructor: "Instructor",
-  employee: "Employee",
-};
 
 export function initTopbar() {
   const profile = authStore.profile;
@@ -17,13 +11,16 @@ export function initTopbar() {
   setElement("nav-avatar", authStore.initials);
   setElement("topbar-avatar", authStore.initials);
   setElement("profile-name", profile.name);
-  setElement("profile-meta", `${profile.branchName ?? "Headquarters"} / ${roleLabel(profile.role)}`);
-  setElement("btn-my-profile", "My Profile");
-  setElement("btn-change-password", "Change Password");
-  setElement("btn-logout2", "Logout");
+  setElement(
+    "profile-meta",
+    `${profile.branchName ?? TEXT.roles.headquarters}${TEXT.topbar.profileMetaSeparator}${roleLabel(profile.role)}`
+  );
+  setElement("btn-my-profile", TEXT.common.myProfile);
+  setElement("btn-change-password", TEXT.common.changePassword);
+  setElement("btn-logout2", TEXT.common.logout);
 
   const sidebarLogoutLabel = document.querySelector("#btn-logout span");
-  if (sidebarLogoutLabel) sidebarLogoutLabel.textContent = "Logout";
+  if (sidebarLogoutLabel) sidebarLogoutLabel.textContent = TEXT.common.logout;
 
   applyProfileMenuPolicy();
 
@@ -56,14 +53,14 @@ export function initTopbar() {
 export function setPageTitle(title) {
   const el = document.getElementById("page-title");
   if (el) el.textContent = title;
-  document.title = `${title} | TAS Learning Hub`;
+  document.title = `${title} | ${TEXT.topbar.titleSuffix}`;
 }
 
 export function setBreadcrumb(title) {
   const el = document.getElementById("breadcrumb");
   if (!el) return;
   el.innerHTML = `
-    <span class="breadcrumb__item">Home</span>
+    <span class="breadcrumb__item">${TEXT.common.home}</span>
     <span class="breadcrumb__sep">/</span>
     <span class="breadcrumb__item">${title}</span>
   `;
@@ -105,10 +102,10 @@ async function handleLogout() {
     window.location.reload();
   } catch (err) {
     console.error("[topbar] logout failed", err);
-    toast.error("Logout failed.");
+    toast.error(TEXT.topbar.logoutFailed);
   }
 }
 
 function roleLabel(role) {
-  return ROLE_LABELS[role] ?? role ?? "";
+  return TEXT.roles[role] ?? role ?? "";
 }
