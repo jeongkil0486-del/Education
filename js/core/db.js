@@ -1,5 +1,5 @@
 /**
- * TAS WT — Database Service
+ * TAS Learning Hub — Database Service
  * Centralised Firebase Realtime Database operations.
  * All CRUD for every collection lives here.
  * Views/modules should NOT import firebase-database directly.

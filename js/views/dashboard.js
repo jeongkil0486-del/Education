@@ -1,5 +1,5 @@
 /**
- * TAS WT — Dashboard View
+ * TAS Learning Hub — Dashboard View
  * Renders different dashboards based on role.
  */
 

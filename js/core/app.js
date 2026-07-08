@@ -1,5 +1,5 @@
 /**
- * TAS WT — App Bootstrap
+ * TAS Learning Hub — App Bootstrap
  * Entry point: listens to Firebase auth state, routes to correct view.
  */
 

@@ -1,5 +1,5 @@
 /**
- * TAS WT — Topbar Module
+ * TAS Learning Hub — Topbar Module
  * Page title, breadcrumb, profile dropdown, logout.
  */
 
@@ -51,7 +51,7 @@ export function initTopbar() {
 
 export function setPageTitle(title) {
   document.getElementById("page-title").textContent = title;
-  document.title = `${title} — TAS WT`;
+  document.title = `${title} — TAS Learning Hub`;
 }
 
 export function setBreadcrumb(title) {

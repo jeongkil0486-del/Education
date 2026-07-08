@@ -1,5 +1,5 @@
 /**
- * TAS WT — Notifications Module
+ * TAS Learning Hub — Notifications Module
  * - Bell icon with unread count
  * - Notification dropdown panel
  * - Alert banner for employees (overdue / expiring soon)

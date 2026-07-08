@@ -1,5 +1,5 @@
 /**
- * TAS WT — Login View
+ * TAS Learning Hub — Login View
  */
 
 import { authStore } from "../core/auth.js";
@@ -11,8 +11,8 @@ export function showLogin(container) {
       <div class="login-panel__logo">
         <div class="login-panel__logo-mark">TAS</div>
         <div class="login-panel__logo-text">
-          <div class="login-panel__logo-name">TAS WT</div>
-          <div class="login-panel__logo-sub">Web Training Platform</div>
+          <div class="login-panel__logo-name">TAS Learning Hub</div>
+          <div class="login-panel__logo-sub">Training Management Platform</div>
         </div>
       </div>
 
@@ -21,17 +21,17 @@ export function showLogin(container) {
 
       <div class="login-form" id="login-form">
         <div class="form-group">
-          <label class="form-label form-label--required" for="login-email">이메일</label>
+          <label class="form-label form-label--required" for="login-empno">사번</label>
           <div class="input-group">
             <svg class="input-group__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
               <path d="M14 4H2a1 1 0 00-1 1v7a1 1 0 001 1h12a1 1 0 001-1V5a1 1 0 00-1-1zM1 5l7 5 7-5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
             </svg>
             <input
               class="form-control"
-              type="email"
-              id="login-email"
-              placeholder="name@company.com"
-              autocomplete="email"
+              type="text"
+              id="login-empno"
+              placeholder="사번을 입력하세요"
+              autocomplete="username"
               required
             />
           </div>
@@ -89,7 +89,7 @@ export function showLogin(container) {
       </div>
 
       <div class="login-panel__footer">
-        TAS Web Training &copy; ${new Date().getFullYear()} — v1.0
+        TAS Learning Hub &copy; ${new Date().getFullYear()} — v1.0
       </div>
     </div>
 
@@ -97,7 +97,7 @@ export function showLogin(container) {
       <div class="login-art__grid"></div>
       <h2 class="login-art__headline">
         효율적인 교육 관리,<br />
-        <span>TAS Web Training</span>
+        <span>TAS Learning Hub</span>
       </h2>
       <p class="login-art__sub">
         교육자료 업로드부터 수료 관리, 전자서명, 통계까지<br />
@@ -148,14 +148,14 @@ export function showLogin(container) {
 }
 
 async function attemptLogin(container) {
-  const email    = document.getElementById("login-email")?.value?.trim();
+  const empNo    = document.getElementById("login-empno")?.value?.trim();
   const password = document.getElementById("login-password")?.value;
   const errorEl  = document.getElementById("login-error");
   const errorTxt = document.getElementById("login-error-text");
   const btn      = document.getElementById("btn-login");
 
-  if (!email || !password) {
-    showError("이메일과 비밀번호를 입력하세요.", errorEl, errorTxt);
+  if (!empNo || !password) {
+    showError("사번과 비밀번호를 입력하세요.", errorEl, errorTxt);
     return;
   }
 
@@ -164,7 +164,7 @@ async function attemptLogin(container) {
   errorEl?.classList.add("hidden");
 
   try {
-    await authStore.signIn(email, password);
+    await authStore.signInWithEmpNo(empNo, password);
     // onAuthStateChanged in app.js takes over and renders the app
   } catch (err) {
     btn.classList.remove("btn--loading");
@@ -184,12 +184,12 @@ function showError(msg, errorEl, errorTxt) {
 
 function friendlyError(code) {
   const map = {
-    "auth/user-not-found":      "등록되지 않은 이메일입니다.",
+    "auth/user-not-found":      "등록되지 않은 사번입니다.",
     "auth/wrong-password":      "비밀번호가 올바르지 않습니다.",
-    "auth/invalid-email":       "이메일 형식이 올바르지 않습니다.",
+    "auth/invalid-email":       "사번 형식이 올바르지 않습니다.",
     "auth/too-many-requests":   "로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요.",
     "auth/user-disabled":       "비활성화된 계정입니다. 관리자에게 문의하세요.",
-    "auth/invalid-credential":  "이메일 또는 비밀번호가 올바르지 않습니다.",
+    "auth/invalid-credential":  "사번 또는 비밀번호가 올바르지 않습니다.",
   };
   return map[code] ?? "로그인 중 오류가 발생했습니다. 다시 시도하세요.";
 }

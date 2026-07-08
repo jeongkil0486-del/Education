@@ -1,5 +1,5 @@
 /**
- * TAS WT — Navigation Module
+ * TAS Learning Hub — Navigation Module
  * Renders role-based sidebar nav and handles active state.
  */
 

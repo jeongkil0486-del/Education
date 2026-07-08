@@ -1,5 +1,5 @@
 /**
- * TAS WT — Toast Utility
+ * TAS Learning Hub — Toast Utility
  * Lightweight, auto-dismissing notification toasts.
  */
 

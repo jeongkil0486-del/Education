@@ -1,5 +1,5 @@
 /**
- * TAS WT — Trainings View (HQ Admin)
+ * TAS Learning Hub — Trainings View (HQ Admin)
  * List, create, edit, delete trainings.
  * Each training can be assigned to users and tracked.
  */

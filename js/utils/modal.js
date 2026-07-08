@@ -1,5 +1,5 @@
 /**
- * TAS WT — Modal Utility
+ * TAS Learning Hub — Modal Utility
  * Programmatic modal open/close with callback support.
  */
 

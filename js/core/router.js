@@ -1,5 +1,5 @@
 /**
- * TAS WT — Router
+ * TAS Learning Hub — Router
  * Hash-based SPA router with role-based guards.
  *
  * URL pattern: /#/{view}/{...params}

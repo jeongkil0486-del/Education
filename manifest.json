@@ -1,6 +1,6 @@
 {
-  "name": "TAS Web Training",
-  "short_name": "TAS WT",
+  "name": "TAS Learning Hub",
+  "short_name": "TAS Hub",
   "description": "기업 교육 관리 플랫폼",
   "start_url": "/",
   "display": "standalone",

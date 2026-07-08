@@ -1,5 +1,5 @@
 /**
- * TAS WT — Date Utilities
+ * TAS Learning Hub — Date Utilities
  */
 
 const KO_LOCALE = "ko-KR";
