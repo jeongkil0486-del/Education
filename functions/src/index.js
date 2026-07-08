@@ -110,6 +110,94 @@ exports.createEmployeeAccounts = onCall(async (request) => {
   };
 });
 
+exports.createManagedAccount = onCall(async (request) => {
+  ensureAuthenticated(request);
+  await ensureSuperAdmin(request.auth.uid);
+
+  const role = normalizeText(request.data?.role);
+  const name = normalizeText(request.data?.name);
+  const empNo = normalizeEmpNo(request.data?.empNo).toLowerCase();
+  const password = String(request.data?.password ?? "").trim();
+
+  if (!["hq_admin", "instructor"].includes(role)) {
+    throw new HttpsError("invalid-argument", "생성할 계정 권한이 올바르지 않습니다.");
+  }
+
+  if (!name || !empNo || !password) {
+    throw new HttpsError("invalid-argument", "이름, 사번, 임시 비밀번호를 모두 입력해 주세요.");
+  }
+
+  if (password.length < 6) {
+    throw new HttpsError("invalid-argument", "임시 비밀번호는 6자 이상이어야 합니다.");
+  }
+
+  const email = `${empNo}@${EMAIL_DOMAIN}`;
+
+  try {
+    const existingUser = await getAuthUserByEmail(email);
+
+    if (existingUser) {
+      const existingProfile = await db.ref(`users/${existingUser.uid}`).get();
+      if (existingProfile.exists()) {
+        const profile = existingProfile.val();
+        if (profile.role === role) {
+          throw new HttpsError("already-exists", "이미 등록된 계정입니다.");
+        }
+        throw new HttpsError("failed-precondition", "동일한 사번의 계정이 다른 권한으로 이미 존재합니다.");
+      }
+
+      await auth.updateUser(existingUser.uid, {
+        password,
+        displayName: name,
+        disabled: false,
+      });
+
+      await saveManagedProfile(existingUser.uid, {
+        empNo,
+        name,
+        email,
+        role,
+      });
+
+      return {
+        uid: existingUser.uid,
+        empNo,
+        role,
+        email,
+        message: "인증 계정과 사용자 프로필을 연결했습니다.",
+      };
+    }
+
+    const authUser = await auth.createUser({
+      email,
+      password,
+      displayName: name,
+      disabled: false,
+    });
+
+    await saveManagedProfile(authUser.uid, {
+      empNo,
+      name,
+      email,
+      role,
+    });
+
+    return {
+      uid: authUser.uid,
+      empNo,
+      role,
+      email,
+      message: "생성 완료",
+    };
+  } catch (error) {
+    if (error instanceof HttpsError) {
+      throw error;
+    }
+    logger.error("createManagedAccount failed", { role, empNo, error });
+    throw new HttpsError("internal", simplifyError(error));
+  }
+});
+
 exports.deleteEmployeeAccount = onCall(async (request) => {
   ensureAuthenticated(request);
   await ensureSuperAdmin(request.auth.uid);
@@ -212,6 +300,23 @@ async function saveEmployeeProfile(uid, payload) {
     branchName: payload.branch.name ?? "",
     companyId: payload.branch.companyId ?? null,
     companyName: payload.branch.companyName ?? "",
+    active: true,
+    createdAt: admin.database.ServerValue.TIMESTAMP,
+  });
+}
+
+async function saveManagedProfile(uid, payload) {
+  await db.ref(`users/${uid}`).set({
+    empNo: payload.empNo,
+    name: payload.name,
+    email: payload.email,
+    role: payload.role,
+    position: payload.position ?? "",
+    branchId: payload.branchId ?? "",
+    branchCode: payload.branchCode ?? "",
+    branchName: payload.branchName ?? "",
+    companyId: payload.companyId ?? null,
+    companyName: payload.companyName ?? "",
     active: true,
     createdAt: admin.database.ServerValue.TIMESTAMP,
   });
