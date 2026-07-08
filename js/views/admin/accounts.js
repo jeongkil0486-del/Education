@@ -6,9 +6,10 @@
  * 직원 계정은 별도 직원 관리 화면에서 처리.
  */
 
-import { usersDB }    from "../../core/db.js";
-import { modal }      from "../../utils/modal.js";
-import { toast }      from "../../utils/toast.js";
+import { usersDB } from "../../core/db.js";
+import { deleteManagedAccount } from "../../core/admin-api.js";
+import { modal } from "../../utils/modal.js";
+import { toast } from "../../utils/toast.js";
 import { formatDate } from "../../utils/date.js";
 
 const ROLE_LABELS = {
@@ -136,7 +137,7 @@ function renderTable(list) {
                 <span style="font-weight:var(--weight-medium);color:var(--gray-800)">${esc(u.name)}</span>
               </div>
             </td>
-            <td class="cell--mono">${esc(u.empNo ?? u.uid?.slice(0, 8) ?? "–")}</td>
+            <td class="cell--mono">${esc(u.empNo || accountKey(u).slice(0, 8) || "–")}</td>
             <td><span class="chip chip--${roleChipVariant(u.role)}">${ROLE_LABELS[u.role] ?? u.role}</span></td>
             <td>${esc(u.branchName ?? "–")}</td>
             <td>
@@ -148,15 +149,15 @@ function renderTable(list) {
             <td class="cell--actions">
               <div style="display:flex;gap:4px;justify-content:flex-end">
                 <button class="btn btn--ghost btn--sm btn-role"
-                  data-id="${u.uid}" data-role="${u.role}" title="권한 변경">
+                  data-id="${accountKey(u)}" data-role="${u.role}" title="권한 변경">
                   권한
                 </button>
                 <button class="btn btn--ghost btn--sm btn-reset-pw"
-                  data-id="${u.uid}" title="비밀번호 초기화">
+                  data-id="${accountKey(u)}" title="비밀번호 초기화">
                   PW
                 </button>
                 <button class="btn btn--ghost btn--sm btn-delete"
-                  data-id="${u.uid}" data-name="${esc(u.name)}"
+                  data-id="${accountKey(u)}" data-name="${esc(u.name)}"
                   title="계정 삭제" style="color:var(--color-danger)">
                   <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                     <path d="M2 3h10M5 3V2h4v1M4 3v8a1 1 0 001 1h4a1 1 0 001-1V3"
@@ -302,14 +303,14 @@ function confirmDelete(uid, name) {
     size: "sm",
     body: `<p style="font-size:var(--text-sm);color:var(--gray-600)">
       <strong>"${esc(name)}"</strong> 계정을 삭제하시겠습니까?<br/>
-      Firebase Authentication 계정은 Console에서 별도로 삭제하세요.
+      Firebase Authentication 계정과 Realtime Database 프로필이 함께 삭제됩니다.
     </p>`,
     actions: [
       { label: "취소", variant: "secondary", onClick: () => modal.close() },
       { label: "삭제", variant: "danger", onClick: async () => {
         modal.setLoading("삭제", true);
         try {
-          await usersDB.delete(uid);
+          await deleteManagedAccount({ uid });
           toast.success("삭제되었습니다.");
           modal.close();
           await loadList();
@@ -333,4 +334,8 @@ function esc(str) {
   return String(str ?? "")
     .replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function accountKey(user) {
+  return user?.id ?? user?.uid ?? "";
 }

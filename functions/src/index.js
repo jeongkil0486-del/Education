@@ -129,6 +129,45 @@ exports.deleteEmployeeAccount = onCall(async (request) => {
     throw new HttpsError("failed-precondition", "직원 계정만 삭제할 수 있습니다.");
   }
 
+  await deleteAuthAndProfile(uid);
+
+  return {
+    uid,
+    empNo: profile.empNo ?? "",
+    message: "삭제 완료",
+  };
+});
+
+exports.deleteManagedAccount = onCall(async (request) => {
+  ensureAuthenticated(request);
+  await ensureSuperAdmin(request.auth.uid);
+
+  const uid = normalizeText(request.data?.uid);
+  if (!uid) {
+    throw new HttpsError("invalid-argument", "삭제할 계정 UID가 필요합니다.");
+  }
+
+  const userSnap = await db.ref(`users/${uid}`).get();
+  if (!userSnap.exists()) {
+    throw new HttpsError("not-found", "계정 정보를 찾을 수 없습니다.");
+  }
+
+  const profile = userSnap.val();
+  if (!["employee", "hq_admin", "instructor"].includes(profile.role)) {
+    throw new HttpsError("failed-precondition", "삭제할 수 없는 계정입니다.");
+  }
+
+  await deleteAuthAndProfile(uid);
+
+  return {
+    uid,
+    empNo: profile.empNo ?? "",
+    role: profile.role ?? "",
+    message: "삭제 완료",
+  };
+});
+
+async function deleteAuthAndProfile(uid) {
   try {
     await auth.deleteUser(uid);
   } catch (error) {
@@ -138,13 +177,7 @@ exports.deleteEmployeeAccount = onCall(async (request) => {
   }
 
   await db.ref(`users/${uid}`).remove();
-
-  return {
-    uid,
-    empNo: profile.empNo ?? "",
-    message: "삭제 완료",
-  };
-});
+}
 
 function ensureAuthenticated(request) {
   if (!request.auth?.uid) {

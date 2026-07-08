@@ -82,7 +82,6 @@ export function initNav() {
   router.onChange((path) => setActiveItem(path));
 
   document.getElementById("sidebar-toggle")?.addEventListener("click", toggleSidebar);
-  document.getElementById("sidebar-toggle-collapsed")?.addEventListener("click", toggleSidebar);
   document.getElementById("mobile-menu-btn")?.addEventListener("click", openMobileSidebar);
   syncSidebarToggleState();
 
@@ -151,7 +150,6 @@ function syncSidebarToggleState() {
   const ariaLabel = collapsed ? "사이드바 펼치기" : "사이드바 접기";
 
   document.getElementById("sidebar-toggle")?.setAttribute("aria-label", ariaLabel);
-  document.getElementById("sidebar-toggle-collapsed")?.setAttribute("aria-label", ariaLabel);
 }
 
 function svg(d, opts = "") {
