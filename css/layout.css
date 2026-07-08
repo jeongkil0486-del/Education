@@ -6,7 +6,7 @@
 /* ── App Shell ─────────────────────────────────────────── */
 .app-shell {
   display: grid;
-  grid-template-columns: var(--sidebar-width) 1fr;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   grid-template-rows: 1fr;
   height: 100dvh;
   overflow: hidden;
@@ -14,7 +14,7 @@
 }
 
 .app-shell.sidebar--collapsed {
-  grid-template-columns: var(--sidebar-width-collapsed) 1fr;
+  grid-template-columns: var(--sidebar-width-collapsed) minmax(0, 1fr);
 }
 
 /* ── Sidebar ───────────────────────────────────────────── */
@@ -29,6 +29,10 @@
   transition: width var(--duration-normal) var(--ease-default);
   width: var(--sidebar-width);
   flex-shrink: 0;
+}
+
+.sidebar.sidebar--collapsed {
+  width: var(--sidebar-width-collapsed);
 }
 
 .sidebar--collapsed .sidebar__brand-label,
@@ -95,6 +99,38 @@
 
 .sidebar__toggle:hover { color: var(--gray-200); }
 .sidebar--collapsed .sidebar__toggle { transform: rotate(180deg); }
+
+.sidebar.sidebar--collapsed .sidebar__header,
+.sidebar.sidebar--collapsed .sidebar__user,
+.sidebar.sidebar--collapsed .sidebar__footer {
+  padding-left: var(--space-2);
+  padding-right: var(--space-2);
+}
+
+.sidebar.sidebar--collapsed .sidebar__header,
+.sidebar.sidebar--collapsed .sidebar__user,
+.sidebar.sidebar--collapsed .sidebar__footer,
+.sidebar.sidebar--collapsed .nav-item {
+  justify-content: center;
+}
+
+.sidebar.sidebar--collapsed .sidebar__brand {
+  justify-content: center;
+  width: 100%;
+}
+
+.sidebar.sidebar--collapsed .sidebar__toggle {
+  display: none;
+}
+
+.sidebar.sidebar--collapsed .sidebar__user {
+  gap: 0;
+}
+
+.sidebar.sidebar--collapsed .nav-item {
+  padding-left: 0;
+  padding-right: 0;
+}
 
 /* Sidebar user */
 .sidebar__user {
@@ -219,6 +255,7 @@
 .main-area {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   overflow: hidden;
   background: var(--gray-50);
 }
@@ -501,6 +538,10 @@
     grid-template-columns: 1fr;
   }
 
+  .app-shell.sidebar--collapsed {
+    grid-template-columns: 1fr;
+  }
+
   .sidebar {
     position: fixed;
     top: 0;
@@ -511,9 +552,17 @@
     transition: transform var(--duration-normal) var(--ease-default);
   }
 
+  .sidebar.sidebar--collapsed {
+    width: var(--sidebar-width);
+  }
+
   .sidebar.mobile--open {
     transform: translateX(0);
     box-shadow: var(--shadow-xl);
+  }
+
+  .sidebar.sidebar--collapsed .sidebar__toggle {
+    display: flex;
   }
 
   .topbar__menu-btn { display: flex; }

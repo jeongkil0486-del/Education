@@ -105,6 +105,8 @@ async function renderSuperAdminDashboard(container) {
     el.addEventListener("click", () => router.push(el.dataset.path))
   );
 
+  configureSuperAdminDashboard(container);
+
   // DB 카운트 비동기 반영 — Permission denied여도 화면 안 죽음
   const [companies, branches, users] = await Promise.all([
     safeLoad(() => companiesDB.list(),   []),
@@ -112,12 +114,17 @@ async function renderSuperAdminDashboard(container) {
     safeLoad(() => usersDB.listAll(),    []),
   ]);
 
-  const admins = users.filter(u => u.role === "hq_admin" || u.role === "instructor");
+  void companies;
+  const activeUsers = users.filter(user => user?.active !== false);
+  const employeeUsers = activeUsers.filter(user => user?.role === "employee");
+  const hqAdmins = activeUsers.filter(user => user?.role === "hq_admin");
+  const instructors = activeUsers.filter(user => user?.role === "instructor");
 
-  setStatValue("sc-companies", companies.length);
-  setStatValue("sc-branches",  branches.length);
-  setStatValue("sc-admins",    admins.length);
-  setStatValue("sc-users",     users.length);
+  setStatValue("sc-users", activeUsers.length);
+  setStatValue("sc-employees", employeeUsers.length);
+  setStatValue("sc-hq-admins", hqAdmins.length);
+  setStatValue("sc-instructors", instructors.length);
+  setInfoValue("sc-branches-count", branches.length);
 }
 
 /** stat 카드 값만 교체 */
@@ -128,6 +135,69 @@ function setStatValue(cardId, value) {
   if (el) el.textContent = value;
 }
 
+function configureSuperAdminDashboard(container) {
+  const dashboardCards = Array.from(container.querySelectorAll(".dashboard-grid .stat-card"));
+  if (dashboardCards.length >= 4) {
+    updateStatCard(dashboardCards[0], {
+      id: "sc-users",
+      label: "전체 사용자",
+      icon: iconUsers(),
+      iconClass: "stat-card__icon stat-card__icon--neutral",
+    });
+    updateStatCard(dashboardCards[1], {
+      id: "sc-employees",
+      label: "직원",
+      icon: iconUsers(),
+      iconClass: "stat-card__icon stat-card__icon--primary",
+    });
+    updateStatCard(dashboardCards[2], {
+      id: "sc-hq-admins",
+      label: "본사 교육관리자",
+      icon: iconShield(),
+      iconClass: "stat-card__icon stat-card__icon--warning",
+    });
+    updateStatCard(dashboardCards[3], {
+      id: "sc-instructors",
+      label: "강사",
+      icon: iconUserTie(),
+      iconClass: "stat-card__icon stat-card__icon--info",
+    });
+  }
+
+  const infoCardBody = container.querySelector(".dashboard-main .card:last-child .card__body");
+  if (infoCardBody && !infoCardBody.querySelector("#sc-branches-count")) {
+    const branchRow = document.createElement("div");
+    branchRow.className = "info-row";
+    branchRow.innerHTML = `
+      <span class="info-row__label">지점 수</span>
+      <span class="info-row__value" id="sc-branches-count">0</span>
+    `;
+    infoCardBody.prepend(branchRow);
+  }
+}
+
+function updateStatCard(card, { id, label, icon, iconClass }) {
+  if (!card) return;
+  card.id = id;
+
+  const iconElement = card.querySelector(".stat-card__icon");
+  if (iconElement) {
+    iconElement.className = iconClass;
+    iconElement.innerHTML = icon;
+  }
+
+  const labelElement = card.querySelector(".stat-card__label");
+  if (labelElement) labelElement.textContent = label;
+
+  const valueElement = card.querySelector(".stat-card__value");
+  if (valueElement) valueElement.textContent = "0";
+}
+
+function setInfoValue(elementId, value) {
+  const element = document.getElementById(elementId);
+  if (element) element.textContent = value;
+}
+
 function quickBtn(path, icon, label) {
   return `
     <div class="training-card" data-path="${path}"
@@ -136,6 +206,16 @@ function quickBtn(path, icon, label) {
         style="position:static;width:36px;height:36px;flex-shrink:0">${icon}</div>
       <span style="font-size:var(--text-sm);font-weight:var(--weight-medium);color:var(--gray-700)">${label}</span>
     </div>
+  `;
+}
+
+function iconUserTie() {
+  return `
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M12 12C14.4853 12 16.5 9.98528 16.5 7.5C16.5 5.01472 14.4853 3 12 3C9.51472 3 7.5 5.01472 7.5 7.5C7.5 9.98528 9.51472 12 12 12Z" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M5 20.25C5.97888 17.1798 8.66155 15 12 15C15.3384 15 18.0211 17.1798 19 20.25" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M11 12.75H13L12.4 15.5L13.75 19H10.25L11.6 15.5L11 12.75Z" fill="currentColor"/>
+    </svg>
   `;
 }
 
