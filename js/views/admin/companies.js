@@ -3,10 +3,10 @@
  * js/views/admin/companies.js
  */
 
-import { companiesDB } from "../../../core/db.js";
-import { modal }       from "../../../utils/modal.js";
-import { toast }       from "../../../utils/toast.js";
-import { formatDate }  from "../../../utils/date.js";
+import { companiesDB } from "../../core/db.js";
+import { modal }       from "../../utils/modal.js";
+import { toast }       from "../../utils/toast.js";
+import { formatDate }  from "../../utils/date.js";
 
 export async function render(container) {
   container.innerHTML = `

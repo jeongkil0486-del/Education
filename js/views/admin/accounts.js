@@ -6,10 +6,10 @@
  * 직원 계정은 별도 직원 관리 화면에서 처리.
  */
 
-import { usersDB }    from "../../../core/db.js";
-import { modal }      from "../../../utils/modal.js";
-import { toast }      from "../../../utils/toast.js";
-import { formatDate } from "../../../utils/date.js";
+import { usersDB }    from "../../core/db.js";
+import { modal }      from "../../utils/modal.js";
+import { toast }      from "../../utils/toast.js";
+import { formatDate } from "../../utils/date.js";
 
 const ROLE_LABELS = {
   super_admin: "슈퍼관리자",

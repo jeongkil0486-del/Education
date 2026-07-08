@@ -3,7 +3,7 @@
  * js/views/admin/settings.js
  */
 
-import { toast } from "../../../utils/toast.js";
+import { toast } from "../../utils/toast.js";
 
 export async function render(container) {
   container.innerHTML = `
