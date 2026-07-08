@@ -1,6 +1,10 @@
 /**
  * TAS WT — 지점 관리 (슈퍼관리자 전용)
  * js/views/admin/branches.js
+ *
+ * 저장: branchesDB.create(data)  → /branches/{pushId}  (companyId 필드 포함)
+ * 조회: branchesDB.listAll()     → /branches 전체
+ * 필터: branchesDB.list(companyId) → companyId 기준
  */
 
 import { branchesDB, companiesDB } from "../../core/db.js";
@@ -23,11 +27,17 @@ export async function render(container) {
       </button>
     </div>
 
-    <!-- 회사 필터 -->
     <div class="filter-bar">
       <select class="form-control" id="filter-company" style="max-width:240px">
         <option value="">전체 회사</option>
       </select>
+      <div class="input-group" style="flex:1;max-width:280px">
+        <svg class="input-group__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.25"/>
+          <path d="M11 11l3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+        </svg>
+        <input class="form-control" type="search" id="search-branch" placeholder="지점명 검색…"/>
+      </div>
     </div>
 
     <div class="table-wrap" id="branch-table-wrap">
@@ -41,28 +51,35 @@ export async function render(container) {
   document.getElementById("btn-add-branch")
     ?.addEventListener("click", () => openForm());
   document.getElementById("filter-company")
-    ?.addEventListener("change", e => renderTable(e.target.value));
+    ?.addEventListener("change", () => applyFilter());
+  document.getElementById("search-branch")
+    ?.addEventListener("input", () => applyFilter());
 
   await loadData();
 }
 
+/* ── State ─────────────────────────────────────────────── */
 let _branches  = [];
 let _companies = [];
 
+/* ── Load ──────────────────────────────────────────────── */
 async function loadData() {
   try {
+    // 반드시 listAll() 사용 — list()는 companyId 필터 필요
     [_branches, _companies] = await Promise.all([
-      branchesDB.list().catch(() => []),
+      branchesDB.listAll().catch(() => []),
       companiesDB.list().catch(() => []),
     ]);
   } catch (err) {
-    console.warn("[branches] load failed:", err?.message);
+    console.warn("[branches] loadData failed:", err?.message);
     _branches = []; _companies = [];
   }
 
-  // 회사 필터 옵션 채우기
+  // 회사 필터 옵션 동기화
   const sel = document.getElementById("filter-company");
   if (sel) {
+    // 기존 옵션(전체 제외) 제거 후 재삽입
+    while (sel.options.length > 1) sel.remove(1);
     _companies.forEach(c => {
       const opt = document.createElement("option");
       opt.value = c.id;
@@ -71,16 +88,24 @@ async function loadData() {
     });
   }
 
-  renderTable();
+  applyFilter();
 }
 
-function renderTable(filterCompanyId = "") {
+/* ── Filter & Render ───────────────────────────────────── */
+function applyFilter() {
+  const companyId = document.getElementById("filter-company")?.value ?? "";
+  const query     = (document.getElementById("search-branch")?.value ?? "").toLowerCase();
+
+  let list = _branches;
+  if (companyId) list = list.filter(b => b.companyId === companyId);
+  if (query)     list = list.filter(b => (b.name ?? "").toLowerCase().includes(query));
+
+  renderTable(list);
+}
+
+function renderTable(list) {
   const wrap = document.getElementById("branch-table-wrap");
   if (!wrap) return;
-
-  const list = filterCompanyId
-    ? _branches.filter(b => b.companyId === filterCompanyId)
-    : _branches;
 
   if (!list.length) {
     wrap.innerHTML = `
@@ -100,8 +125,8 @@ function renderTable(filterCompanyId = "") {
           <th>지점명</th>
           <th>소속 회사</th>
           <th>지점코드</th>
+          <th>지점장</th>
           <th>연락처</th>
-          <th>주소</th>
           <th>등록일</th>
           <th style="width:80px"></th>
         </tr>
@@ -112,9 +137,8 @@ function renderTable(filterCompanyId = "") {
             <td style="font-weight:var(--weight-medium);color:var(--gray-800)">${esc(b.name)}</td>
             <td>${esc(companyMap[b.companyId] ?? "–")}</td>
             <td class="cell--mono">${esc(b.code ?? "–")}</td>
+            <td>${esc(b.managerName ?? "–")}</td>
             <td>${esc(b.phone ?? "–")}</td>
-            <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-              ${esc(b.address ?? "–")}</td>
             <td>${formatDate(b.createdAt)}</td>
             <td class="cell--actions">
               <div style="display:flex;gap:4px;justify-content:flex-end">
@@ -150,8 +174,15 @@ function renderTable(filterCompanyId = "") {
   );
 }
 
+/* ── Form ──────────────────────────────────────────────── */
 function openForm(item = null) {
   const isEdit = !!item;
+
+  if (!_companies.length) {
+    toast.warning("먼저 회사를 등록하세요.");
+    return;
+  }
+
   modal.open({
     title: isEdit ? "지점 수정" : "지점 등록",
     size: "md",
@@ -180,14 +211,14 @@ function openForm(item = null) {
         </div>
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label">연락처</label>
-            <input class="form-control" id="f-phone" type="text"
-              value="${esc(item?.phone ?? "")}" placeholder="02-0000-0000"/>
-          </div>
-          <div class="form-group">
             <label class="form-label">지점장</label>
             <input class="form-control" id="f-manager" type="text"
               value="${esc(item?.managerName ?? "")}"/>
+          </div>
+          <div class="form-group">
+            <label class="form-label">연락처</label>
+            <input class="form-control" id="f-phone" type="text"
+              value="${esc(item?.phone ?? "")}" placeholder="02-0000-0000"/>
           </div>
         </div>
         <div class="form-group">
@@ -208,17 +239,23 @@ async function submitForm(existingId) {
   const companyId   = document.getElementById("f-company")?.value;
   const name        = document.getElementById("f-name")?.value?.trim();
   const code        = document.getElementById("f-code")?.value?.trim();
-  const phone       = document.getElementById("f-phone")?.value?.trim();
   const managerName = document.getElementById("f-manager")?.value?.trim();
+  const phone       = document.getElementById("f-phone")?.value?.trim();
   const address     = document.getElementById("f-address")?.value?.trim();
 
   if (!companyId) { toast.error("소속 회사를 선택하세요."); return; }
   if (!name)      { toast.error("지점명을 입력하세요."); return; }
 
+  // 소속 회사명도 함께 저장 (목록에서 join 없이 표시하기 위해)
+  const company     = _companies.find(c => c.id === companyId);
+  const companyName = company?.name ?? "";
+
   const label = existingId ? "저장" : "등록";
   modal.setLoading(label, true);
+
   try {
-    const data = { companyId, name, code, phone, managerName, address };
+    const data = { companyId, companyName, name, code, managerName, phone, address };
+
     if (existingId) {
       await branchesDB.update(existingId, data);
       toast.success("수정되었습니다.");
@@ -226,11 +263,12 @@ async function submitForm(existingId) {
       await branchesDB.create(data);
       toast.success("등록되었습니다.");
     }
+
     modal.close();
-    await loadData();
+    await loadData();   // ← 저장 후 즉시 목록 갱신
   } catch (err) {
+    console.error("[branches] submitForm error:", err);
     toast.error("저장 중 오류가 발생했습니다.");
-    console.error(err);
     modal.setLoading(label, false);
   }
 }
@@ -251,8 +289,9 @@ function confirmDelete(id) {
           await branchesDB.delete(id);
           toast.success("삭제되었습니다.");
           modal.close();
-          await loadData();
-        } catch {
+          await loadData();   // ← 삭제 후 즉시 목록 갱신
+        } catch (err) {
+          console.error("[branches] delete error:", err);
           toast.error("삭제 중 오류가 발생했습니다.");
           modal.setLoading("삭제", false);
         }

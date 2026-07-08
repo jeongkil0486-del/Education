@@ -1,144 +1,142 @@
 /**
  * TAS WT — 시스템 설정 (슈퍼관리자 전용)
  * js/views/admin/settings.js
+ *
+ * 슈퍼관리자는 시스템 정보·환경·권한 구조만 조회.
+ * 알림 설정은 본사 교육관리자(HQ Admin) 메뉴에서 관리.
  */
-
-import { toast } from "../../utils/toast.js";
 
 export async function render(container) {
   container.innerHTML = `
     <div class="section-header">
       <div>
         <div class="section-title">시스템 설정</div>
-        <div class="section-subtitle">플랫폼 전역 설정을 관리합니다</div>
+        <div class="section-subtitle">플랫폼 환경 및 권한 구조 정보</div>
       </div>
     </div>
 
-    <!-- 섹션: 플랫폼 정보 -->
+    <!-- 플랫폼 정보 -->
     <div class="card" style="margin-bottom:var(--space-4)">
       <div class="card__header">
         <div class="card__title">플랫폼 정보</div>
       </div>
       <div class="card__body">
-        <div class="info-row">
-          <span class="info-row__label">시스템 명</span>
-          <span class="info-row__value">TAS Web Training</span>
-        </div>
-        <div class="info-row">
-          <span class="info-row__label">버전</span>
-          <span class="info-row__value">v1.0.0</span>
-        </div>
-        <div class="info-row">
-          <span class="info-row__label">인증 방식</span>
-          <span class="info-row__value">사번 로그인 (Firebase Authentication)</span>
-        </div>
-        <div class="info-row">
-          <span class="info-row__label">계정 도메인</span>
-          <span class="info-row__value" style="font-family:var(--font-mono)">@tas.local</span>
-        </div>
-        <div class="info-row">
-          <span class="info-row__label">DB</span>
-          <span class="info-row__value">Firebase Realtime Database</span>
-        </div>
-        <div class="info-row">
-          <span class="info-row__label">파일 저장소</span>
-          <span class="info-row__value">Cloudflare R2</span>
-        </div>
-        <div class="info-row">
-          <span class="info-row__label">배포</span>
-          <span class="info-row__value">Vercel</span>
-        </div>
+        ${row("시스템 명",    "TAS Web Training")}
+        ${row("버전",        "v1.0.0")}
+        ${row("인증 방식",   "사번 로그인 (Firebase Authentication)")}
+        ${row("계정 도메인", '<code style="font-family:var(--font-mono);font-size:var(--text-xs)">@tas.local</code>')}
+        ${row("데이터베이스", "Firebase Realtime Database")}
+        ${row("파일 저장소", "Cloudflare R2")}
+        ${row("배포",        "Vercel")}
       </div>
     </div>
 
-    <!-- 섹션: 알림 설정 -->
+    <!-- 권한 구조 -->
     <div class="card" style="margin-bottom:var(--space-4)">
       <div class="card__header">
-        <div class="card__title">알림 설정</div>
-        <div class="card__subtitle">수료기한 임박 알림 기준일을 설정합니다</div>
+        <div class="card__title">권한 구조</div>
+        <div class="card__subtitle">역할별 담당 기능 범위</div>
       </div>
-      <div class="card__body">
-        <div class="form-group" style="max-width:320px">
-          <label class="form-label">수료기한 임박 알림 (일 전)</label>
-          <input class="form-control" type="number" id="s-notify-days"
-            min="1" max="30" value="3"/>
-          <div class="form-hint">직원 로그인 시 남은 기간이 N일 이하이면 알림을 표시합니다.</div>
-        </div>
-        <div class="form-group" style="max-width:320px;margin-top:var(--space-4)">
-          <label class="form-label">기한 초과 알림 표시</label>
-          <label class="check-group">
-            <input type="checkbox" id="s-show-overdue" checked/>
-            <span class="check-group__label">기한 초과 시 배너 표시</span>
-          </label>
-        </div>
-      </div>
-      <div class="card__footer">
-        <button class="btn btn--primary btn--sm" id="btn-save-notify">저장</button>
+      <div class="card__body" style="padding:0">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>역할</th>
+              <th>코드</th>
+              <th>주요 권한</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="chip chip--danger">슈퍼관리자</span></td>
+              <td class="cell--mono">super_admin</td>
+              <td style="font-size:var(--text-xs);color:var(--gray-600)">
+                회사·지점 등록, 계정 생성·삭제, 권한 변경, 시스템 설정
+              </td>
+            </tr>
+            <tr>
+              <td><span class="chip chip--primary">본사 교육관리자</span></td>
+              <td class="cell--mono">hq_admin</td>
+              <td style="font-size:var(--text-xs);color:var(--gray-600)">
+                교육 생성·관리·통계, 교육자료 업로드, 직원 관리, 알림 설정
+              </td>
+            </tr>
+            <tr>
+              <td><span class="chip chip--info">강사</span></td>
+              <td class="cell--mono">instructor</td>
+              <td style="font-size:var(--text-xs);color:var(--gray-600)">
+                배정 교육 조회, 슬라이드쇼, 교안·큐카드 작성
+              </td>
+            </tr>
+            <tr>
+              <td><span class="chip chip--neutral">직원</span></td>
+              <td class="cell--mono">employee</td>
+              <td style="font-size:var(--text-xs);color:var(--gray-600)">
+                배정 교육 수료, 전자서명, 교육이력 조회
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
 
-    <!-- 섹션: 데이터 관리 -->
+    <!-- 개발 환경 -->
     <div class="card" style="margin-bottom:var(--space-4)">
-      <div class="card__header">
-        <div class="card__title">데이터 관리</div>
-        <div class="card__subtitle">주의: 아래 작업은 되돌릴 수 없습니다</div>
-      </div>
-      <div class="card__body" style="display:flex;flex-direction:column;gap:var(--space-4)">
-        <div style="display:flex;align-items:center;justify-content:space-between;
-          padding:var(--space-4);border:var(--border-thin);border-radius:var(--radius-md)">
-          <div>
-            <div style="font-size:var(--text-sm);font-weight:var(--weight-medium)">
-              전체 데이터 내보내기 (JSON)
-            </div>
-            <div class="form-hint" style="margin-top:2px">
-              Firebase Console → Realtime Database → 데이터 내보내기를 이용하세요.
-            </div>
-          </div>
-          <button class="btn btn--secondary btn--sm" id="btn-export-data">내보내기 안내</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- 섹션: 개발자 정보 -->
-    <div class="card">
       <div class="card__header">
         <div class="card__title">개발 환경</div>
       </div>
       <div class="card__body">
-        <div class="info-row">
-          <span class="info-row__label">Firebase SDK</span>
-          <span class="info-row__value mono">10.12.0</span>
-        </div>
-        <div class="info-row">
-          <span class="info-row__label">모듈 방식</span>
-          <span class="info-row__value">ES Modules (import/export)</span>
-        </div>
-        <div class="info-row">
-          <span class="info-row__label">CSS 방식</span>
-          <span class="info-row__value">CSS Custom Properties (토큰 기반)</span>
-        </div>
-        <div class="info-row">
-          <span class="info-row__label">라우팅</span>
-          <span class="info-row__value">Hash-based SPA (#/dashboard 등)</span>
-        </div>
+        ${row("Firebase SDK",  "10.12.0")}
+        ${row("모듈 방식",    "ES Modules (import/export)")}
+        ${row("CSS 방식",     "CSS Custom Properties (디자인 토큰)")}
+        ${row("라우팅",       "Hash-based SPA (#/dashboard 등)")}
+        ${row("PWA",          "Web App Manifest (manifest.json)")}
+      </div>
+    </div>
+
+    <!-- Firebase DB 경로 참조 -->
+    <div class="card">
+      <div class="card__header">
+        <div class="card__title">Firebase DB 주요 경로</div>
+        <div class="card__subtitle">저장·조회 경로 일람 (슈퍼관리자 참조용)</div>
+      </div>
+      <div class="card__body" style="padding:0">
+        <table class="data-table">
+          <thead>
+            <tr><th>컬렉션</th><th>경로</th><th>필터 기준</th></tr>
+          </thead>
+          <tbody>
+            ${dbRow("사용자",      "/users/{uid}",                           "–")}
+            ${dbRow("회사",        "/companies/{id}",                        "–")}
+            ${dbRow("지점",        "/branches/{id}",                         "companyId")}
+            ${dbRow("부서",        "/departments/{id}",                      "companyId")}
+            ${dbRow("교육",        "/trainings/{id}",                        "companyId")}
+            ${dbRow("교육 배정",   "/trainingAssignments/{trainingId}/{uid}", "–")}
+            ${dbRow("유저 배정",   "/userAssignments/{uid}/{trainingId}",     "–")}
+            ${dbRow("수료 기록",   "/trainingCompletions/{trainingId}/{uid}", "–")}
+            ${dbRow("교육자료",    "/materials/{id}",                        "companyId")}
+            ${dbRow("공지사항",    "/announcements/{id}",                    "companyId")}
+            ${dbRow("알림 설정",   "/settings/notifications",                "–")}
+          </tbody>
+        </table>
       </div>
     </div>
   `;
-
-  document.getElementById("btn-save-notify")?.addEventListener("click", () => {
-    // TODO: Firebase에 설정값 저장
-    toast.success("설정이 저장되었습니다.");
-  });
-
-  document.getElementById("btn-export-data")?.addEventListener("click", () => {
-    modal_info(
-      "데이터 내보내기",
-      "Firebase Console → Realtime Database → 우측 메뉴(⋮) → 'JSON 내보내기'를 이용하세요."
-    );
-  });
 }
 
-function modal_info(title, msg) {
-  // 간단 알림 — 모달 모듈 없이 alert 사용
-  alert(`[${title}]\n\n${msg}`);
+function row(label, value) {
+  return `
+    <div class="info-row">
+      <span class="info-row__label">${label}</span>
+      <span class="info-row__value">${value}</span>
+    </div>`;
+}
+
+function dbRow(name, path, filter) {
+  return `
+    <tr>
+      <td style="font-size:var(--text-sm)">${name}</td>
+      <td class="cell--mono" style="font-size:var(--text-xs)">${path}</td>
+      <td style="font-size:var(--text-xs);color:var(--gray-400)">${filter}</td>
+    </tr>`;
 }
