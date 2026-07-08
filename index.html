@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0f1923" />
+  <title>TAS WT — Web Training</title>
+
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="assets/icons/apple-touch-icon.png" />
+
+  <!-- Core CSS -->
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/layout.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/views.css" />
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+</head>
+<body>
+
+  <!-- ── App Shell ─────────────────────────────────── -->
+  <div id="app">
+
+    <!-- Loading splash -->
+    <div id="splash" class="splash">
+      <div class="splash__logo">
+        <span class="splash__mark">TAS</span>
+        <span class="splash__sub">Web Training</span>
+      </div>
+      <div class="splash__spinner"></div>
+    </div>
+
+    <!-- Login view (injected by views/login.js) -->
+    <div id="view-login" class="view view--login hidden"></div>
+
+    <!-- App wrapper (shown after auth) -->
+    <div id="app-shell" class="app-shell hidden">
+
+      <!-- Sidebar nav -->
+      <aside id="sidebar" class="sidebar">
+        <div class="sidebar__header">
+          <div class="sidebar__brand">
+            <span class="sidebar__brand-mark">TAS</span>
+            <span class="sidebar__brand-label">Web Training</span>
+          </div>
+          <button id="sidebar-toggle" class="sidebar__toggle" aria-label="사이드바 접기">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </div>
+
+        <!-- User badge -->
+        <div class="sidebar__user" id="sidebar-user">
+          <div class="avatar" id="nav-avatar">–</div>
+          <div class="sidebar__user-info">
+            <div class="sidebar__user-name" id="nav-user-name">–</div>
+            <div class="sidebar__user-role" id="nav-user-role">–</div>
+          </div>
+        </div>
+
+        <!-- Navigation (rendered by nav.js based on role) -->
+        <nav class="sidebar__nav" id="main-nav"></nav>
+
+        <div class="sidebar__footer">
+          <button class="sidebar__logout" id="btn-logout">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M6 14H3a1 1 0 01-1-1V3a1 1 0 011-1h3M11 11l3-3-3-3M14 8H6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span>로그아웃</span>
+          </button>
+        </div>
+      </aside>
+
+      <!-- Main content area -->
+      <div class="main-area">
+
+        <!-- Top header -->
+        <header class="topbar" id="topbar">
+          <div class="topbar__left">
+            <button class="topbar__menu-btn" id="mobile-menu-btn" aria-label="메뉴">
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
+            </button>
+            <h1 class="topbar__title" id="page-title">대시보드</h1>
+          </div>
+          <div class="topbar__right">
+            <!-- Notification bell -->
+            <button class="topbar__icon-btn" id="btn-notifications" aria-label="알림">
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                <path d="M10 2a6 6 0 00-6 6v3l-1.5 2.5h15L16 11V8a6 6 0 00-6-6zM8.5 17.5a1.5 1.5 0 003 0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span class="badge badge--alert hidden" id="notif-badge">0</span>
+            </button>
+
+            <!-- Notification dropdown -->
+            <div class="dropdown dropdown--notifications hidden" id="notif-panel">
+              <div class="dropdown__header">
+                <span>알림</span>
+                <button class="link-btn" id="btn-mark-all-read">모두 읽음</button>
+              </div>
+              <div class="dropdown__body" id="notif-list">
+                <div class="empty-state">알림이 없습니다</div>
+              </div>
+            </div>
+
+            <!-- Avatar / Profile -->
+            <button class="topbar__avatar-btn" id="btn-profile-menu" aria-label="프로필">
+              <div class="avatar avatar--sm" id="topbar-avatar">–</div>
+            </button>
+
+            <div class="dropdown dropdown--profile hidden" id="profile-menu">
+              <div class="dropdown__header">
+                <div class="dropdown__user-name" id="profile-name">–</div>
+                <div class="dropdown__user-meta" id="profile-meta">–</div>
+              </div>
+              <hr class="dropdown__divider" />
+              <button class="dropdown__item" id="btn-my-profile">내 정보</button>
+              <button class="dropdown__item" id="btn-change-password">비밀번호 변경</button>
+              <hr class="dropdown__divider" />
+              <button class="dropdown__item dropdown__item--danger" id="btn-logout2">로그아웃</button>
+            </div>
+          </div>
+        </header>
+
+        <!-- Breadcrumb -->
+        <div class="breadcrumb-bar" id="breadcrumb-bar">
+          <nav class="breadcrumb" id="breadcrumb"></nav>
+        </div>
+
+        <!-- Alert banner (notifications for employees) -->
+        <div id="alert-banner" class="alert-banner hidden"></div>
+
+        <!-- Page content — views inject here -->
+        <main class="page-content" id="page-content"></main>
+
+      </div><!-- /.main-area -->
+
+    </div><!-- /#app-shell -->
+
+  </div><!-- /#app -->
+
+  <!-- ── Global Modals ─────────────────────────────── -->
+  <div id="modal-backdrop" class="modal-backdrop hidden"></div>
+  <div id="modal-container" class="modal-container hidden"></div>
+
+  <!-- Toast notifications -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- ── Firebase SDK ──────────────────────────────── -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import { getAuth }       from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+    import { getDatabase }   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+    // ── Firebase config ─────────────────────────────
+    // TODO: Replace with your Firebase project config
+    const firebaseConfig = {
+      apiKey:            "YOUR_API_KEY",
+      authDomain:        "YOUR_PROJECT.firebaseapp.com",
+      databaseURL:       "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
+      projectId:         "YOUR_PROJECT_ID",
+      storageBucket:     "YOUR_PROJECT.appspot.com",
+      messagingSenderId: "YOUR_SENDER_ID",
+      appId:             "YOUR_APP_ID",
+    };
+
+    const firebaseApp = initializeApp(firebaseConfig);
+    const auth        = getAuth(firebaseApp);
+    const db          = getDatabase(firebaseApp);
+
+    // Make globally accessible for modules
+    window.__firebase = { app: firebaseApp, auth, db };
+
+    // Bootstrap app after Firebase is ready
+    const { boot } = await import("./js/core/app.js");
+    boot();
+  </script>
+
+</body>
+</html>

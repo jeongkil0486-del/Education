@@ -1,0 +1,107 @@
+{
+  "rules": {
+
+    /* ── Users ─────────────────────────────────── */
+    "users": {
+      "$uid": {
+        ".read":  "auth != null && (auth.uid === $uid || root.child('users').child(auth.uid).child('role').val() === 'super_admin' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin')",
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'super_admin')"
+      }
+    },
+
+    /* ── Companies ─────────────────────────────── */
+    "companies": {
+      ".read":  "auth != null && root.child('users').child(auth.uid).child('role').val() === 'super_admin'",
+      ".write": "auth != null && root.child('users').child(auth.uid).child('role').val() === 'super_admin'"
+    },
+
+    /* ── Branches ──────────────────────────────── */
+    "branches": {
+      ".read":  "auth != null",
+      ".write": "auth != null && root.child('users').child(auth.uid).child('role').val() === 'super_admin'"
+    },
+
+    /* ── Departments ───────────────────────────── */
+    "departments": {
+      ".read":  "auth != null",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'super_admin' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin')"
+    },
+
+    /* ── Trainings ─────────────────────────────── */
+    "trainings": {
+      ".read":  "auth != null",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')"
+    },
+
+    /* ── Assignments ───────────────────────────── */
+    "trainingAssignments": {
+      ".read":  "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')",
+      "$trainingId": {
+        "$uid": {
+          ".read":  "auth != null && auth.uid === $uid"
+        }
+      },
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')"
+    },
+
+    "userAssignments": {
+      "$uid": {
+        ".read":  "auth != null && (auth.uid === $uid || root.child('users').child(auth.uid).child('role').val() === 'hq_admin')",
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')"
+      }
+    },
+
+    /* ── Completions ───────────────────────────── */
+    "trainingCompletions": {
+      ".read":  "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')",
+      "$trainingId": {
+        "$uid": {
+          ".read":  "auth != null && auth.uid === $uid",
+          ".write": "auth != null && auth.uid === $uid"
+        }
+      }
+    },
+
+    "userCompletions": {
+      "$uid": {
+        ".read":  "auth != null && (auth.uid === $uid || root.child('users').child(auth.uid).child('role').val() === 'hq_admin')",
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    },
+
+    /* ── Materials ─────────────────────────────── */
+    "materials": {
+      ".read":  "auth != null",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')"
+    },
+
+    /* ── Templates ─────────────────────────────── */
+    "templates": {
+      ".read":  "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')",
+      ".write": "auth != null && root.child('users').child(auth.uid).child('role').val() === 'hq_admin'"
+    },
+
+    /* ── Announcements ─────────────────────────── */
+    "announcements": {
+      ".read":  "auth != null",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')"
+    },
+
+    /* ── Lesson Plans (강사 전용, 본인만 읽기/쓰기) */
+    "lessonPlans": {
+      "$uid": {
+        ".read":  "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    },
+
+    /* ── Cue Cards (강사 전용, 본인만 읽기/쓰기) */
+    "cueCards": {
+      "$uid": {
+        ".read":  "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    }
+
+  }
+}
