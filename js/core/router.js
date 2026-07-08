@@ -1,5 +1,5 @@
 /**
- * TAS Learning Hub — Router
+ * TAS WT — Router
  * Hash-based SPA router with role-based guards.
  *
  * URL pattern: /#/{view}/{...params}
@@ -193,10 +193,24 @@ class Router {
       await renderFn(content, this.params);
     } catch (err) {
       console.error(`[router] Failed to load view: ${path}`, err);
+
+      // 모듈 fetch 실패 vs 렌더링 오류 구분
+      const isModuleErr = err instanceof TypeError && err.message.includes("import");
+      const hint = isModuleErr
+        ? "뷰 파일이 없거나 서버에서 로드할 수 없습니다."
+        : err.message;
+
       content.innerHTML = `
-        <div class="empty-state">
+        <div class="empty-state" style="padding:var(--space-16)">
+          <svg width="48" height="48" viewBox="0 0 48 48" fill="none" class="empty-state__icon">
+            <circle cx="24" cy="24" r="20" stroke="currentColor" stroke-width="2"/>
+            <path d="M24 16v10M24 30v2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
           <div class="empty-state__title">페이지를 불러올 수 없습니다</div>
-          <div>${err.message}</div>
+          <div style="font-size:var(--text-xs);font-family:var(--font-mono);color:var(--gray-400);
+            margin-top:var(--space-2);max-width:400px;word-break:break-all">${hint}</div>
+          <button class="btn btn--ghost btn--sm" style="margin-top:var(--space-4)"
+            onclick="window.location.hash='#/dashboard'">대시보드로 이동</button>
         </div>`;
     }
   }
