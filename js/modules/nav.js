@@ -1,5 +1,5 @@
 /**
- * TAS Learning Hub — Navigation Module
+ * TAS WT — Navigation Module
  * Renders role-based sidebar nav and handles active state.
  */
 
@@ -41,7 +41,8 @@ const NAV_CONFIG = {
     {
       group: "커뮤니케이션",
       items: [
-        { path: "announcements", label: "공지사항",    icon: iconBell() },
+        { path: "announcements",           label: "공지사항",  icon: iconBell()    },
+        { path: "notification-settings",   label: "알림 설정", icon: iconSettings() },
       ],
     },
   ],
