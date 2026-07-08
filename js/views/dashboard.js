@@ -5,6 +5,7 @@
  */
 
 import { authStore, ROLES }   from "../core/auth.js";
+import { TEXT } from "../constants/text.js";
 import {
   trainingsDB, completionsDB, assignmentsDB, announcementsDB,
   companiesDB, branchesDB, usersDB,
@@ -80,7 +81,7 @@ async function renderSuperAdminDashboard(container) {
         <div class="card__body">
           <div class="info-row">
             <span class="info-row__label">플랫폼</span>
-            <span class="info-row__value">TAS 교육 허브 v1.0</span>
+            <span class="info-row__value">TAS Education Lab v1.0</span>
           </div>
           <div class="info-row">
             <span class="info-row__label">환경</span>
@@ -115,12 +116,14 @@ async function renderSuperAdminDashboard(container) {
   ]);
 
   void companies;
-  const activeUsers = users.filter(user => user?.active !== false);
-  const employeeUsers = activeUsers.filter(user => user?.role === "employee");
-  const hqAdmins = activeUsers.filter(user => user?.role === "hq_admin");
-  const instructors = activeUsers.filter(user => user?.role === "instructor");
+  const managedUsers = users.filter(
+    (user) => user?.active !== false && user?.role !== "super_admin"
+  );
+  const employeeUsers = managedUsers.filter(user => user?.role === "employee");
+  const hqAdmins = managedUsers.filter(user => user?.role === "hq_admin");
+  const instructors = managedUsers.filter(user => user?.role === "instructor");
 
-  setStatValue("sc-users", activeUsers.length);
+  setStatValue("sc-users", managedUsers.length);
   setStatValue("sc-employees", employeeUsers.length);
   setStatValue("sc-hq-admins", hqAdmins.length);
   setStatValue("sc-instructors", instructors.length);
@@ -173,6 +176,11 @@ function configureSuperAdminDashboard(container) {
       <span class="info-row__value" id="sc-branches-count">0</span>
     `;
     infoCardBody.prepend(branchRow);
+  }
+
+  const platformValue = container.querySelector(".dashboard-main .card:last-child .info-row .info-row__value");
+  if (platformValue) {
+    platformValue.textContent = TEXT.brand.platformName;
   }
 }
 

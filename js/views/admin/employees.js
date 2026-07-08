@@ -60,10 +60,14 @@ export async function render(container) {
 
 async function loadData() {
   try {
-    [employees, branches] = await Promise.all([
-      usersDB.listByRole("employee").catch(() => []),
+    const [allUsers, branchList] = await Promise.all([
+      usersDB.listAll().catch(() => []),
       branchesDB.listAll().catch(() => []),
     ]);
+    employees = allUsers
+      .filter((item) => item?.role === "employee")
+      .sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0));
+    branches = branchList;
   } catch (err) {
     console.error("[employees] load failed", err);
     employees = [];
@@ -78,7 +82,10 @@ async function loadData() {
 function renderStats() {
   setText("employee-count", String(employees.length));
   setText("employee-active-count", String(employees.filter((item) => item.active !== false && !item.disabled).length));
-  setText("employee-branch-count", String(new Set(employees.map((item) => item.branchId).filter(Boolean)).size));
+  setText(
+    "employee-branch-count",
+    String(new Set(employees.map((item) => employeeBranchKey(item)).filter(Boolean)).size)
+  );
 }
 
 function fillBranchFilter() {
@@ -96,6 +103,9 @@ function fillBranchFilter() {
       option.textContent = branchLabel(branch);
       select.appendChild(option);
     });
+
+  const hasSelectedBranch = Array.from(select.options).some((option) => option.value === select.value);
+  if (!hasSelectedBranch) select.value = "";
 }
 
 function applyFilters() {
@@ -105,7 +115,8 @@ function applyFilters() {
   let filtered = employees.slice();
 
   if (branchId) {
-    filtered = filtered.filter((item) => item.branchId === branchId);
+    const selectedBranch = branches.find((branch) => branch.id === branchId) ?? null;
+    filtered = filtered.filter((item) => matchesSelectedBranch(item, selectedBranch));
   }
 
   if (query) {
@@ -352,6 +363,7 @@ async function submitBulkUpload() {
     const result = await createEmployeeAccounts({ employees: payload });
     toast.success(t.uploadModal.createSuccess(result.createdCount, result.skippedCount));
     modal.close();
+    resetFilters();
     await loadData();
     openUploadResultModal(result);
   } catch (err) {
@@ -558,6 +570,27 @@ function normalizeEmpNo(value) {
 
 function normalizeKey(value) {
   return String(value ?? "").trim().toLowerCase();
+}
+
+function employeeBranchKey(item) {
+  return item?.branchId || item?.branchCode || item?.branchName || "";
+}
+
+function matchesSelectedBranch(item, branch) {
+  if (!branch) return true;
+  const branchCandidates = [branch.id, branch.code, branch.name]
+    .map((value) => normalizeKey(value))
+    .filter(Boolean);
+  return [item?.branchId, item?.branchCode, item?.branchName]
+    .map((value) => normalizeKey(value))
+    .some((value) => value && branchCandidates.includes(value));
+}
+
+function resetFilters() {
+  const branchFilter = document.getElementById("employee-branch-filter");
+  const searchInput = document.getElementById("employee-search");
+  if (branchFilter) branchFilter.value = "";
+  if (searchInput) searchInput.value = "";
 }
 
 function setText(id, value) {

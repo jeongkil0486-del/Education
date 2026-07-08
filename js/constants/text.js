@@ -63,9 +63,16 @@ export const TEXT = {
     notifications: "알림 설정",
     assignedTrainings: "배정 교육",
   },
+  brand: {
+    serviceName: "TAS Education Lab",
+    platformName: "TAS Education Lab v1.0",
+    loginTagline: "사내 교육 관리 시스템",
+    loginFooter: "TAS Education Lab",
+    shortName: "TAS Lab",
+  },
   topbar: {
     profileMetaSeparator: " / ",
-    titleSuffix: "TAS 교육 허브",
+    titleSuffix: "TAS Education Lab",
     logoutFailed: "로그아웃 중 오류가 발생했습니다.",
   },
   notifications: {

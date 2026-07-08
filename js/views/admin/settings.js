@@ -6,6 +6,8 @@
  * 알림 설정은 본사 교육관리자(HQ Admin) 메뉴에서 관리.
  */
 
+import { TEXT } from "../../constants/text.js";
+
 export async function render(container) {
   container.innerHTML = `
     <div class="section-header">
@@ -21,7 +23,7 @@ export async function render(container) {
         <div class="card__title">플랫폼 정보</div>
       </div>
       <div class="card__body">
-        ${row("시스템 명",    "TAS Web Training")}
+        ${row("시스템 명",    TEXT.brand.serviceName)}
         ${row("버전",        "v1.0.0")}
         ${row("인증 방식",   "사번 로그인 (Firebase Authentication)")}
         ${row("계정 도메인", '<code style="font-family:var(--font-mono);font-size:var(--text-xs)">@tas.local</code>')}

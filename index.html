@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#0f1923" />
-  <title>TAS 교육 허브</title>
+  <title>TAS Education Lab</title>
 
   <!-- PWA -->
   <link rel="manifest" href="manifest.json" />
@@ -31,7 +31,7 @@
     <div id="splash" class="splash">
       <div class="splash__logo">
         <span class="splash__mark">TAS</span>
-        <span class="splash__sub">교육 허브</span>
+        <span class="splash__sub">TAS Education Lab</span>
       </div>
       <div class="splash__spinner"></div>
     </div>
@@ -47,7 +47,7 @@
         <div class="sidebar__header">
           <div class="sidebar__brand">
             <span class="sidebar__brand-mark">TAS</span>
-            <span class="sidebar__brand-label">교육 허브</span>
+            <span class="sidebar__brand-label">TAS Education Lab</span>
           </div>
           <button id="sidebar-toggle" class="sidebar__toggle" aria-label="사이드바 접기">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -69,6 +69,12 @@
         <nav class="sidebar__nav" id="main-nav"></nav>
 
         <div class="sidebar__footer">
+          <button class="sidebar__toggle-collapsed" id="sidebar-toggle-collapsed" aria-label="사이드바 펼치기">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M6 12L10 8 6 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span>펼치기</span>
+          </button>
           <button class="sidebar__logout" id="btn-logout">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
               <path d="M6 14H3a1 1 0 01-1-1V3a1 1 0 011-1h3M11 11l3-3-3-3M14 8H6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -162,7 +168,7 @@
     import { getFunctions }  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-functions.js";
     import { getAnalytics, isSupported } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-analytics.js";
 
-    // ── Firebase config: TAS Learning Hub 전용 프로젝트 ──
+    // ── Firebase config: TAS Education Lab 전용 프로젝트 ──
     const firebaseConfig = {
       apiKey:            "AIzaSyBFdKcSP39UiA_AG1iu8jEviZwGTDwPiFE",
       authDomain:        "education-c6c2e.firebaseapp.com",

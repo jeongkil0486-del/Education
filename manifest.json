@@ -1,6 +1,6 @@
 {
-  "name": "TAS Learning Hub",
-  "short_name": "TAS Hub",
+  "name": "TAS Education Lab",
+  "short_name": "TAS Lab",
   "description": "기업 교육 관리 플랫폼",
   "start_url": "/",
   "display": "standalone",

@@ -7,6 +7,7 @@
  */
 
 import { authStore } from "../core/auth.js";
+import { TEXT }      from "../constants/text.js";
 import { toast }     from "../utils/toast.js";
 
 /** 사번 → Firebase 이메일 변환 (고정 도메인: @tas.local) */
@@ -20,8 +21,8 @@ export function showLogin(container) {
       <div class="login-panel__logo">
         <div class="login-panel__logo-mark">TAS</div>
         <div class="login-panel__logo-text">
-          <div class="login-panel__logo-name">TAS WT</div>
-          <div class="login-panel__logo-sub">Web Training Platform</div>
+          <div class="login-panel__logo-name">${TEXT.brand.serviceName}</div>
+          <div class="login-panel__logo-sub">${TEXT.brand.loginTagline}</div>
         </div>
       </div>
 
@@ -100,7 +101,7 @@ export function showLogin(container) {
       </div>
 
       <div class="login-panel__footer">
-        TAS Web Training &copy; ${new Date().getFullYear()} — v1.0
+        ${TEXT.brand.loginFooter} &copy; ${new Date().getFullYear()} — v1.0
       </div>
     </div>
 
@@ -108,7 +109,7 @@ export function showLogin(container) {
       <div class="login-art__grid"></div>
       <h2 class="login-art__headline">
         효율적인 교육 관리,<br />
-        <span>TAS Web Training</span>
+        <span>${TEXT.brand.serviceName}</span>
       </h2>
       <p class="login-art__sub">
         교육자료 업로드부터 수료 관리, 전자서명, 통계까지<br />
