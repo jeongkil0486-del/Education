@@ -19,6 +19,7 @@ import {
   buildStatusChip,
   buildTrainingPayload,
   closeTraining,
+  completeTraining,
   computeTrainingStatus,
   deleteTraining,
   isDeadlineSoon,
@@ -222,6 +223,13 @@ function renderTrainingTable() {
     });
   });
 
+  wrap.querySelectorAll(".btn-training-complete").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      confirmComplete(btn.dataset.id);
+    });
+  });
+
   wrap.querySelectorAll(".btn-training-close").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -240,13 +248,21 @@ function renderTrainingTable() {
 function trainingRow(t) {
   const branchSummary = t.branchNames?.length ? t.branchNames.join(", ") : "전체 지점";
   const soon = isDeadlineSoon(t);
-  const isOwner = t.createdBy === authStore.uid;
+  const isOwner      = t.createdBy === authStore.uid;
+  const isInstructor = t.instructorId === authStore.uid;
+  const canAct       = isOwner || isInstructor;
   const actions = [];
 
   if (isOwner) {
     actions.push(`<button class="btn btn--ghost btn--sm btn-training-edit" data-id="${t.id}" title="수정">수정</button>`);
   }
-  if (t.computedStatus !== "closed" && isOwner) {
+  const isCompleted = t.computedStatus === "completed";
+  const isClosed = t.computedStatus === "closed";
+
+  if (isOwner && !isCompleted) {
+    actions.push(`<button class="btn btn--ghost btn--sm btn-training-complete" data-id="${t.id}" title="완료 처리" style="color:var(--color-success,#16a34a)">완료</button>`);
+  }
+  if (!isClosed && !isCompleted && isOwner) {
     actions.push(`<button class="btn btn--ghost btn--sm btn-training-close" data-id="${t.id}" title="종료 처리">종료</button>`);
   }
   if (isOwner) {
@@ -427,6 +443,46 @@ async function submitForm(trainingId, actionLabel) {
     toast.error("교육 저장 중 오류가 발생했습니다.");
     modal.setLoading(actionLabel, false);
   }
+}
+
+function confirmComplete(trainingId) {
+  const training = state.trainings.find((item) => item.id === trainingId);
+  if (!training) return;
+
+  modal.open({
+    title: "교육 완료 처리",
+    size: "sm",
+    body: `
+      <p style="font-size:var(--text-sm);color:var(--gray-600)">
+        <strong>${esc(training.title)}</strong> 교육을 완료 처리하시겠습니까?<br/>
+        배정된 직원의 교육 이력카드에 자동으로 수료 기록이 생성됩니다.
+      </p>
+    `,
+    actions: [
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      {
+        label: "완료",
+        variant: "primary",
+        onClick: async () => {
+          modal.setLoading("완료", true);
+          try {
+            await completeTraining(trainingId);
+            toast.success("교육을 완료 처리했습니다. 직원 이력카드에 수료 기록이 생성되었습니다.");
+            modal.close();
+            await loadViewData();
+          } catch (err) {
+            if (err?.message === "NO_ASSIGNMENTS") {
+              toast.error("배정된 직원이 없습니다. 직원을 먼저 배정해 주세요.");
+            } else {
+              console.error("[instructor-trainings] complete failed", err);
+              toast.error("완료 처리 중 오류가 발생했습니다.");
+            }
+            modal.setLoading("완료", false);
+          }
+        },
+      },
+    ],
+  });
 }
 
 function confirmClose(trainingId) {

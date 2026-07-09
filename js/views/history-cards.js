@@ -318,17 +318,16 @@ function renderSummary(emp, rows) {
   const nextDate      = rows.filter((r) => r.deadline && r.deadline > now).sort((a, b) => a.deadline - b.deadline)[0]?.deadline ?? null;
 
   el.innerHTML = [
-    { label: "총 교육 건수",    value: totalCount,                     sub: "" },
-    { label: "수료 건수",       value: completedCnt,                   sub: "PASS" },
-    { label: "진행중",          value: inProgressCnt,                  sub: "" },
-    { label: "미수료",          value: failCnt,                        sub: "" },
-    { label: "최근 교육일",     value: lastDate ? formatDate(lastDate) : "–", sub: "" },
-    { label: "다음 교육 예정일", value: nextDate ? formatDate(nextDate) : "–", sub: "" },
-  ].map(({ label, value, sub }) => `
+    { label: "총 교육 건수",    value: totalCount,                          isDate: false },
+    { label: "수료 건수",       value: completedCnt,                        isDate: false },
+    { label: "진행중",          value: inProgressCnt,                       isDate: false },
+    { label: "미수료",          value: failCnt,                             isDate: false },
+    { label: "최근 교육일",     value: lastDate ? formatDate(lastDate) : "–", isDate: true },
+    { label: "다음 교육 예정일", value: nextDate ? formatDate(nextDate) : "–", isDate: true },
+  ].map(({ label, value, isDate }) => `
     <div class="stat-card">
       <div class="stat-card__label">${esc(label)}</div>
-      <div class="stat-card__value">${esc(String(value))}</div>
-      ${sub ? `<div style="font-size:var(--text-xs);color:var(--gray-400)">${esc(sub)}</div>` : ""}
+      <div class="stat-card__value" style="${isDate ? "font-size:var(--text-base);font-weight:var(--weight-semibold)" : ""}">${esc(String(value))}</div>
     </div>`).join("");
 }
 

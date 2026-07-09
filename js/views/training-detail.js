@@ -13,6 +13,7 @@ import {
   buildStatusChip,
   buildTrainingPayload,
   closeTraining,
+  completeTraining,
   getTrainingDetail,
   saveTraining,
   assignEmployees,
@@ -49,6 +50,10 @@ function renderDetail(container) {
   const { training, assignments, completions } = state.detail;
   const rate    = assignments.length ? Math.round((completions.length / assignments.length) * 100) : 0;
   const canEdit = authStore.role !== ROLES.INSTRUCTOR || training.createdBy === authStore.uid;
+  // 완료/종료: 본인 등록 OR 담당 강사 OR HQ_ADMIN
+  const canAct  = training.createdBy === authStore.uid
+               || training.instructorId === authStore.uid
+               || authStore.role === "hq_admin";
 
   container.innerHTML = `
     <div class="section-header">
@@ -59,8 +64,11 @@ function renderDetail(container) {
         </div>
       </div>
       <div style="display:flex;gap:var(--space-2);flex-wrap:wrap">
+        ${canAct && training.computedStatus !== "completed" && training.computedStatus !== "closed"
+          ? `<button class="btn btn--primary" id="btn-complete">교육 완료</button>` : ""}
         ${canEdit ? `<button class="btn btn--secondary" id="btn-edit">교육 수정</button>` : ""}
-        ${canEdit && training.computedStatus !== "closed" ? `<button class="btn btn--secondary" id="btn-close">교육 종료</button>` : ""}
+        ${canAct && training.computedStatus !== "closed" && training.computedStatus !== "completed"
+          ? `<button class="btn btn--secondary" id="btn-close">교육 종료</button>` : ""}
       </div>
     </div>
 
@@ -126,8 +134,9 @@ function renderDetail(container) {
 function bindEvents(container) {
   const { training } = state.detail;
 
-  document.getElementById("btn-edit")  ?.addEventListener("click", () => openEditModal(training));
-  document.getElementById("btn-close") ?.addEventListener("click", () => confirmClose(training.id, training.title));
+  document.getElementById("btn-complete")?.addEventListener("click", () => confirmComplete(training.id, training.title));
+  document.getElementById("btn-edit")    ?.addEventListener("click", () => openEditModal(training));
+  document.getElementById("btn-close")   ?.addEventListener("click", () => confirmClose(training.id, training.title));
 
   document.getElementById("filter-branch")      ?.addEventListener("change", refreshList);
   document.getElementById("filter-search")      ?.addEventListener("input",  refreshList);
@@ -433,6 +442,37 @@ function openEditModal(training) {
           console.error("[training-detail] update failed", err?.code, err?.message, err);
           toast.error("교육 수정 중 오류가 발생했습니다.");
           modal.setLoading(label, false);
+        }
+      }},
+    ],
+  });
+}
+
+function confirmComplete(trainingId, title) {
+  modal.open({
+    title: "교육 완료 처리", size: "sm",
+    body: `
+      <p style="font-size:var(--text-sm);color:var(--gray-600)">
+        <strong>${esc(title)}</strong> 교육을 완료 처리하시겠습니까?<br/>
+        배정된 직원의 교육 이력카드에 자동으로 수료 기록이 생성됩니다.
+      </p>`,
+    actions: [
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      { label: "완료", variant: "primary", onClick: async () => {
+        modal.setLoading("완료", true);
+        try {
+          await completeTraining(trainingId);
+          toast.success("교육을 완료 처리했습니다. 직원 이력카드에 수료 기록이 생성되었습니다.");
+          modal.close();
+          await loadDetail(document.getElementById("page-content"), trainingId);
+        } catch (err) {
+          if (err?.message === "NO_ASSIGNMENTS") {
+            toast.error("배정된 직원이 없습니다. 직원을 먼저 배정해 주세요.");
+          } else {
+            console.error("[training-detail] complete failed", err?.code, err?.message, err);
+            toast.error("완료 처리 중 오류가 발생했습니다.");
+          }
+          modal.setLoading("완료", false);
         }
       }},
     ],

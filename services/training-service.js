@@ -243,10 +243,20 @@ export async function completeTraining(trainingId) {
   }
 
   // training 상태 완료로 업데이트
-  await trainingsDB.complete(trainingId, {
-    completedBy: authStore.uid,
-    completedByName: authStore.name,
-  });
+  if (typeof trainingsDB.complete === "function") {
+    await trainingsDB.complete(trainingId, {
+      completedBy: authStore.uid,
+      completedByName: authStore.name,
+    });
+  } else {
+    await trainingsDB.update(trainingId, {
+      status: "completed",
+      completedAt: Date.now(),
+      completedBy: authStore.uid,
+      completedByName: authStore.name,
+      updatedAt: Date.now(),
+    });
+  }
 }
 
 export async function deleteTraining(trainingId) {
