@@ -1,17 +1,9 @@
-/**
- * instructor-trainings.js — instructor 전용 교육 관리 화면
- *
- * - 교육 등록 가능
- * - 본인이 등록(createdBy)하거나 담당 강사(instructorId)인 교육만 조회
- * - 통계 카드: 전체교육 / 진행중 / 기한촉박 / 기한초과
- * - 교육 수정 / 종료 / 삭제 / 대상자 배정 연결
- */
-
 import { modal } from "../utils/modal.js";
 import { toast } from "../utils/toast.js";
 import { formatDate } from "../utils/date.js";
 import { router } from "../core/router.js";
 import { authStore } from "../core/auth.js";
+import { settingsDB } from "../core/db.js";
 import {
   TRAINING_STATUS_LABELS,
   TRAINING_TYPES,
@@ -20,19 +12,22 @@ import {
   buildTrainingPayload,
   closeTraining,
   completeTraining,
-  computeTrainingStatus,
   deleteTraining,
-  isDeadlineSoon,
   listInstructorTrainings,
   loadTrainingReferences,
   saveTraining,
 } from "../services/training-service.js";
+import {
+  bucketIncludesTraining,
+  getVisibleDeadlineBuckets,
+  normalizeNotificationSettings,
+} from "../services/notification-settings-service.js";
 
 let activeStatFilter = null;
-
 let state = {
   references: null,
   trainings: [],
+  notificationSettings: null,
 };
 
 export async function render(container) {
@@ -40,7 +35,7 @@ export async function render(container) {
     <div class="section-header">
       <div>
         <div class="section-title">교육 관리</div>
-        <div class="section-subtitle">내가 등록하고 담당하는 교육을 관리합니다.</div>
+        <div class="section-subtitle">내가 등록했거나 담당 중인 교육을 관리합니다.</div>
       </div>
       <button class="btn btn--primary" id="btn-create-training">
         <svg class="btn__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -50,13 +45,10 @@ export async function render(container) {
       </button>
     </div>
 
-    <!-- 통계 카드 4개 -->
     <div class="dashboard-grid dashboard-grid--compact" id="training-stats" style="margin-bottom:var(--space-5)"></div>
 
-    <!-- 필터 바 — 2줄 구성 -->
     <div class="card" style="margin-bottom:var(--space-5)">
       <div class="card__body card__body--compact">
-        <!-- 1줄: 검색 -->
         <div class="filter-bar" style="margin-bottom:var(--space-3)">
           <div class="filter-bar__search input-group" style="flex:1;min-width:220px">
             <svg class="input-group__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -66,15 +58,14 @@ export async function render(container) {
             <input class="form-control" id="search-trainings" type="search" placeholder="교육명으로 검색" />
           </div>
         </div>
-        <!-- 2줄: 상태 + 유형 + 지점 -->
         <div style="display:flex;gap:var(--space-3);flex-wrap:wrap">
           <select class="form-control" id="filter-status" style="flex:1;min-width:120px">
             <option value="">전체 상태</option>
-            ${Object.entries(TRAINING_STATUS_LABELS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}
+            ${Object.entries(TRAINING_STATUS_LABELS).map(([key, value]) => `<option value="${key}">${value}</option>`).join("")}
           </select>
           <select class="form-control" id="filter-type" style="flex:1;min-width:120px">
             <option value="">전체 유형</option>
-            ${TRAINING_TYPES.map((t) => `<option value="${t}">${TRAINING_TYPE_LABELS[t]}</option>`).join("")}
+            ${TRAINING_TYPES.map((type) => `<option value="${type}">${TRAINING_TYPE_LABELS[type]}</option>`).join("")}
           </select>
           <select class="form-control" id="filter-branch" style="flex:1;min-width:140px">
             <option value="">전체 지점</option>
@@ -101,12 +92,20 @@ export async function render(container) {
 
 async function loadViewData() {
   try {
-    const [references, trainings] = await Promise.all([
+    const [references, trainings, notifications] = await Promise.all([
       loadTrainingReferences(),
       listInstructorTrainings(),
+      settingsDB.getNotifications().catch(() => null),
     ]);
 
-    state = { references, trainings };
+    state = {
+      references,
+      trainings,
+      notificationSettings: normalizeNotificationSettings(notifications ?? {}),
+    };
+    if (!getVisibleDeadlineBuckets(state.notificationSettings).some((bucket) => bucket.key === activeStatFilter)) {
+      activeStatFilter = null;
+    }
 
     renderBranchFilter();
     renderTrainingStats();
@@ -124,7 +123,7 @@ function renderBranchFilter() {
   const branches = state.references?.branches ?? [];
   select.innerHTML = `
     <option value="">전체 지점</option>
-    ${branches.map((b) => `<option value="${b.id}">${esc(b.name ?? b.code ?? b.id)}</option>`).join("")}
+    ${branches.map((branch) => `<option value="${branch.id}">${esc(branch.name ?? branch.code ?? branch.id)}</option>`).join("")}
   `;
 }
 
@@ -132,35 +131,28 @@ function renderTrainingStats() {
   const wrap = document.getElementById("training-stats");
   if (!wrap) return;
 
-  const now  = Date.now();
-  const list = state.trainings;
+  const visibleBuckets = getVisibleDeadlineBuckets(state.notificationSettings);
+  wrap.innerHTML = visibleBuckets.map((bucket) => {
+    const count = state.trainings.filter((training) => bucketIncludesTraining(bucket, training)).length;
+    const sub = bucket.type === "completed" ? "완료 처리된 교육"
+              : bucket.type === "overdue"   ? "수료기한이 지난 교육"
+              : `오늘부터 ${bucket.days}일 이내 마감`;
+    const tone = bucket.type === "completed" ? "success"
+               : bucket.type === "overdue"   ? "danger"
+               : "warning";
 
-  const counts = {
-    total:      list.length,
-    inProgress: list.filter((t) => computeTrainingStatus(t, now) === "in_progress").length,
-    soon:       list.filter((t) => isDeadlineSoon(t, now)).length,
-    overdue:    list.filter((t) => computeTrainingStatus(t, now) === "overdue").length,
-  };
-
-  const cards = [
-    { key: "total",      label: "전체교육", value: counts.total,      sub: "내 전체 교육 수",        tone: "" },
-    { key: "inProgress", label: "진행중",   value: counts.inProgress,  sub: "현재 운영 중",           tone: "success" },
-    { key: "soon",       label: "기한촉박", value: counts.soon,        sub: "수료기한 3일 이내",      tone: "warning" },
-    { key: "overdue",    label: "기한초과", value: counts.overdue,     sub: "기한이 지난 교육",       tone: "danger" },
-  ];
-
-  wrap.innerHTML = cards.map(({ key, label, value, sub, tone }) => `
-    <div
-      class="stat-card stat-card--clickable ${activeStatFilter === key ? "stat-card--active" : ""}"
-      data-filter-key="${key}"
-      style="cursor:pointer"
-      title="${label} 필터 ${activeStatFilter === key ? "해제" : "적용"}"
-    >
-      <div class="stat-card__label">${label}</div>
-      <div class="stat-card__value ${tone ? `stat-card__value--${tone}` : ""}">${value}</div>
-      <div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:2px">${sub}</div>
-    </div>
-  `).join("");
+    return `
+      <div
+        class="stat-card stat-card--clickable ${activeStatFilter === bucket.key ? "stat-card--active" : ""}"
+        data-filter-key="${bucket.key}"
+        style="cursor:pointer"
+      >
+        <div class="stat-card__label">${esc(bucket.label)}</div>
+        <div class="stat-card__value ${tone ? `stat-card__value--${tone}` : ""}">${count}</div>
+        <div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:2px">${sub}</div>
+      </div>
+    `;
+  }).join("");
 
   wrap.querySelectorAll(".stat-card--clickable").forEach((card) => {
     card.addEventListener("click", () => {
@@ -177,11 +169,10 @@ function renderTrainingTable() {
   if (!wrap) return;
 
   const filtered = getFiltered();
-
   if (!filtered.length) {
     wrap.innerHTML = `
       <div class="empty-state" style="padding:var(--space-16)">
-        <div class="empty-state__title">등록한 교육이 없습니다.</div>
+        <div class="empty-state__title">조건에 맞는 교육이 없습니다.</div>
         <div>교육 등록 버튼으로 새 교육을 추가해 주세요.</div>
       </div>
     `;
@@ -203,94 +194,90 @@ function renderTrainingTable() {
         </tr>
       </thead>
       <tbody>
-        ${filtered.map((t) => trainingRow(t)).join("")}
+        ${filtered.map((training) => trainingRow(training)).join("")}
       </tbody>
     </table>
   `;
 
   wrap.querySelectorAll("tr[data-id]").forEach((row) => {
-    row.addEventListener("click", (e) => {
-      if (e.target.closest(".cell--actions")) return;
+    row.addEventListener("click", (event) => {
+      if (event.target.closest(".cell--actions")) return;
       router.push("training-detail", { id: row.dataset.id });
     });
   });
 
-  wrap.querySelectorAll(".btn-training-edit").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const training = state.trainings.find((t) => t.id === btn.dataset.id);
+  wrap.querySelectorAll(".btn-training-edit").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const training = state.trainings.find((item) => item.id === button.dataset.id);
       if (training) openTrainingModal(training);
     });
   });
 
-  wrap.querySelectorAll(".btn-training-complete").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      confirmComplete(btn.dataset.id);
+  wrap.querySelectorAll(".btn-training-complete").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      confirmComplete(button.dataset.id);
     });
   });
 
-  wrap.querySelectorAll(".btn-training-close").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      confirmClose(btn.dataset.id);
+  wrap.querySelectorAll(".btn-training-close").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      confirmClose(button.dataset.id);
     });
   });
 
-  wrap.querySelectorAll(".btn-training-delete").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      confirmDelete(btn.dataset.id);
+  wrap.querySelectorAll(".btn-training-delete").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      confirmDelete(button.dataset.id);
     });
   });
 }
 
-function trainingRow(t) {
-  const branchSummary = t.branchNames?.length ? t.branchNames.join(", ") : "전체 지점";
-  const soon = isDeadlineSoon(t);
-  const isOwner      = t.createdBy === authStore.uid;
-  const isInstructor = t.instructorId === authStore.uid;
-  const canAct       = isOwner || isInstructor;
+function trainingRow(training) {
+  const branchSummary = training.branchNames?.length ? training.branchNames.join(", ") : "전체 지점";
+  const isOwner      = training.createdBy === authStore.uid;
+  const isInstructor = training.instructorId === authStore.uid;
+  const canAct       = isOwner || isInstructor;  // 본인 등록 또는 담당 강사
   const actions = [];
 
-  if (isOwner) {
-    actions.push(`<button class="btn btn--ghost btn--sm btn-training-edit" data-id="${t.id}" title="수정">수정</button>`);
-  }
-  const isCompleted = t.computedStatus === "completed";
-  const isClosed = t.computedStatus === "closed";
+  const isCompleted = training.computedStatus === "completed";
+  const isClosed    = training.computedStatus === "closed";
 
-  if (isOwner && !isCompleted) {
-    actions.push(`<button class="btn btn--ghost btn--sm btn-training-complete" data-id="${t.id}" title="완료 처리" style="color:var(--color-success,#16a34a)">완료</button>`);
+  if (isOwner) {
+    actions.push(`<button class="btn btn--ghost btn--sm btn-training-edit" data-id="${training.id}" title="수정">수정</button>`);
   }
-  if (!isClosed && !isCompleted && isOwner) {
-    actions.push(`<button class="btn btn--ghost btn--sm btn-training-close" data-id="${t.id}" title="종료 처리">종료</button>`);
+  if (canAct && !isCompleted) {
+    actions.push(`<button class="btn btn--ghost btn--sm btn-training-complete" data-id="${training.id}" title="완료 처리" style="color:var(--color-success,#16a34a)">완료</button>`);
+  }
+  if (!isClosed && !isCompleted && canAct) {
+    actions.push(`<button class="btn btn--ghost btn--sm btn-training-close" data-id="${training.id}" title="종료 처리">종료</button>`);
   }
   if (isOwner) {
-    actions.push(`<button class="btn btn--ghost btn--sm btn-training-delete" data-id="${t.id}" title="삭제" style="color:var(--color-danger)">삭제</button>`);
+    actions.push(`<button class="btn btn--ghost btn--sm btn-training-delete" data-id="${training.id}" title="삭제" style="color:var(--color-danger)">삭제</button>`);
   }
 
-  const ownerBadge = t.createdBy !== authStore.uid
+  const ownerBadge = training.createdBy !== authStore.uid
     ? `<span class="chip chip--neutral" style="font-size:var(--text-2xs)">담당</span> `
     : "";
 
   return `
-    <tr data-id="${t.id}" style="cursor:pointer">
+    <tr data-id="${training.id}" style="cursor:pointer">
       <td>
-        <div style="font-weight:var(--weight-semibold);color:var(--gray-800)">${ownerBadge}${esc(t.title)}</div>
-        ${t.description ? `<div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:4px">${esc(t.description)}</div>` : ""}
+        <div style="font-weight:var(--weight-semibold);color:var(--gray-800)">${ownerBadge}${esc(training.title)}</div>
+        ${training.description ? `<div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:4px">${esc(training.description)}</div>` : ""}
       </td>
-      <td>${esc(t.typeLabel)}</td>
+      <td>${esc(training.typeLabel)}</td>
       <td>
-        <div>${esc(t.companyName || "-")}</div>
+        <div>${esc(training.companyName || "-")}</div>
         <div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:4px">${esc(branchSummary)}</div>
       </td>
-      <td style="white-space:nowrap">${formatDate(t.startDate)} ~ ${formatDate(t.endDate)}</td>
-      <td style="white-space:nowrap">
-        ${soon ? `<span style="color:var(--color-warning);font-weight:var(--weight-semibold)">⚠ </span>` : ""}
-        ${formatDate(t.deadline)}
-      </td>
-      <td>${buildStatusChip(t.computedStatus)}</td>
-      <td>${formatDate(t.createdAt)}</td>
+      <td style="white-space:nowrap">${formatDate(training.startDate)} ~ ${formatDate(training.endDate)}</td>
+      <td style="white-space:nowrap">${formatDate(training.deadline)}</td>
+      <td>${buildStatusChip(training.computedStatus)}</td>
+      <td>${formatDate(training.createdAt)}</td>
       <td class="cell--actions">
         <div style="display:flex;gap:4px;justify-content:flex-end;flex-wrap:wrap">
           ${actions.join("") || `<span style="font-size:var(--text-xs);color:var(--gray-400)">조회 전용</span>`}
@@ -301,32 +288,26 @@ function trainingRow(t) {
 }
 
 function getFiltered() {
-  const now    = Date.now();
   const search = (document.getElementById("search-trainings")?.value ?? "").trim().toLowerCase();
   const status = document.getElementById("filter-status")?.value ?? "";
-  const type   = document.getElementById("filter-type")?.value ?? "";
+  const type = document.getElementById("filter-type")?.value ?? "";
   const branch = document.getElementById("filter-branch")?.value ?? "";
+  const activeBucket = state.notificationSettings?.deadlineBuckets?.find((bucket) => bucket.key === activeStatFilter) ?? null;
 
-  return state.trainings.filter((t) => {
-    if (activeStatFilter === "inProgress" && computeTrainingStatus(t, now) !== "in_progress") return false;
-    if (activeStatFilter === "soon"       && !isDeadlineSoon(t, now))                          return false;
-    if (activeStatFilter === "overdue"    && computeTrainingStatus(t, now) !== "overdue")       return false;
-
-    if (search && ![t.title, t.description].some((v) => String(v ?? "").toLowerCase().includes(search))) return false;
-    if (status && t.computedStatus !== status) return false;
-    if (type   && t.trainingType   !== type)   return false;
-    if (branch && !t.branchIds?.includes(branch)) return false;
-
+  return state.trainings.filter((training) => {
+    if (activeBucket && !bucketIncludesTraining(activeBucket, training)) return false;
+    if (search && ![training.title, training.description].some((value) => String(value ?? "").toLowerCase().includes(search))) return false;
+    if (status && training.computedStatus !== status) return false;
+    if (type && training.trainingType !== type) return false;
+    if (branch && !training.branchIds?.includes(branch)) return false;
     return true;
   });
 }
 
-// ─── 교육 등록 / 수정 모달 ──────────────────────────────────
-
 function openTrainingModal(training = null) {
-  const actionLabel = training ? "저장" : "등록";
-  const refs        = state.references;
-  const branchIds   = training?.branchIds ?? [];
+  const actionLabel = training ? "수정" : "등록";
+  const refs = state.references;
+  const branchIds = training?.branchIds ?? [];
 
   modal.open({
     title: training ? "교육 수정" : "교육 등록",
@@ -336,12 +317,12 @@ function openTrainingModal(training = null) {
         <div class="form-row">
           <div class="form-group">
             <label class="form-label form-label--required">교육명</label>
-            <input class="form-control" id="t-title" type="text" value="${escAttr(training?.title ?? "")}" placeholder="예: 2026 서비스 교육" />
+            <input class="form-control" id="t-title" type="text" value="${escAttr(training?.title ?? "")}" placeholder="예: 2026 서비스교육" />
           </div>
           <div class="form-group">
             <label class="form-label form-label--required">교육유형</label>
             <select class="form-control" id="t-type">
-              ${TRAINING_TYPES.map((tp) => `<option value="${tp}" ${training?.trainingType === tp ? "selected" : ""}>${TRAINING_TYPE_LABELS[tp]}</option>`).join("")}
+              ${TRAINING_TYPES.map((type) => `<option value="${type}" ${training?.trainingType === type ? "selected" : ""}>${TRAINING_TYPE_LABELS[type]}</option>`).join("")}
             </select>
           </div>
         </div>
@@ -352,19 +333,19 @@ function openTrainingModal(training = null) {
             <input class="form-control" type="text" value="${escAttr(refs?.company?.name || "-")}" disabled />
           </div>
           <div class="form-group">
-            <label class="form-label">담당 강사 (나)</label>
+            <label class="form-label">담당 강사</label>
             <input class="form-control" type="text" value="${escAttr(authStore.name)}" disabled />
-            <div class="form-hint">교육 등록 시 담당 강사는 자동으로 현재 계정으로 설정됩니다.</div>
+            <div class="form-hint">교육 등록 시 현재 계정이 담당 강사로 저장됩니다.</div>
           </div>
         </div>
 
         <div class="form-group">
           <label class="form-label form-label--required">지점</label>
           <div class="selection-grid">
-            ${(refs?.branches ?? []).map((b) => `
+            ${(refs?.branches ?? []).map((branch) => `
               <label class="selection-chip">
-                <input type="checkbox" class="branch-selector" value="${b.id}" ${branchIds.includes(b.id) ? "checked" : ""} />
-                <span>${esc(b.name ?? b.code ?? b.id)}</span>
+                <input type="checkbox" class="branch-selector" value="${branch.id}" ${branchIds.includes(branch.id) ? "checked" : ""} />
+                <span>${esc(branch.name ?? branch.code ?? branch.id)}</span>
               </label>
             `).join("")}
           </div>
@@ -395,47 +376,62 @@ function openTrainingModal(training = null) {
 }
 
 async function submitForm(trainingId, actionLabel) {
-  const refs    = state.references;
-  const current = trainingId ? state.trainings.find((t) => t.id === trainingId) : null;
+  const refs = state.references;
+  const current = trainingId ? state.trainings.find((item) => item.id === trainingId) : null;
 
-  const title       = document.getElementById("t-title")?.value?.trim();
+  const title = document.getElementById("t-title")?.value?.trim();
   const trainingType = document.getElementById("t-type")?.value;
-  const branchIds    = Array.from(document.querySelectorAll(".branch-selector:checked")).map((c) => c.value);
-  const startDate    = readDate("t-start");
-  const endDate      = readDate("t-end");
-  const deadline     = readDate("t-deadline");
+  const branchIds = Array.from(document.querySelectorAll(".branch-selector:checked")).map((checkbox) => checkbox.value);
+  const startDate = readDate("t-start");
+  const endDate = readDate("t-end");
+  const deadline = readDate("t-deadline");
 
-  if (!title) { toast.error("교육명을 입력해 주세요."); return; }
-  if (!startDate || !endDate || !deadline) { toast.error("교육 시작일, 종료일, 수료기한을 모두 입력해 주세요."); return; }
-  if (endDate < startDate) { toast.error("교육 종료일은 시작일 이후여야 합니다."); return; }
-  if (deadline < endDate)  { toast.error("수료기한은 교육 종료일과 같거나 이후여야 합니다."); return; }
+  if (!title) {
+    toast.error("교육명을 입력해 주세요.");
+    return;
+  }
+  if (!startDate || !endDate || !deadline) {
+    toast.error("교육 시작일, 종료일, 수료기한을 모두 입력해 주세요.");
+    return;
+  }
+  if (endDate < startDate) {
+    toast.error("교육 종료일은 시작일 이후여야 합니다.");
+    return;
+  }
+  if (deadline < endDate) {
+    toast.error("수료기한은 교육 종료일과 같거나 이후여야 합니다.");
+    return;
+  }
 
   modal.setLoading(actionLabel, true);
 
   try {
     const payload = buildTrainingPayload(
       {
-        title, trainingType, description: "",
-        // 강사 본인을 instructorId로 고정
-        instructorId:   authStore.uid,
+        title,
+        trainingType,
+        description: "",
+        instructorId: authStore.uid,
         instructorName: authStore.name,
-        branchIds, startDate, endDate, deadline,
+        branchIds,
+        startDate,
+        endDate,
+        deadline,
       },
       refs,
       current
     );
 
-    // createdBy / instructorId 명시 저장 (신규 등록 시)
     if (!trainingId) {
-      payload.createdBy     = authStore.uid;
+      payload.createdBy = authStore.uid;
       payload.createdByName = authStore.name;
-      payload.instructorId  = authStore.uid;
+      payload.instructorId = authStore.uid;
       payload.instructorName = authStore.name;
     }
     payload.updatedAt = Date.now();
 
     await saveTraining(payload, trainingId);
-    toast.success(trainingId ? "교육이 수정되었습니다." : "교육이 등록되었습니다.");
+    toast.success(trainingId ? "교육을 수정했습니다." : "교육을 등록했습니다.");
     modal.close();
     await loadViewData();
   } catch (error) {
@@ -486,27 +482,28 @@ function confirmComplete(trainingId) {
 }
 
 function confirmClose(trainingId) {
-  const t = state.trainings.find((item) => item.id === trainingId);
-  if (!t) return;
+  const training = state.trainings.find((item) => item.id === trainingId);
+  if (!training) return;
 
   modal.open({
     title: "교육 종료 처리",
     size: "sm",
     body: `
       <p style="font-size:var(--text-sm);color:var(--gray-600)">
-        <strong>${esc(t.title)}</strong> 교육을 종료 처리하시겠습니까?<br/>
-        종료 후 상태는 <strong>종료</strong>로 표시되며 이력은 계속 조회할 수 있습니다.
+        <strong>${esc(training.title)}</strong> 교육을 종료 처리하시겠습니까?<br/>
+        종료 후 상태는 <strong>종료</strong>로 표시됩니다.
       </p>
     `,
     actions: [
       { label: "취소", variant: "secondary", onClick: () => modal.close() },
       {
-        label: "종료", variant: "primary",
+        label: "종료",
+        variant: "primary",
         onClick: async () => {
           modal.setLoading("종료", true);
           try {
             await closeTraining(trainingId);
-            toast.success("교육이 종료 처리되었습니다.");
+            toast.success("교육을 종료 처리했습니다.");
             modal.close();
             await loadViewData();
           } catch (err) {
@@ -521,27 +518,28 @@ function confirmClose(trainingId) {
 }
 
 function confirmDelete(trainingId) {
-  const t = state.trainings.find((item) => item.id === trainingId);
-  if (!t) return;
+  const training = state.trainings.find((item) => item.id === trainingId);
+  if (!training) return;
 
   modal.open({
     title: "교육 삭제",
     size: "sm",
     body: `
       <p style="font-size:var(--text-sm);color:var(--gray-600)">
-        <strong>${esc(t.title)}</strong> 교육을 삭제하시겠습니까?<br/>
-        교육 정보와 배정/완료 연결 데이터가 함께 삭제됩니다.
+        <strong>${esc(training.title)}</strong> 교육을 삭제하시겠습니까?<br/>
+        교육 정보와 배정/수료 데이터가 함께 삭제됩니다.
       </p>
     `,
     actions: [
       { label: "취소", variant: "secondary", onClick: () => modal.close() },
       {
-        label: "삭제", variant: "danger",
+        label: "삭제",
+        variant: "danger",
         onClick: async () => {
           modal.setLoading("삭제", true);
           try {
             await deleteTraining(trainingId);
-            toast.success("교육이 삭제되었습니다.");
+            toast.success("교육을 삭제했습니다.");
             modal.close();
             await loadViewData();
           } catch (err) {
@@ -555,23 +553,23 @@ function confirmDelete(trainingId) {
   });
 }
 
-// ─── 헬퍼 ──────────────────────────────────────────────────
-
 function readDate(id) {
-  const v = document.getElementById(id)?.value;
-  return v ? new Date(`${v}T00:00:00`).getTime() : null;
+  const value = document.getElementById(id)?.value;
+  return value ? new Date(`${value}T00:00:00`).getTime() : null;
 }
 
 function toDateInput(ts) {
   return ts ? new Date(ts).toISOString().slice(0, 10) : "";
 }
 
-function esc(v) {
-  return String(v ?? "")
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+function esc(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
-function escAttr(v) {
-  return esc(v).replace(/'/g, "&#39;");
+function escAttr(value) {
+  return esc(value).replace(/'/g, "&#39;");
 }
