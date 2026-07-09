@@ -4,24 +4,23 @@
  * 모든 callable은 firebase-functions/v2/https의 onCall을 사용합니다.
  * cors: true 로 Vercel Preview 등 외부 origin을 허용합니다.
  * region: "us-central1" 은 Firebase JS SDK 기본값과 일치시킵니다.
+ *
+ * 다중 삭제(bulk)는 클라이언트에서 단일 삭제 함수를 반복 호출합니다.
+ * → bulkDeleteEmployeeAccounts / bulkDeleteManagedAccounts Function은 없습니다.
  */
 
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const logger = require("firebase-functions/logger");
-const admin = require("firebase-admin");
+const admin  = require("firebase-admin");
 
 admin.initializeApp();
 
 const auth = admin.auth();
-const db = admin.database();
+const db   = admin.database();
 
 const EMAIL_DOMAIN = "tas.local";
 
-/**
- * 모든 함수에 적용하는 공통 옵션
- * - region: Firebase JS SDK getFunctions() 기본값과 일치
- * - cors: Vercel Preview URL 등 외부 origin preflight 허용
- */
+/** 모든 함수 공통 옵션 */
 const OPTS = { region: "us-central1", cors: true };
 
 // ─────────────────────────────────────────────────────────────
@@ -32,14 +31,14 @@ exports.createEmployeeAccounts = onCall(OPTS, async (request) => {
   await ensureSuperAdmin(request.auth.uid);
 
   const employees = Array.isArray(request.data?.employees) ? request.data.employees : [];
-  if (!employees.length) throw new HttpsError("invalid-argument", "업로드할 직원 데이터가 없습니다.");
+  if (!employees.length)    throw new HttpsError("invalid-argument", "업로드할 직원 데이터가 없습니다.");
   if (employees.length > 1000) throw new HttpsError("invalid-argument", "한 번에 최대 1000명까지 업로드할 수 있습니다.");
 
-  const seenEmpNos = new Set();
+  const seenEmpNos  = new Set();
   const branchCache = new Map();
   const created = [];
   const skipped = [];
-  const failed = [];
+  const failed  = [];
 
   for (const item of employees) {
     const empNo    = normalizeEmpNo(item.empNo);
@@ -129,6 +128,7 @@ exports.createManagedAccount = onCall(OPTS, async (request) => {
 
 // ─────────────────────────────────────────────────────────────
 // 직원 단일 삭제
+// (다중 삭제는 클라이언트에서 이 함수를 반복 호출합니다)
 // ─────────────────────────────────────────────────────────────
 exports.deleteEmployeeAccount = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
@@ -149,6 +149,7 @@ exports.deleteEmployeeAccount = onCall(OPTS, async (request) => {
 
 // ─────────────────────────────────────────────────────────────
 // 관리 계정 단일 삭제 (hq_admin / instructor)
+// (다중 삭제는 클라이언트에서 이 함수를 반복 호출합니다)
 // ─────────────────────────────────────────────────────────────
 exports.deleteManagedAccount = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
@@ -170,90 +171,9 @@ exports.deleteManagedAccount = onCall(OPTS, async (request) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// 직원 다중 삭제
-// - 중간 실패해도 중단 없이 전체 처리
-// - 결과: { succeededCount, failedCount, succeeded[], failed[] }
-// ─────────────────────────────────────────────────────────────
-exports.bulkDeleteEmployeeAccounts = onCall(OPTS, async (request) => {
-  ensureAuthenticated(request);
-  await ensureSuperAdmin(request.auth.uid);
-
-  const uids = Array.isArray(request.data?.uids) ? request.data.uids : [];
-  if (!uids.length)    throw new HttpsError("invalid-argument", "삭제할 UID 목록이 비어 있습니다.");
-  if (uids.length > 200) throw new HttpsError("invalid-argument", "한 번에 최대 200명까지 삭제할 수 있습니다.");
-
-  const succeeded = [];
-  const failed    = [];
-
-  for (const uid of uids) {
-    try {
-      const snap = await db.ref(`users/${uid}`).get();
-      if (!snap.exists()) {
-        failed.push({ uid, message: "사용자 정보를 찾을 수 없습니다." });
-        continue;
-      }
-      const profile = snap.val();
-      if (profile.role !== "employee") {
-        failed.push({ uid, empNo: profile.empNo ?? "", name: profile.name ?? "", message: "직원 계정이 아닙니다." });
-        continue;
-      }
-      await deleteAuthAndProfile(uid);
-      succeeded.push({ uid, empNo: profile.empNo ?? "", name: profile.name ?? "" });
-    } catch (err) {
-      logger.error("bulkDeleteEmployeeAccounts uid error", { uid, message: err?.message, code: err?.code });
-      failed.push({ uid, message: simplifyError(err) });
-    }
-  }
-
-  logger.info("bulkDeleteEmployeeAccounts done", { succeeded: succeeded.length, failed: failed.length });
-  return { succeededCount: succeeded.length, failedCount: failed.length, succeeded, failed };
-});
-
-// ─────────────────────────────────────────────────────────────
-// 관리 계정 다중 삭제 (hq_admin / instructor)
-// - 중간 실패해도 중단 없이 전체 처리
-// - 결과: { succeededCount, failedCount, succeeded[], failed[] }
-// ─────────────────────────────────────────────────────────────
-exports.bulkDeleteManagedAccounts = onCall(OPTS, async (request) => {
-  ensureAuthenticated(request);
-  await ensureSuperAdmin(request.auth.uid);
-
-  const uids = Array.isArray(request.data?.uids) ? request.data.uids : [];
-  if (!uids.length)    throw new HttpsError("invalid-argument", "삭제할 UID 목록이 비어 있습니다.");
-  if (uids.length > 200) throw new HttpsError("invalid-argument", "한 번에 최대 200개까지 삭제할 수 있습니다.");
-
-  const succeeded = [];
-  const failed    = [];
-
-  for (const uid of uids) {
-    try {
-      const snap = await db.ref(`users/${uid}`).get();
-      if (!snap.exists()) {
-        failed.push({ uid, message: "계정 정보를 찾을 수 없습니다." });
-        continue;
-      }
-      const profile = snap.val();
-      if (!["hq_admin", "instructor"].includes(profile.role)) {
-        failed.push({ uid, empNo: profile.empNo ?? "", name: profile.name ?? "", message: "삭제할 수 없는 계정입니다." });
-        continue;
-      }
-      await deleteAuthAndProfile(uid);
-      succeeded.push({ uid, empNo: profile.empNo ?? "", name: profile.name ?? "" });
-    } catch (err) {
-      logger.error("bulkDeleteManagedAccounts uid error", { uid, message: err?.message, code: err?.code });
-      failed.push({ uid, message: simplifyError(err) });
-    }
-  }
-
-  logger.info("bulkDeleteManagedAccounts done", { succeeded: succeeded.length, failed: failed.length });
-  return { succeededCount: succeeded.length, failedCount: failed.length, succeeded, failed };
-});
-
-// ─────────────────────────────────────────────────────────────
 // 공통 헬퍼
 // ─────────────────────────────────────────────────────────────
 
-/** Auth + DB 동시 삭제. Auth 계정이 없어도 DB는 삭제 */
 async function deleteAuthAndProfile(uid) {
   try {
     await auth.deleteUser(uid);
@@ -276,7 +196,7 @@ async function ensureSuperAdmin(uid) {
 
 async function getBranch(branchId, cache) {
   if (cache.has(branchId)) return cache.get(branchId);
-  const snap = await db.ref(`branches/${branchId}`).get();
+  const snap   = await db.ref(`branches/${branchId}`).get();
   const branch = snap.exists() ? { id: branchId, ...snap.val() } : null;
   cache.set(branchId, branch);
   return branch;
@@ -290,8 +210,8 @@ async function saveEmployeeProfile(uid, payload) {
     role:        "employee",
     position:    payload.position,
     branchId:    payload.branch.id,
-    branchCode:  payload.branch.code   ?? "",
-    branchName:  payload.branch.name   ?? "",
+    branchCode:  payload.branch.code        ?? "",
+    branchName:  payload.branch.name        ?? "",
     companyId:   payload.branch.companyId   ?? null,
     companyName: payload.branch.companyName ?? "",
     active:      true,
@@ -305,11 +225,11 @@ async function saveManagedProfile(uid, payload) {
     name:        payload.name,
     email:       payload.email,
     role:        payload.role,
-    position:    payload.position   ?? "",
-    branchId:    payload.branchId   ?? "",
-    branchCode:  payload.branchCode ?? "",
-    branchName:  payload.branchName ?? "",
-    companyId:   payload.companyId  ?? null,
+    position:    payload.position    ?? "",
+    branchId:    payload.branchId    ?? "",
+    branchCode:  payload.branchCode  ?? "",
+    branchName:  payload.branchName  ?? "",
+    companyId:   payload.companyId   ?? null,
     companyName: payload.companyName ?? "",
     active:      true,
     createdAt:   admin.database.ServerValue.TIMESTAMP,

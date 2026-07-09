@@ -350,7 +350,7 @@ function confirmBulkDelete() {
               toast.success(`${result.succeededCount}명이 삭제되었습니다.`);
             }
           } catch (err) {
-            console.error("[employees] bulk delete failed", err);
+            console.error("[employees] bulk delete failed", err?.code, err?.message, err);
             toast.error(err?.message ?? "삭제 중 오류가 발생했습니다.");
             modal.setLoading("삭제", false);
           }
