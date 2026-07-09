@@ -404,6 +404,8 @@ table.data-table {
 
 .data-table tbody tr:last-child { border-bottom: none; }
 .data-table tbody tr:hover { background: var(--gray-50); }
+.data-table tbody tr.row--selected { background: var(--brand-50, #eff6ff); }
+.data-table tbody tr.row--selected:hover { background: var(--brand-100, #dbeafe); }
 
 .data-table td {
   padding: var(--space-3) var(--space-4);

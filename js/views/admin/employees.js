@@ -1,13 +1,17 @@
 import { branchesDB, usersDB } from "../../core/db.js";
 import { TEXT } from "../../constants/text.js";
-import { createEmployeeAccounts, deleteEmployeeAccount } from "../../core/admin-api.js";
+import { createEmployeeAccounts, deleteEmployeeAccount, bulkDeleteEmployeeAccounts } from "../../core/admin-api.js";
 import { modal } from "../../utils/modal.js";
 import { toast } from "../../utils/toast.js";
 import { formatDate } from "../../utils/date.js";
+import { authStore } from "../../core/auth.js";
 
 let employees = [];
 let branches = [];
 let pendingUploadRows = [];
+
+/** 현재 선택된 UID 집합 */
+let selectedUids = new Set();
 
 const t = TEXT.employeeAdmin;
 
@@ -19,6 +23,12 @@ export async function render(container) {
         <div class="section-subtitle">${t.subtitle}</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn--danger" id="btn-bulk-delete-employees" disabled style="display:none">
+          <svg class="btn__icon" width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M2 3h10M5 3V2h4v1M4 3v8a1 1 0 001 1h4a1 1 0 001-1V3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+          </svg>
+          선택 삭제 (<span id="bulk-delete-employee-count">0</span>)
+        </button>
         <button class="btn btn--secondary" id="btn-download-template">${t.downloadTemplate}</button>
         <button class="btn btn--primary" id="btn-upload-employees">${t.excelUpload}</button>
       </div>
@@ -54,6 +64,7 @@ export async function render(container) {
   document.getElementById("btn-download-template")?.addEventListener("click", downloadTemplate);
   document.getElementById("employee-branch-filter")?.addEventListener("change", applyFilters);
   document.getElementById("employee-search")?.addEventListener("input", applyFilters);
+  document.getElementById("btn-bulk-delete-employees")?.addEventListener("click", confirmBulkDelete);
 
   await loadData();
 }
@@ -73,6 +84,10 @@ async function loadData() {
     employees = [];
     branches = [];
   }
+
+  // 목록 새로고침 시 선택 초기화
+  selectedUids = new Set();
+  updateBulkDeleteButton();
 
   fillBranchFilter();
   renderStats();
@@ -149,10 +164,26 @@ function renderTable(list) {
     return;
   }
 
+  const currentUid = authStore.uid;
+
+  // 현재 필터 결과에서 삭제 가능한 항목 (super_admin 및 자기 자신 제외 — 직원은 사실상 전원 가능)
+  const selectableUids = list.map((item) => item.id).filter((id) => id && id !== currentUid);
+  const allSelected = selectableUids.length > 0 && selectableUids.every((id) => selectedUids.has(id));
+
   wrap.innerHTML = `
     <table class="data-table">
       <thead>
         <tr>
+          <th style="width:40px;text-align:center">
+            <input
+              type="checkbox"
+              id="chk-all-employees"
+              title="전체 선택"
+              ${allSelected ? "checked" : ""}
+              ${selectableUids.length === 0 ? "disabled" : ""}
+              style="cursor:pointer;width:16px;height:16px"
+            />
+          </th>
           <th>${t.table.empNo}</th>
           <th>${t.table.name}</th>
           <th>${t.table.branch}</th>
@@ -164,37 +195,168 @@ function renderTable(list) {
         </tr>
       </thead>
       <tbody>
-        ${list.map((item) => `
-          <tr>
-            <td class="cell--mono">${esc(item.empNo)}</td>
-            <td style="font-weight:var(--weight-medium);color:var(--gray-800)">${esc(item.name)}</td>
-            <td>${esc(item.branchName ?? item.branchCode ?? "-")}</td>
-            <td>${esc(item.position ?? "-")}</td>
-            <td class="cell--mono">${esc(item.email ?? `${item.empNo}@tas.local`)}</td>
-            <td>
-              <span class="chip ${item.active === false || item.disabled ? "chip--danger" : "chip--success"}">
-                ${item.active === false || item.disabled ? t.status.inactive : t.status.active}
-              </span>
-            </td>
-            <td>${formatDate(item.createdAt)}</td>
-            <td class="cell--actions">
-              <button
-                class="btn btn--ghost btn--sm btn-delete-employee"
-                data-id="${item.id}"
-                data-name="${attr(item.name)}"
-                style="color:var(--color-danger)"
-              >
-                ${TEXT.common.delete}
-              </button>
-            </td>
-          </tr>
-        `).join("")}
+        ${list.map((item) => {
+          const uid = item.id;
+          const isSelectable = uid && uid !== currentUid;
+          const isChecked = isSelectable && selectedUids.has(uid);
+          return `
+            <tr class="${isChecked ? "row--selected" : ""}">
+              <td style="text-align:center">
+                ${isSelectable ? `
+                  <input
+                    type="checkbox"
+                    class="chk-employee-row"
+                    data-id="${uid}"
+                    ${isChecked ? "checked" : ""}
+                    style="cursor:pointer;width:16px;height:16px"
+                  />
+                ` : `
+                  <input type="checkbox" disabled title="삭제 불가" style="width:16px;height:16px;opacity:0.3;cursor:not-allowed" />
+                `}
+              </td>
+              <td class="cell--mono">${esc(item.empNo)}</td>
+              <td style="font-weight:var(--weight-medium);color:var(--gray-800)">${esc(item.name)}</td>
+              <td>${esc(item.branchName ?? item.branchCode ?? "-")}</td>
+              <td>${esc(item.position ?? "-")}</td>
+              <td class="cell--mono">${esc(item.email ?? `${item.empNo}@tas.local`)}</td>
+              <td>
+                <span class="chip ${item.active === false || item.disabled ? "chip--danger" : "chip--success"}">
+                  ${item.active === false || item.disabled ? t.status.inactive : t.status.active}
+                </span>
+              </td>
+              <td>${formatDate(item.createdAt)}</td>
+              <td class="cell--actions">
+                <button
+                  class="btn btn--ghost btn--sm btn-delete-employee"
+                  data-id="${uid}"
+                  data-name="${attr(item.name)}"
+                  style="color:var(--color-danger)"
+                >
+                  ${TEXT.common.delete}
+                </button>
+              </td>
+            </tr>
+          `;
+        }).join("")}
       </tbody>
     </table>
   `;
 
+  // 전체 선택 체크박스
+  document.getElementById("chk-all-employees")?.addEventListener("change", (e) => {
+    if (e.target.checked) {
+      selectableUids.forEach((id) => selectedUids.add(id));
+    } else {
+      selectableUids.forEach((id) => selectedUids.delete(id));
+    }
+    updateBulkDeleteButton();
+    refreshRowHighlights(list);
+  });
+
+  // 개별 체크박스
+  wrap.querySelectorAll(".chk-employee-row").forEach((chk) => {
+    chk.addEventListener("change", (e) => {
+      const uid = e.target.dataset.id;
+      if (e.target.checked) {
+        selectedUids.add(uid);
+      } else {
+        selectedUids.delete(uid);
+      }
+      updateBulkDeleteButton();
+      // 전체선택 체크박스 상태 동기화
+      const allNowSelected = selectableUids.every((id) => selectedUids.has(id));
+      const headerChk = document.getElementById("chk-all-employees");
+      if (headerChk) headerChk.checked = allNowSelected;
+    });
+  });
+
+  // 단일 삭제 버튼
   wrap.querySelectorAll(".btn-delete-employee").forEach((button) => {
     button.addEventListener("click", () => confirmDeleteEmployee(button.dataset.id, button.dataset.name));
+  });
+}
+
+/** 행 하이라이트만 다시 적용 (테이블 전체 재렌더 없이) */
+function refreshRowHighlights(list) {
+  const wrap = document.getElementById("employee-table-wrap");
+  if (!wrap) return;
+  wrap.querySelectorAll(".chk-employee-row").forEach((chk) => {
+    const row = chk.closest("tr");
+    if (!row) return;
+    if (selectedUids.has(chk.dataset.id)) {
+      row.classList.add("row--selected");
+    } else {
+      row.classList.remove("row--selected");
+    }
+  });
+}
+
+/** 선택 삭제 버튼 상태 업데이트 */
+function updateBulkDeleteButton() {
+  const btn = document.getElementById("btn-bulk-delete-employees");
+  const countEl = document.getElementById("bulk-delete-employee-count");
+  if (!btn) return;
+
+  const count = selectedUids.size;
+  if (countEl) countEl.textContent = String(count);
+
+  if (count > 0) {
+    btn.style.display = "";
+    btn.disabled = false;
+  } else {
+    btn.style.display = "none";
+    btn.disabled = true;
+  }
+}
+
+/** 다중 삭제 확인 모달 */
+function confirmBulkDelete() {
+  if (selectedUids.size === 0) return;
+
+  const targets = employees.filter((item) => selectedUids.has(item.id));
+  const displayList = targets.slice(0, 5);
+  const remaining = targets.length - displayList.length;
+
+  modal.open({
+    title: "선택 삭제",
+    size: "sm",
+    body: `
+      <p style="font-size:var(--text-sm);color:var(--gray-700);margin-bottom:var(--space-3)">
+        선택한 <strong>${targets.length}명</strong>의 직원을 삭제하시겠습니까?<br/>
+        <span style="font-size:var(--text-xs);color:var(--color-danger)">Firebase Authentication 계정과 DB 정보가 함께 삭제됩니다.</span>
+      </p>
+      <div style="background:var(--gray-50);border:1px solid var(--gray-200);border-radius:var(--radius-md);padding:var(--space-3);font-size:var(--text-sm);line-height:2">
+        ${displayList.map((item) => `<div>· ${esc(item.name)} (${esc(item.empNo)})</div>`).join("")}
+        ${remaining > 0 ? `<div style="color:var(--gray-500)">외 ${remaining}명 …</div>` : ""}
+      </div>
+    `,
+    actions: [
+      { label: TEXT.common.cancel, variant: "secondary", onClick: () => modal.close() },
+      {
+        label: "삭제",
+        variant: "danger",
+        onClick: async () => {
+          modal.setLoading("삭제", true);
+          try {
+            const uids = Array.from(selectedUids);
+            const result = await bulkDeleteEmployeeAccounts({ uids });
+            modal.close();
+            selectedUids = new Set();
+            await loadData();
+
+            if (result.failedCount > 0) {
+              toast.error(`${result.succeededCount}명 삭제 완료, ${result.failedCount}명 실패`);
+            } else {
+              toast.success(`${result.succeededCount}명이 삭제되었습니다.`);
+            }
+          } catch (err) {
+            console.error("[employees] bulk delete failed", err);
+            toast.error(err?.message ?? "삭제 중 오류가 발생했습니다.");
+            modal.setLoading("삭제", false);
+          }
+        },
+      },
+    ],
   });
 }
 

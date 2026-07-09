@@ -4,10 +4,11 @@
  */
 
 import { usersDB } from "../../core/db.js";
-import { createManagedAccount, deleteManagedAccount } from "../../core/admin-api.js";
+import { createManagedAccount, deleteManagedAccount, bulkDeleteManagedAccounts } from "../../core/admin-api.js";
 import { modal } from "../../utils/modal.js";
 import { toast } from "../../utils/toast.js";
 import { formatDate } from "../../utils/date.js";
+import { authStore } from "../../core/auth.js";
 
 const ROLE_LABELS = {
   super_admin: "슈퍼관리자",
@@ -20,6 +21,9 @@ const MANAGEABLE_ROLES = ["hq_admin", "instructor"];
 
 let accountList = [];
 
+/** 현재 선택된 UID 집합 */
+let selectedUids = new Set();
+
 export async function render(container) {
   container.innerHTML = `
     <div class="section-header">
@@ -27,12 +31,20 @@ export async function render(container) {
         <div class="section-title">계정 관리</div>
         <div class="section-subtitle">본사 교육관리자와 강사 계정을 생성하고 권한을 관리합니다.</div>
       </div>
-      <button class="btn btn--primary" id="btn-add-account">
-        <svg class="btn__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
-          <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-        </svg>
-        계정 생성
-      </button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button class="btn btn--danger" id="btn-bulk-delete-accounts" disabled style="display:none">
+          <svg class="btn__icon" width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M2 3h10M5 3V2h4v1M4 3v8a1 1 0 001 1h4a1 1 0 001-1V3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+          </svg>
+          선택 삭제 (<span id="bulk-delete-account-count">0</span>)
+        </button>
+        <button class="btn btn--primary" id="btn-add-account">
+          <svg class="btn__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          계정 생성
+        </button>
+      </div>
     </div>
 
     <div class="tabs" id="role-tabs">
@@ -59,6 +71,7 @@ export async function render(container) {
   `;
 
   document.getElementById("btn-add-account")?.addEventListener("click", openCreateModal);
+  document.getElementById("btn-bulk-delete-accounts")?.addEventListener("click", confirmBulkDelete);
   document.getElementById("search-accounts")?.addEventListener("input", (event) => {
     applyFilter(event.target.value);
   });
@@ -67,6 +80,9 @@ export async function render(container) {
     button.addEventListener("click", () => {
       document.querySelectorAll(".tab-btn").forEach((item) => item.classList.remove("active"));
       button.classList.add("active");
+      // 탭 전환 시 선택 초기화
+      selectedUids = new Set();
+      updateBulkDeleteButton();
       applyFilter(null, button.dataset.role);
     });
   });
@@ -83,6 +99,9 @@ async function loadList() {
     accountList = [];
   }
 
+  // 목록 새로고침 시 선택 초기화
+  selectedUids = new Set();
+  updateBulkDeleteButton();
   renderTable(accountList);
 }
 
@@ -120,10 +139,29 @@ function renderTable(list) {
     return;
   }
 
+  const currentUid = authStore.uid;
+
+  // super_admin과 자기 자신은 선택 불가
+  const selectableUids = list
+    .map((user) => accountKey(user))
+    .filter((uid) => uid && uid !== currentUid);
+
+  const allSelected = selectableUids.length > 0 && selectableUids.every((uid) => selectedUids.has(uid));
+
   wrap.innerHTML = `
     <table class="data-table">
       <thead>
         <tr>
+          <th style="width:40px;text-align:center">
+            <input
+              type="checkbox"
+              id="chk-all-accounts"
+              title="전체 선택"
+              ${allSelected ? "checked" : ""}
+              ${selectableUids.length === 0 ? "disabled" : ""}
+              style="cursor:pointer;width:16px;height:16px"
+            />
+          </th>
           <th>이름</th>
           <th>사번</th>
           <th>권한</th>
@@ -137,9 +175,24 @@ function renderTable(list) {
         ${list.map((user) => {
           const uid = accountKey(user);
           const inactive = user?.active === false || user?.disabled === true;
+          const isSelectable = uid && uid !== currentUid;
+          const isChecked = isSelectable && selectedUids.has(uid);
 
           return `
-            <tr>
+            <tr class="${isChecked ? "row--selected" : ""}">
+              <td style="text-align:center">
+                ${isSelectable ? `
+                  <input
+                    type="checkbox"
+                    class="chk-account-row"
+                    data-id="${uid}"
+                    ${isChecked ? "checked" : ""}
+                    style="cursor:pointer;width:16px;height:16px"
+                  />
+                ` : `
+                  <input type="checkbox" disabled title="삭제 불가" style="width:16px;height:16px;opacity:0.3;cursor:not-allowed" />
+                `}
+              </td>
               <td>
                 <div style="display:flex;align-items:center;gap:var(--space-3)">
                   <div class="avatar avatar--sm">${initials(user?.name)}</div>
@@ -162,7 +215,7 @@ function renderTable(list) {
                   <button class="btn btn--ghost btn--sm btn-reset-pw" data-id="${uid}" title="비밀번호 초기화 안내">
                     PW
                   </button>
-                  <button class="btn btn--ghost btn--sm btn-delete" data-id="${uid}" data-name="${escAttr(user?.name)}" title="계정 삭제" style="color:var(--color-danger)">
+                  <button class="btn btn--ghost btn--sm btn-delete" data-id="${uid}" data-name="${escAttr(user?.name)}" title="계정 삭제" style="color:var(--color-danger)" ${!isSelectable ? "disabled" : ""}>
                     <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                       <path d="M2 3h10M5 3V2h4v1M4 3v8a1 1 0 001 1h4a1 1 0 001-1V3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
                     </svg>
@@ -176,6 +229,34 @@ function renderTable(list) {
     </table>
   `;
 
+  // 전체 선택 체크박스
+  document.getElementById("chk-all-accounts")?.addEventListener("change", (e) => {
+    if (e.target.checked) {
+      selectableUids.forEach((uid) => selectedUids.add(uid));
+    } else {
+      selectableUids.forEach((uid) => selectedUids.delete(uid));
+    }
+    updateBulkDeleteButton();
+    refreshRowHighlights();
+  });
+
+  // 개별 체크박스
+  wrap.querySelectorAll(".chk-account-row").forEach((chk) => {
+    chk.addEventListener("change", (e) => {
+      const uid = e.target.dataset.id;
+      if (e.target.checked) {
+        selectedUids.add(uid);
+      } else {
+        selectedUids.delete(uid);
+      }
+      updateBulkDeleteButton();
+      // 전체선택 체크박스 상태 동기화
+      const allNowSelected = selectableUids.every((uid) => selectedUids.has(uid));
+      const headerChk = document.getElementById("chk-all-accounts");
+      if (headerChk) headerChk.checked = allNowSelected;
+    });
+  });
+
   wrap.querySelectorAll(".btn-role").forEach((button) => {
     button.addEventListener("click", () => openRoleModal(button.dataset.id, button.dataset.role));
   });
@@ -186,6 +267,90 @@ function renderTable(list) {
 
   wrap.querySelectorAll(".btn-delete").forEach((button) => {
     button.addEventListener("click", () => confirmDelete(button.dataset.id, button.dataset.name));
+  });
+}
+
+/** 행 하이라이트만 갱신 */
+function refreshRowHighlights() {
+  const wrap = document.getElementById("account-table-wrap");
+  if (!wrap) return;
+  wrap.querySelectorAll(".chk-account-row").forEach((chk) => {
+    const row = chk.closest("tr");
+    if (!row) return;
+    if (selectedUids.has(chk.dataset.id)) {
+      row.classList.add("row--selected");
+    } else {
+      row.classList.remove("row--selected");
+    }
+  });
+}
+
+/** 선택 삭제 버튼 상태 업데이트 */
+function updateBulkDeleteButton() {
+  const btn = document.getElementById("btn-bulk-delete-accounts");
+  const countEl = document.getElementById("bulk-delete-account-count");
+  if (!btn) return;
+
+  const count = selectedUids.size;
+  if (countEl) countEl.textContent = String(count);
+
+  if (count > 0) {
+    btn.style.display = "";
+    btn.disabled = false;
+  } else {
+    btn.style.display = "none";
+    btn.disabled = true;
+  }
+}
+
+/** 다중 삭제 확인 모달 */
+function confirmBulkDelete() {
+  if (selectedUids.size === 0) return;
+
+  const targets = accountList.filter((user) => selectedUids.has(accountKey(user)));
+  const displayList = targets.slice(0, 5);
+  const remaining = targets.length - displayList.length;
+
+  modal.open({
+    title: "선택 삭제",
+    size: "sm",
+    body: `
+      <p style="font-size:var(--text-sm);color:var(--gray-700);margin-bottom:var(--space-3)">
+        선택한 <strong>${targets.length}개</strong>의 계정을 삭제하시겠습니까?<br/>
+        <span style="font-size:var(--text-xs);color:var(--color-danger)">Firebase Authentication 계정과 DB 정보가 함께 삭제됩니다.</span>
+      </p>
+      <div style="background:var(--gray-50);border:1px solid var(--gray-200);border-radius:var(--radius-md);padding:var(--space-3);font-size:var(--text-sm);line-height:2">
+        ${displayList.map((user) => `<div>· ${esc(user.name)} (${esc(user.empNo ?? accountKey(user).slice(0,8))}) — ${ROLE_LABELS[user.role] ?? user.role}</div>`).join("")}
+        ${remaining > 0 ? `<div style="color:var(--gray-500)">외 ${remaining}개 …</div>` : ""}
+      </div>
+    `,
+    actions: [
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      {
+        label: "삭제",
+        variant: "danger",
+        onClick: async () => {
+          modal.setLoading("삭제", true);
+          try {
+            const uids = Array.from(selectedUids);
+            const result = await bulkDeleteManagedAccounts({ uids });
+            modal.close();
+            selectedUids = new Set();
+            await loadList();
+
+            if (result.failedCount > 0) {
+              toast.error(`${result.succeededCount}개 삭제 완료, ${result.failedCount}개 실패`);
+            } else {
+              toast.success(`${result.succeededCount}개 계정이 삭제되었습니다.`);
+            }
+          } catch (err) {
+            console.error("[accounts] bulk delete failed", err);
+            toast.error(err?.message ?? "삭제 중 오류가 발생했습니다.");
+            modal.setLoading("삭제", false);
+          }
+        },
+      },
+    ],
   });
 }
 

@@ -255,6 +255,100 @@ exports.deleteManagedAccount = onCall(async (request) => {
   };
 });
 
+/**
+ * bulkDeleteEmployeeAccounts
+ * 직원 계정 다중 삭제 — 중단 없이 전체 처리 후 결과 반환
+ */
+exports.bulkDeleteEmployeeAccounts = onCall(async (request) => {
+  ensureAuthenticated(request);
+  await ensureSuperAdmin(request.auth.uid);
+
+  const uids = Array.isArray(request.data?.uids) ? request.data.uids : [];
+  if (!uids.length) {
+    throw new HttpsError("invalid-argument", "삭제할 UID 목록이 비어 있습니다.");
+  }
+  if (uids.length > 200) {
+    throw new HttpsError("invalid-argument", "한 번에 최대 200명까지 삭제할 수 있습니다.");
+  }
+
+  const succeeded = [];
+  const failed = [];
+
+  for (const uid of uids) {
+    try {
+      const userSnap = await db.ref(`users/${uid}`).get();
+      if (!userSnap.exists()) {
+        failed.push({ uid, message: "사용자 정보를 찾을 수 없습니다." });
+        continue;
+      }
+      const profile = userSnap.val();
+      if (profile.role !== "employee") {
+        failed.push({ uid, empNo: profile.empNo ?? "", name: profile.name ?? "", message: "직원 계정이 아닙니다." });
+        continue;
+      }
+      await deleteAuthAndProfile(uid);
+      succeeded.push({ uid, empNo: profile.empNo ?? "", name: profile.name ?? "" });
+    } catch (error) {
+      logger.error("bulkDeleteEmployeeAccounts failed for uid", { uid, error });
+      failed.push({ uid, message: simplifyError(error) });
+    }
+  }
+
+  return {
+    succeededCount: succeeded.length,
+    failedCount: failed.length,
+    succeeded,
+    failed,
+  };
+});
+
+/**
+ * bulkDeleteManagedAccounts
+ * 관리 계정(hq_admin / instructor) 다중 삭제 — 중단 없이 전체 처리 후 결과 반환
+ */
+exports.bulkDeleteManagedAccounts = onCall(async (request) => {
+  ensureAuthenticated(request);
+  await ensureSuperAdmin(request.auth.uid);
+
+  const uids = Array.isArray(request.data?.uids) ? request.data.uids : [];
+  if (!uids.length) {
+    throw new HttpsError("invalid-argument", "삭제할 UID 목록이 비어 있습니다.");
+  }
+  if (uids.length > 200) {
+    throw new HttpsError("invalid-argument", "한 번에 최대 200개까지 삭제할 수 있습니다.");
+  }
+
+  const succeeded = [];
+  const failed = [];
+
+  for (const uid of uids) {
+    try {
+      const userSnap = await db.ref(`users/${uid}`).get();
+      if (!userSnap.exists()) {
+        failed.push({ uid, message: "계정 정보를 찾을 수 없습니다." });
+        continue;
+      }
+      const profile = userSnap.val();
+      if (!["hq_admin", "instructor"].includes(profile.role)) {
+        failed.push({ uid, empNo: profile.empNo ?? "", name: profile.name ?? "", message: "삭제할 수 없는 계정입니다." });
+        continue;
+      }
+      await deleteAuthAndProfile(uid);
+      succeeded.push({ uid, empNo: profile.empNo ?? "", name: profile.name ?? "" });
+    } catch (error) {
+      logger.error("bulkDeleteManagedAccounts failed for uid", { uid, error });
+      failed.push({ uid, message: simplifyError(error) });
+    }
+  }
+
+  return {
+    succeededCount: succeeded.length,
+    failedCount: failed.length,
+    succeeded,
+    failed,
+  };
+});
+
 async function deleteAuthAndProfile(uid) {
   try {
     await auth.deleteUser(uid);

@@ -6,6 +6,8 @@ const createEmployeesCallable = httpsCallable(functions, "createEmployeeAccounts
 const createManagedAccountCallable = httpsCallable(functions, "createManagedAccount");
 const deleteEmployeeCallable = httpsCallable(functions, "deleteEmployeeAccount");
 const deleteManagedAccountCallable = httpsCallable(functions, "deleteManagedAccount");
+const bulkDeleteEmployeesCallable = httpsCallable(functions, "bulkDeleteEmployeeAccounts");
+const bulkDeleteManagedCallable = httpsCallable(functions, "bulkDeleteManagedAccounts");
 
 export async function createEmployeeAccounts(payload) {
   const result = await createEmployeesCallable(payload);
@@ -24,5 +26,15 @@ export async function deleteEmployeeAccount(payload) {
 
 export async function deleteManagedAccount(payload) {
   const result = await deleteManagedAccountCallable(payload);
+  return result.data;
+}
+
+export async function bulkDeleteEmployeeAccounts(payload) {
+  const result = await bulkDeleteEmployeesCallable(payload);
+  return result.data;
+}
+
+export async function bulkDeleteManagedAccounts(payload) {
+  const result = await bulkDeleteManagedCallable(payload);
   return result.data;
 }
