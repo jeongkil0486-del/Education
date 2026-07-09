@@ -12,25 +12,19 @@ import {
 export const DEADLINE_SOON_DAYS = 3;
 
 export const TRAINING_TYPES = [
-  "online",
-  "offline",
-  "practice",
-  "exam",
-  "assessment",
+  "initial",
   "recurring",
-  "legal",
+  "external",
+  "online",
   "other",
 ];
 
 export const TRAINING_TYPE_LABELS = {
-  online: "온라인",
-  offline: "집체교육",
-  practice: "실습",
-  exam: "시험",
-  assessment: "평가",
+  initial:   "초기교육",
   recurring: "정기교육",
-  legal: "법정교육",
-  other: "기타",
+  external:  "외부교육",
+  online:    "온라인교육",
+  other:     "기타",
 };
 
 export const TRAINING_STATUS_LABELS = {

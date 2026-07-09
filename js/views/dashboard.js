@@ -250,12 +250,7 @@ async function renderHQAdminDashboard(container) {
         <div class="section-title">교육 관리 대시보드</div>
         <div class="section-subtitle">${todayLabel()}</div>
       </div>
-      <button class="btn btn--primary" id="btn-new-training">
-        <svg class="btn__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
-          <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-        </svg>
-        교육 등록
-      </button>
+      <button class="btn btn--ghost btn--sm" id="btn-new-training" style="display:none" aria-hidden="true"></button>
     </div>
 
     <div class="dashboard-grid">
