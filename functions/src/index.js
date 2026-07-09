@@ -9,7 +9,13 @@ const db = admin.database();
 
 const EMAIL_DOMAIN = "tas.local";
 
-exports.createEmployeeAccounts = onCall(async (request) => {
+/** 모든 함수 공통 옵션 — Vercel Preview 포함 모든 origin 허용 */
+const CALL_OPTS = { region: "us-central1", cors: true };
+
+// ──────────────────────────────────────────────
+// createEmployeeAccounts
+// ──────────────────────────────────────────────
+exports.createEmployeeAccounts = onCall(CALL_OPTS, async (request) => {
   ensureAuthenticated(request);
   await ensureSuperAdmin(request.auth.uid);
 
@@ -17,7 +23,6 @@ exports.createEmployeeAccounts = onCall(async (request) => {
   if (!employees.length) {
     throw new HttpsError("invalid-argument", "업로드할 직원 데이터가 없습니다.");
   }
-
   if (employees.length > 1000) {
     throw new HttpsError("invalid-argument", "한 번에 최대 1000명까지 업로드할 수 있습니다.");
   }
@@ -38,7 +43,6 @@ exports.createEmployeeAccounts = onCall(async (request) => {
       failed.push({ empNo, name, message: "필수값이 누락되었습니다." });
       continue;
     }
-
     if (seenEmpNos.has(empNo)) {
       failed.push({ empNo, name, message: "업로드 파일 내 사번이 중복되었습니다." });
       continue;
@@ -66,14 +70,7 @@ exports.createEmployeeAccounts = onCall(async (request) => {
           skipped.push({ empNo, name, uid: existingUser.uid, message: "이미 등록된 직원입니다." });
           continue;
         }
-
-        await saveEmployeeProfile(existingUser.uid, {
-          empNo,
-          name,
-          email,
-          position,
-          branch,
-        });
+        await saveEmployeeProfile(existingUser.uid, { empNo, name, email, position, branch });
         created.push({ empNo, name, uid: existingUser.uid, message: "인증 계정과 DB를 연결했습니다." });
         continue;
       }
@@ -84,15 +81,7 @@ exports.createEmployeeAccounts = onCall(async (request) => {
         displayName: name,
         disabled: false,
       });
-
-      await saveEmployeeProfile(authUser.uid, {
-        empNo,
-        name,
-        email,
-        position,
-        branch,
-      });
-
+      await saveEmployeeProfile(authUser.uid, { empNo, name, email, position, branch });
       created.push({ empNo, name, uid: authUser.uid, message: "생성 완료" });
     } catch (error) {
       logger.error("createEmployeeAccounts failed for row", { empNo, error });
@@ -110,7 +99,10 @@ exports.createEmployeeAccounts = onCall(async (request) => {
   };
 });
 
-exports.createManagedAccount = onCall({ region: "us-central1", cors: true }, async (request) => {
+// ──────────────────────────────────────────────
+// createManagedAccount
+// ──────────────────────────────────────────────
+exports.createManagedAccount = onCall(CALL_OPTS, async (request) => {
   ensureAuthenticated(request);
   await ensureSuperAdmin(request.auth.uid);
 
@@ -122,11 +114,9 @@ exports.createManagedAccount = onCall({ region: "us-central1", cors: true }, asy
   if (!["hq_admin", "instructor"].includes(role)) {
     throw new HttpsError("invalid-argument", "생성할 계정 권한이 올바르지 않습니다.");
   }
-
   if (!name || !empNo || !password) {
     throw new HttpsError("invalid-argument", "이름, 사번, 임시 비밀번호를 모두 입력해 주세요.");
   }
-
   if (password.length < 6) {
     throw new HttpsError("invalid-argument", "임시 비밀번호는 6자 이상이어야 합니다.");
   }
@@ -145,72 +135,33 @@ exports.createManagedAccount = onCall({ region: "us-central1", cors: true }, asy
         }
         throw new HttpsError("failed-precondition", "동일한 사번의 계정이 다른 권한으로 이미 존재합니다.");
       }
-
-      await auth.updateUser(existingUser.uid, {
-        password,
-        displayName: name,
-        disabled: false,
-      });
-
-      await saveManagedProfile(existingUser.uid, {
-        empNo,
-        name,
-        email,
-        role,
-      });
-
-      return {
-        uid: existingUser.uid,
-        empNo,
-        role,
-        email,
-        message: "인증 계정과 사용자 프로필을 연결했습니다.",
-      };
+      await auth.updateUser(existingUser.uid, { password, displayName: name, disabled: false });
+      await saveManagedProfile(existingUser.uid, { empNo, name, email, role });
+      return { uid: existingUser.uid, empNo, role, email, message: "인증 계정과 사용자 프로필을 연결했습니다." };
     }
 
-    const authUser = await auth.createUser({
-      email,
-      password,
-      displayName: name,
-      disabled: false,
-    });
-
-    await saveManagedProfile(authUser.uid, {
-      empNo,
-      name,
-      email,
-      role,
-    });
-
-    return {
-      uid: authUser.uid,
-      empNo,
-      role,
-      email,
-      message: "생성 완료",
-    };
+    const authUser = await auth.createUser({ email, password, displayName: name, disabled: false });
+    await saveManagedProfile(authUser.uid, { empNo, name, email, role });
+    return { uid: authUser.uid, empNo, role, email, message: "생성 완료" };
   } catch (error) {
-    if (error instanceof HttpsError) {
-      throw error;
-    }
+    if (error instanceof HttpsError) throw error;
     logger.error("createManagedAccount failed", { role, empNo, error });
     throw new HttpsError("internal", simplifyError(error));
   }
 });
 
-exports.deleteEmployeeAccount = onCall(async (request) => {
+// ──────────────────────────────────────────────
+// deleteEmployeeAccount  (단일)
+// ──────────────────────────────────────────────
+exports.deleteEmployeeAccount = onCall(CALL_OPTS, async (request) => {
   ensureAuthenticated(request);
   await ensureSuperAdmin(request.auth.uid);
 
   const uid = normalizeText(request.data?.uid);
-  if (!uid) {
-    throw new HttpsError("invalid-argument", "삭제할 직원 UID가 필요합니다.");
-  }
+  if (!uid) throw new HttpsError("invalid-argument", "삭제할 직원 UID가 필요합니다.");
 
   const userSnap = await db.ref(`users/${uid}`).get();
-  if (!userSnap.exists()) {
-    throw new HttpsError("not-found", "직원 정보를 찾을 수 없습니다.");
-  }
+  if (!userSnap.exists()) throw new HttpsError("not-found", "직원 정보를 찾을 수 없습니다.");
 
   const profile = userSnap.val();
   if (profile.role !== "employee") {
@@ -218,27 +169,21 @@ exports.deleteEmployeeAccount = onCall(async (request) => {
   }
 
   await deleteAuthAndProfile(uid);
-
-  return {
-    uid,
-    empNo: profile.empNo ?? "",
-    message: "삭제 완료",
-  };
+  return { uid, empNo: profile.empNo ?? "", message: "삭제 완료" };
 });
 
-exports.deleteManagedAccount = onCall(async (request) => {
+// ──────────────────────────────────────────────
+// deleteManagedAccount  (단일)
+// ──────────────────────────────────────────────
+exports.deleteManagedAccount = onCall(CALL_OPTS, async (request) => {
   ensureAuthenticated(request);
   await ensureSuperAdmin(request.auth.uid);
 
   const uid = normalizeText(request.data?.uid);
-  if (!uid) {
-    throw new HttpsError("invalid-argument", "삭제할 계정 UID가 필요합니다.");
-  }
+  if (!uid) throw new HttpsError("invalid-argument", "삭제할 계정 UID가 필요합니다.");
 
   const userSnap = await db.ref(`users/${uid}`).get();
-  if (!userSnap.exists()) {
-    throw new HttpsError("not-found", "계정 정보를 찾을 수 없습니다.");
-  }
+  if (!userSnap.exists()) throw new HttpsError("not-found", "계정 정보를 찾을 수 없습니다.");
 
   const profile = userSnap.val();
   if (!["employee", "hq_admin", "instructor"].includes(profile.role)) {
@@ -246,20 +191,13 @@ exports.deleteManagedAccount = onCall(async (request) => {
   }
 
   await deleteAuthAndProfile(uid);
-
-  return {
-    uid,
-    empNo: profile.empNo ?? "",
-    role: profile.role ?? "",
-    message: "삭제 완료",
-  };
+  return { uid, empNo: profile.empNo ?? "", role: profile.role ?? "", message: "삭제 완료" };
 });
 
-/**
- * bulkDeleteEmployeeAccounts
- * 직원 계정 다중 삭제 — 중단 없이 전체 처리 후 결과 반환
- */
-exports.bulkDeleteEmployeeAccounts = onCall(async (request) => {
+// ──────────────────────────────────────────────
+// bulkDeleteEmployeeAccounts  (다중)
+// ──────────────────────────────────────────────
+exports.bulkDeleteEmployeeAccounts = onCall(CALL_OPTS, async (request) => {
   ensureAuthenticated(request);
   await ensureSuperAdmin(request.auth.uid);
 
@@ -289,24 +227,19 @@ exports.bulkDeleteEmployeeAccounts = onCall(async (request) => {
       await deleteAuthAndProfile(uid);
       succeeded.push({ uid, empNo: profile.empNo ?? "", name: profile.name ?? "" });
     } catch (error) {
-      logger.error("bulkDeleteEmployeeAccounts failed for uid", { uid, error });
+      logger.error("bulkDeleteEmployeeAccounts failed for uid", { uid, error: error?.message, code: error?.code });
       failed.push({ uid, message: simplifyError(error) });
     }
   }
 
-  return {
-    succeededCount: succeeded.length,
-    failedCount: failed.length,
-    succeeded,
-    failed,
-  };
+  logger.info("bulkDeleteEmployeeAccounts result", { succeeded: succeeded.length, failed: failed.length });
+  return { succeededCount: succeeded.length, failedCount: failed.length, succeeded, failed };
 });
 
-/**
- * bulkDeleteManagedAccounts
- * 관리 계정(hq_admin / instructor) 다중 삭제 — 중단 없이 전체 처리 후 결과 반환
- */
-exports.bulkDeleteManagedAccounts = onCall(async (request) => {
+// ──────────────────────────────────────────────
+// bulkDeleteManagedAccounts  (다중)
+// ──────────────────────────────────────────────
+exports.bulkDeleteManagedAccounts = onCall(CALL_OPTS, async (request) => {
   ensureAuthenticated(request);
   await ensureSuperAdmin(request.auth.uid);
 
@@ -336,28 +269,24 @@ exports.bulkDeleteManagedAccounts = onCall(async (request) => {
       await deleteAuthAndProfile(uid);
       succeeded.push({ uid, empNo: profile.empNo ?? "", name: profile.name ?? "" });
     } catch (error) {
-      logger.error("bulkDeleteManagedAccounts failed for uid", { uid, error });
+      logger.error("bulkDeleteManagedAccounts failed for uid", { uid, error: error?.message, code: error?.code });
       failed.push({ uid, message: simplifyError(error) });
     }
   }
 
-  return {
-    succeededCount: succeeded.length,
-    failedCount: failed.length,
-    succeeded,
-    failed,
-  };
+  logger.info("bulkDeleteManagedAccounts result", { succeeded: succeeded.length, failed: failed.length });
+  return { succeededCount: succeeded.length, failedCount: failed.length, succeeded, failed };
 });
 
+// ──────────────────────────────────────────────
+// 공통 헬퍼
+// ──────────────────────────────────────────────
 async function deleteAuthAndProfile(uid) {
   try {
     await auth.deleteUser(uid);
   } catch (error) {
-    if (error?.code !== "auth/user-not-found") {
-      throw error;
-    }
+    if (error?.code !== "auth/user-not-found") throw error;
   }
-
   await db.ref(`users/${uid}`).remove();
 }
 
@@ -420,9 +349,7 @@ async function getAuthUserByEmail(email) {
   try {
     return await auth.getUserByEmail(email);
   } catch (error) {
-    if (error?.code === "auth/user-not-found") {
-      return null;
-    }
+    if (error?.code === "auth/user-not-found") return null;
     throw error;
   }
 }
@@ -436,11 +363,7 @@ function normalizeText(value) {
 }
 
 function simplifyError(error) {
-  if (error?.code === "auth/email-already-exists") {
-    return "동일 이메일 계정이 이미 존재합니다.";
-  }
-  if (error?.code === "auth/invalid-password") {
-    return "비밀번호 정책에 맞지 않습니다.";
-  }
+  if (error?.code === "auth/email-already-exists") return "동일 이메일 계정이 이미 존재합니다.";
+  if (error?.code === "auth/invalid-password") return "비밀번호 정책에 맞지 않습니다.";
   return error?.message || "알 수 없는 오류";
 }
