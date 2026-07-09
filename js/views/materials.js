@@ -2,31 +2,31 @@
  * materials.js — 교육자료 관리
  *
  * 접근 권한:
- *   HQ_ADMIN    — 목록·다운로드·업로드(R2 presigned PUT)·삭제
+ *   HQ_ADMIN    — 목록·다운로드·업로드·삭제
  *   INSTRUCTOR  — 목록·다운로드
  *   SUPER_ADMIN — 목록·다운로드·삭제
  *
  * 업로드 흐름:
- *   1. createMaterialUploadUrl Function 호출 → presigned PUT URL 수신
- *   2. 브라우저 → R2 PUT 업로드 (진행률 표시)
- *   3. 업로드 성공 → Firebase DB에 메타 저장 (url = R2 공개 URL)
+ *   1. createMaterialUploadUrl Function → presigned PUT URL
+ *   2. 브라우저 XHR PUT → R2 직접 전송 (진행률 표시)
+ *   3. 업로드 성공 → Firebase DB 메타 저장 (url = R2 공개 URL)
  *
  * 다운로드: url 필드가 있는 자료만 버튼 활성화
  */
 
-import { modal }             from "../utils/modal.js";
-import { toast }             from "../utils/toast.js";
-import { authStore, ROLES }  from "../core/auth.js";
+import { modal }            from "../utils/modal.js";
+import { toast }            from "../utils/toast.js";
+import { authStore, ROLES } from "../core/auth.js";
 import {
   MATERIAL_TYPES,
   MATERIAL_TYPE_LABELS,
   ALLOWED_EXT,
   MAX_FILE_SIZE,
   formatFileSize,
+  validateFile,
   listMaterials,
   deleteMaterial,
   uploadMaterial,
-  validateFile,
 } from "../services/material-service.js";
 
 /* ── 상태 ─────────────────────────────────────────────────── */
@@ -37,9 +37,9 @@ const canUpload = () => authStore.role === ROLES.HQ_ADMIN;
 const canDelete = () =>
   authStore.role === ROLES.HQ_ADMIN || authStore.role === ROLES.SUPER_ADMIN;
 
-/* ════════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════
    진입점
-════════════════════════════════════════════════════════════ */
+══════════════════════════════════════════════════════════ */
 export async function render(container) {
   try {
     container.innerHTML = buildSkeleton();
@@ -51,9 +51,9 @@ export async function render(container) {
   }
 }
 
-/* ════════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════
    뼈대 HTML
-════════════════════════════════════════════════════════════ */
+══════════════════════════════════════════════════════════ */
 function buildSkeleton() {
   return `
     <div class="section-header">
@@ -74,8 +74,7 @@ function buildSkeleton() {
             </svg>
             PDF 업로드
           </button>
-        </div>
-      ` : ""}
+        </div>` : ""}
     </div>
 
     <!-- 필터 바 -->
@@ -105,23 +104,21 @@ function buildSkeleton() {
   `;
 }
 
-/* ════════════════════════════════════════════════════════════
-   정적 이벤트 바인딩
-════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════
+   정적 이벤트
+══════════════════════════════════════════════════════════ */
 function bindStaticEvents(container) {
   container.querySelector("#btn-upload-material")
     ?.addEventListener("click", () => openUploadModal(container));
-
   container.querySelector("#mat-search")
     ?.addEventListener("input", () => renderTable(container));
-
   container.querySelector("#mat-filter-type")
     ?.addEventListener("change", () => renderTable(container));
 }
 
-/* ════════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════
    데이터 로드
-════════════════════════════════════════════════════════════ */
+══════════════════════════════════════════════════════════ */
 async function loadData(container) {
   try {
     state.materials = await listMaterials();
@@ -133,9 +130,9 @@ async function loadData(container) {
   renderTable(container);
 }
 
-/* ════════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════
    목록 테이블
-════════════════════════════════════════════════════════════ */
+══════════════════════════════════════════════════════════ */
 function renderTable(container) {
   const wrap = container.querySelector("#materials-table-wrap")
     ?? document.getElementById("materials-table-wrap");
@@ -161,8 +158,7 @@ function renderTable(container) {
     wrap.innerHTML = `
       <div class="empty-state" style="padding:var(--space-16)">
         <svg width="48" height="48" viewBox="0 0 48 48" fill="none" class="empty-state__icon">
-          <rect x="8" y="4" width="24" height="32" rx="2"
-                stroke="currentColor" stroke-width="1.5"/>
+          <rect x="8" y="4" width="24" height="32" rx="2" stroke="currentColor" stroke-width="1.5"/>
           <path d="M20 4v8h12M12 18h16M12 23h10"
                 stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
@@ -229,8 +225,9 @@ function renderTable(container) {
                        </svg>
                        다운로드
                      </a>`
-                  : `<span style="font-size:var(--text-xs);color:var(--gray-300);
-                                  white-space:nowrap">파일 미등록</span>`
+                  : `<span style="font-size:var(--text-xs);color:var(--gray-300)">
+                       파일 미등록
+                     </span>`
                 }
                 ${canDelete()
                   ? `<button class="btn btn--ghost btn--sm btn-mat-delete"
@@ -252,9 +249,9 @@ function renderTable(container) {
   });
 }
 
-/* ════════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════
    업로드 모달
-════════════════════════════════════════════════════════════ */
+══════════════════════════════════════════════════════════ */
 function openUploadModal(container) {
   let selectedFile = null;
 
@@ -295,7 +292,7 @@ function openUploadModal(container) {
             padding:var(--space-8);
             text-align:center;
             cursor:pointer;
-            transition:border-color .15s,background .15s;
+            transition:border-color .15s, background .15s;
           ">
             <svg width="32" height="32" viewBox="0 0 32 32" fill="none"
                  style="color:var(--gray-300);margin:0 auto var(--space-2)">
@@ -313,36 +310,39 @@ function openUploadModal(container) {
               PDF 전용 · 최대 ${formatFileSize(MAX_FILE_SIZE)}
             </div>
           </div>
-          <input type="file" id="mat-file-input" accept="${ALLOWED_EXT}" style="display:none" />
+          <input type="file" id="mat-file-input" accept="${ALLOWED_EXT}" style="display:none"/>
           <div id="mat-file-error"
                style="font-size:var(--text-xs);color:var(--color-danger);
                       margin-top:4px;display:none"></div>
         </div>
 
-        <!-- 업로드 진행률 바 (업로드 중에만 표시) -->
+        <!-- 진행률 바 -->
         <div id="mat-progress-wrap" style="display:none">
           <div style="display:flex;justify-content:space-between;
                       font-size:var(--text-xs);color:var(--gray-500);
                       margin-bottom:4px">
-            <span id="mat-progress-label">R2에 업로드 중…</span>
+            <span id="mat-progress-label">준비 중…</span>
             <span id="mat-progress-pct">0%</span>
           </div>
-          <div style="height:6px;background:var(--gray-100);border-radius:999px;overflow:hidden">
+          <div style="height:6px;background:var(--gray-100);
+                      border-radius:999px;overflow:hidden">
             <div id="mat-progress-bar"
-                 style="height:100%;width:0%;background:var(--brand-500);
-                        border-radius:999px;transition:width .2s ease"></div>
+                 style="height:100%;width:0%;
+                        background:var(--brand-500);
+                        border-radius:999px;
+                        transition:width .25s ease"></div>
           </div>
         </div>
 
-      </div>
-    `,
+      </div>`,
     actions: [
       { label: "취소",    variant: "secondary", onClick: () => modal.close() },
-      { label: "업로드", variant: "primary",   onClick: () => handleUpload(container, () => selectedFile) },
+      { label: "업로드", variant: "primary",
+        onClick: () => handleUpload(container, () => selectedFile) },
     ],
   });
 
-  /* 파일 선택 이벤트 */
+  /* 파일 드롭존 이벤트 */
   requestAnimationFrame(() => {
     const dropzone  = document.getElementById("mat-dropzone");
     const fileInput = document.getElementById("mat-file-input");
@@ -369,24 +369,16 @@ function openUploadModal(container) {
         </span>
         <span style="color:var(--gray-400);margin-left:8px">
           ${formatFileSize(file.size)}
-        </span>
-      `;
+        </span>`;
       dropzone.style.borderColor = "var(--brand-400)";
       dropzone.style.background  = "var(--brand-50,#f0f7ff)";
     };
 
-    dropzone.addEventListener("click", () => fileInput.click());
-    fileInput.addEventListener("change", () => {
-      if (fileInput.files[0]) applyFile(fileInput.files[0]);
-    });
-    dropzone.addEventListener("dragover", e => {
-      e.preventDefault();
-      dropzone.style.borderColor = "var(--brand-400)";
-    });
-    dropzone.addEventListener("dragleave", () => {
-      if (!selectedFile) dropzone.style.borderColor = "var(--gray-200)";
-    });
-    dropzone.addEventListener("drop", e => {
+    dropzone.addEventListener("click",    () => fileInput.click());
+    fileInput.addEventListener("change",  () => { if (fileInput.files[0]) applyFile(fileInput.files[0]); });
+    dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.style.borderColor = "var(--brand-400)"; });
+    dropzone.addEventListener("dragleave",()  => { if (!selectedFile) dropzone.style.borderColor = "var(--gray-200)"; });
+    dropzone.addEventListener("drop",     (e) => {
       e.preventDefault();
       const file = e.dataTransfer?.files?.[0];
       if (file) applyFile(file);
@@ -408,7 +400,7 @@ async function handleUpload(container, getFile) {
   const fileErr = validateFile(file);
   if (fileErr) { toast.error(fileErr); return; }
 
-  /* 버튼·드롭존 비활성화 */
+  /* 진행률 UI */
   modal.setLoading("업로드", true);
   const progressWrap = document.getElementById("mat-progress-wrap");
   const progressBar  = document.getElementById("mat-progress-bar");
@@ -418,45 +410,27 @@ async function handleUpload(container, getFile) {
 
   const setProgress = (label, pct) => {
     if (progressLbl) progressLbl.textContent = label;
-    if (progressBar) progressBar.style.width = `${pct}%`;
-    if (progressPct) progressPct.textContent = `${pct}%`;
+    if (progressBar) progressBar.style.width  = `${pct}%`;
+    if (progressPct) progressPct.textContent  = `${pct}%`;
   };
 
   try {
-    setProgress("업로드 URL 요청 중…", 5);
-
     await uploadMaterial(
       { title, trainingType: type, description: desc },
       file,
-      {
-        onProgress: (pct) => {
-          // pct: 0~100 (PUT 전송 기준)
-          // 전체 흐름: URL 요청(0~10%) → PUT 업로드(10~90%) → DB 저장(90~100%)
-          setProgress("R2에 업로드 중…", 10 + Math.round(pct * 0.8));
-        },
-      }
+      { onProgress: setProgress }
     );
 
-    setProgress("저장 완료", 100);
     toast.success("교육자료가 업로드되었습니다.");
-
-    setTimeout(() => {
-      modal.close();
-      loadData(container);
-    }, 400);
+    setTimeout(() => { modal.close(); loadData(container); }, 400);
 
   } catch (err) {
-    console.error("[materials] upload failed", err?.code, err?.message, err);
+    console.error("[materials] upload failed", { code: err?.code, message: err?.message }, err);
 
-    // 사용자 친화적 오류 메시지
     let msg = err?.message ?? "업로드 중 오류가 발생했습니다.";
-    if (err?.code?.startsWith("r2/")) {
-      msg = `R2 업로드 실패 (${err.code}). 잠시 후 다시 시도해 주세요.`;
-    } else if (err?.code === "functions/permission-denied") {
-      msg = "업로드 권한이 없습니다.";
-    } else if (err?.code === "functions/failed-precondition") {
-      msg = "R2 설정이 완료되지 않았습니다. 관리자에게 문의하세요.";
-    }
+    if (err?.code === "functions/permission-denied")   msg = "업로드 권한이 없습니다.";
+    if (err?.code === "functions/failed-precondition") msg = "R2 설정이 완료되지 않았습니다. 관리자에게 문의하세요.";
+    if (err?.code?.startsWith("r2/"))                  msg = `R2 업로드 실패 (${err.code}). 잠시 후 다시 시도해 주세요.`;
 
     toast.error(msg);
     if (progressWrap) progressWrap.style.display = "none";
@@ -464,9 +438,9 @@ async function handleUpload(container, getFile) {
   }
 }
 
-/* ════════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════
    삭제 확인
-════════════════════════════════════════════════════════════ */
+══════════════════════════════════════════════════════════ */
 function confirmDelete(id, title, container) {
   modal.open({
     title: "교육자료 삭제",
@@ -481,7 +455,7 @@ function confirmDelete(id, title, container) {
       </p>`,
     actions: [
       { label: "취소", variant: "secondary", onClick: () => modal.close() },
-      { label: "삭제", variant: "danger",    onClick: async () => {
+      { label: "삭제", variant: "danger", onClick: async () => {
         modal.setLoading("삭제", true);
         try {
           await deleteMaterial(id);
@@ -498,9 +472,9 @@ function confirmDelete(id, title, container) {
   });
 }
 
-/* ════════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════
    헬퍼
-════════════════════════════════════════════════════════════ */
+══════════════════════════════════════════════════════════ */
 function spinner() {
   return `<div style="display:flex;align-items:center;justify-content:center;padding:var(--space-16)">
     <div class="splash__spinner"

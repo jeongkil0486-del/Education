@@ -4,15 +4,13 @@
  * 모든 callable은 firebase-functions/v2/https의 onCall을 사용합니다.
  * cors: true 로 Vercel Preview 등 외부 origin을 허용합니다.
  * region: "us-central1" 은 Firebase JS SDK 기본값과 일치시킵니다.
- *
- * 다중 삭제(bulk)는 클라이언트에서 단일 삭제 함수를 반복 호출합니다.
- * → bulkDeleteEmployeeAccounts / bulkDeleteManagedAccounts Function은 없습니다.
  */
 
-const { onCall, HttpsError } = require("firebase-functions/v2/https");
-const logger = require("firebase-functions/logger");
-const admin  = require("firebase-admin");
+"use strict";
 
+const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const logger                 = require("firebase-functions/logger");
+const admin                  = require("firebase-admin");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl }               = require("@aws-sdk/s3-request-presigner");
 
@@ -26,51 +24,47 @@ const EMAIL_DOMAIN = "tas.local";
 /** 모든 함수 공통 옵션 */
 const OPTS = { region: "us-central1", cors: true };
 
-/* ── R2 설정 ──────────────────────────────────────────────────
-   환경변수 설정 방법 (한 번만 실행):
-
-     firebase functions:secrets:set R2_ACCESS_KEY_ID
-     firebase functions:secrets:set R2_SECRET_ACCESS_KEY
-     firebase functions:secrets:set R2_ENDPOINT
-     firebase functions:secrets:set R2_BUCKET
-     firebase functions:secrets:set R2_PUBLIC_BASE_URL
-
-   또는 functions/.env 파일에:
-     R2_ACCESS_KEY_ID=...
-     R2_SECRET_ACCESS_KEY=...
-     R2_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
-     R2_BUCKET=education-materials
-     R2_PUBLIC_BASE_URL=https://pub-<hash>.r2.dev
-                     (또는 https://materials.yourdomain.com 등 커스텀 도메인)
-─────────────────────────────────────────────────────────────── */
-
-/** 허용 MIME 타입 */
-const ALLOWED_MATERIAL_MIME = ["application/pdf"];
-/** presigned URL 유효 시간(초): 5분 */
-const PRESIGN_EXPIRES_SECONDS = 300;
-/** 최대 파일 크기: 50 MB */
+/* ─────────────────────────────────────────────────────────────
+   R2 상수
+───────────────────────────────────────────────────────────── */
+/** 허용 MIME */
+const ALLOWED_MATERIAL_MIME  = ["application/pdf"];
+/** presigned URL 유효 시간 (초) */
+const PRESIGN_EXPIRES_SEC    = 300;          // 5분
+/** 최대 파일 크기 50 MB */
 const MAX_MATERIAL_FILE_SIZE = 50 * 1024 * 1024;
 
-/** Cloudflare R2 S3-호환 클라이언트 (런타임 생성) */
+/* ─────────────────────────────────────────────────────────────
+   R2 헬퍼
+   환경변수는 모두 process.env 에서 읽습니다.
+   코드에 AccessKey를 하드코딩하지 않습니다.
+
+   필요한 환경변수 (functions/.env 또는 Firebase Secrets):
+     R2_ACCESS_KEY_ID
+     R2_SECRET_ACCESS_KEY
+     R2_ENDPOINT          https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+     R2_BUCKET            tas-education-materials
+     R2_PUBLIC_BASE_URL   https://pub-<hash>.r2.dev  (또는 커스텀 도메인)
+───────────────────────────────────────────────────────────── */
 function buildR2Client() {
   const endpoint  = process.env.R2_ENDPOINT;
   const accessKey = process.env.R2_ACCESS_KEY_ID;
   const secretKey = process.env.R2_SECRET_ACCESS_KEY;
 
   if (!endpoint || !accessKey || !secretKey) {
-    logger.error("R2 env missing", {
+    logger.error("[R2] env missing", {
       hasEndpoint:  !!endpoint,
       hasAccessKey: !!accessKey,
       hasSecretKey: !!secretKey,
     });
     throw new HttpsError(
       "failed-precondition",
-      "R2 환경변수가 설정되지 않았습니다. R2_ENDPOINT / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY 를 확인하세요."
+      "R2 환경변수가 설정되지 않았습니다. (R2_ENDPOINT / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY)"
     );
   }
 
   return new S3Client({
-    region: "auto",
+    region:      "auto",
     endpoint,
     credentials: { accessKeyId: accessKey, secretAccessKey: secretKey },
   });
@@ -78,119 +72,109 @@ function buildR2Client() {
 
 /** R2 오브젝트 키: materials/{materialId}/{safeFileName} */
 function buildR2Key(materialId, fileName) {
-  const safe = String(fileName ?? "upload.pdf")
-    .replace(/[^\w.\-]/g, "_")
+  const safe = String(fileName || "upload.pdf")
+    .replace(/[^a-zA-Z0-9.\-_]/g, "_")
     .replace(/_{2,}/g, "_")
     .slice(0, 200);
   return `materials/${materialId}/${safe}`;
 }
 
-// ─────────────────────────────────────────────────────────────
-// createMaterialUploadUrl
-//   hq_admin이 PDF 업로드 전에 R2 presigned PUT URL을 요청합니다.
-//   클라이언트는 반환된 uploadUrl로 PUT 요청해 파일을 R2에 직접 업로드하고,
-//   업로드 성공 후 publicUrl을 materials DB에 저장합니다.
-//
-//   Request:  { fileName: string, fileType: string, fileSize: number }
-//   Response: { uploadUrl: string, publicUrl: string, materialId: string, key: string }
-// ─────────────────────────────────────────────────────────────
+/* ─────────────────────────────────────────────────────────────
+   createMaterialUploadUrl
+   ─ hq_admin 전용
+   ─ R2 presigned PUT URL 발급
+   ─ Firebase DB에 materialId 사전 생성
+   ─ 반환: { uploadUrl, publicUrl, materialId, key }
+───────────────────────────────────────────────────────────── */
 exports.createMaterialUploadUrl = onCall(OPTS, async (request) => {
-  // 1) 인증 확인
+  // 1) 인증
   ensureAuthenticated(request);
 
-  // 2) 권한 확인: hq_admin만 업로드 가능
-  const callerSnap = await db.ref(`users/${request.auth.uid}/role`).get();
-  const callerRole = callerSnap.val();
-  if (callerRole !== "hq_admin") {
+  // 2) 권한: hq_admin 만
+  const roleSnap = await db.ref(`users/${request.auth.uid}/role`).get();
+  if (!roleSnap.exists() || roleSnap.val() !== "hq_admin") {
     throw new HttpsError("permission-denied", "교육관리자(hq_admin)만 파일을 업로드할 수 있습니다.");
   }
 
-  // 3) 입력값 검증
+  // 3) 입력 검증
   const fileName = normalizeText(request.data?.fileName);
   const fileType = normalizeText(request.data?.fileType);
   const fileSize = Number(request.data?.fileSize ?? 0);
 
-  if (!fileName) throw new HttpsError("invalid-argument", "파일명이 필요합니다.");
+  if (!fileName) {
+    throw new HttpsError("invalid-argument", "fileName이 필요합니다.");
+  }
   if (!ALLOWED_MATERIAL_MIME.includes(fileType)) {
-    throw new HttpsError("invalid-argument", "PDF 파일만 업로드할 수 있습니다.");
+    throw new HttpsError("invalid-argument", "PDF 파일만 업로드할 수 있습니다. (application/pdf)");
   }
   if (fileSize <= 0 || fileSize > MAX_MATERIAL_FILE_SIZE) {
     throw new HttpsError(
       "invalid-argument",
-      `파일 크기가 올바르지 않습니다. 1B 이상 50MB 이하여야 합니다. (전달값: ${fileSize})`
+      `파일 크기가 올바르지 않습니다. 1 B 이상 50 MB 이하여야 합니다. (전달값: ${fileSize} B)`
     );
   }
 
-  // 4) R2 환경변수 확인
-  const bucket       = process.env.R2_BUCKET;
-  const publicBaseUrl = process.env.R2_PUBLIC_BASE_URL?.replace(/\/$/, "");
+  // 4) R2 환경변수 추가 확인
+  const bucket        = process.env.R2_BUCKET;
+  const publicBaseUrl = (process.env.R2_PUBLIC_BASE_URL || "").replace(/\/$/, "");
   if (!bucket || !publicBaseUrl) {
-    logger.error("R2_BUCKET or R2_PUBLIC_BASE_URL missing");
-    throw new HttpsError(
-      "failed-precondition",
-      "R2_BUCKET 또는 R2_PUBLIC_BASE_URL 환경변수가 설정되지 않았습니다."
-    );
+    logger.error("[R2] R2_BUCKET or R2_PUBLIC_BASE_URL missing");
+    throw new HttpsError("failed-precondition", "R2_BUCKET 또는 R2_PUBLIC_BASE_URL 환경변수가 없습니다.");
   }
 
-  // 5) Firebase RTDB에 materialId 사전 생성 (placeholder)
-  const newRef = db.ref("materials").push();
+  // 5) Firebase RTDB에 materialId 사전 생성 (메타는 업로드 후 클라이언트가 저장)
+  const newRef     = db.ref("materials").push();
   const materialId = newRef.key;
 
   // 6) R2 오브젝트 키 및 presigned URL 생성
-  const key = buildR2Key(materialId, fileName);
-  const r2  = buildR2Client();
-
+  const key     = buildR2Key(materialId, fileName);
+  const r2      = buildR2Client();
   const command = new PutObjectCommand({
     Bucket:        bucket,
     Key:           key,
     ContentType:   fileType,
     ContentLength: fileSize,
-    // 업로드자 태그 (R2 메타데이터)
     Metadata: {
-      "uploaded-by":  request.auth.uid,
-      "material-id":  materialId,
+      "material-id":   materialId,
+      "uploaded-by":   request.auth.uid,
       "original-name": encodeURIComponent(fileName),
     },
   });
 
   let uploadUrl;
   try {
-    uploadUrl = await getSignedUrl(r2, command, { expiresIn: PRESIGN_EXPIRES_SECONDS });
+    uploadUrl = await getSignedUrl(r2, command, { expiresIn: PRESIGN_EXPIRES_SEC });
   } catch (err) {
-    logger.error("presign failed", { materialId, key, message: err?.message, code: err?.code });
-    throw new HttpsError("internal", `presigned URL 생성 실패: ${err?.message ?? "알 수 없는 오류"}`);
+    logger.error("[R2] presign failed", {
+      materialId, key,
+      code: err?.code, message: err?.message,
+    });
+    throw new HttpsError("internal", `presigned URL 생성 실패: ${err?.message || "알 수 없는 오류"}`);
   }
 
-  // 7) 공개 다운로드 URL
   const publicUrl = `${publicBaseUrl}/${key}`;
 
-  logger.info("createMaterialUploadUrl", {
-    uid: request.auth.uid,
-    materialId,
-    key,
-    fileSize,
-    fileType,
+  logger.info("[R2] presign ok", {
+    uid: request.auth.uid, materialId, key, fileSize, fileType,
   });
 
   return { uploadUrl, publicUrl, materialId, key };
 });
 
-// ─────────────────────────────────────────────────────────────
-// 직원 계정 생성 (Excel 업로드)
-// ─────────────────────────────────────────────────────────────
+/* ─────────────────────────────────────────────────────────────
+   createEmployeeAccounts  (기존 유지)
+───────────────────────────────────────────────────────────── */
 exports.createEmployeeAccounts = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
   await ensureSuperAdmin(request.auth.uid);
 
   const employees = Array.isArray(request.data?.employees) ? request.data.employees : [];
-  if (!employees.length)    throw new HttpsError("invalid-argument", "업로드할 직원 데이터가 없습니다.");
+  if (!employees.length)       throw new HttpsError("invalid-argument", "업로드할 직원 데이터가 없습니다.");
   if (employees.length > 1000) throw new HttpsError("invalid-argument", "한 번에 최대 1000명까지 업로드할 수 있습니다.");
 
   const seenEmpNos  = new Set();
   const branchCache = new Map();
-  const created = [];
-  const skipped = [];
-  const failed  = [];
+  const created = [], skipped = [], failed = [];
 
   for (const item of employees) {
     const empNo    = normalizeEmpNo(item.empNo);
@@ -236,9 +220,9 @@ exports.createEmployeeAccounts = onCall(OPTS, async (request) => {
   return { createdCount: created.length, skippedCount: skipped.length, failedCount: failed.length, created, skipped, failed };
 });
 
-// ─────────────────────────────────────────────────────────────
-// 관리 계정 생성 (hq_admin / instructor)
-// ─────────────────────────────────────────────────────────────
+/* ─────────────────────────────────────────────────────────────
+   createManagedAccount  (기존 유지)
+───────────────────────────────────────────────────────────── */
 exports.createManagedAccount = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
   await ensureSuperAdmin(request.auth.uid);
@@ -278,9 +262,9 @@ exports.createManagedAccount = onCall(OPTS, async (request) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────
-// 직원 단일 삭제
-// ─────────────────────────────────────────────────────────────
+/* ─────────────────────────────────────────────────────────────
+   deleteEmployeeAccount  (기존 유지)
+───────────────────────────────────────────────────────────── */
 exports.deleteEmployeeAccount = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
   await ensureSuperAdmin(request.auth.uid);
@@ -298,9 +282,9 @@ exports.deleteEmployeeAccount = onCall(OPTS, async (request) => {
   return { uid, empNo: profile.empNo ?? "", message: "삭제 완료" };
 });
 
-// ─────────────────────────────────────────────────────────────
-// 관리 계정 단일 삭제 (hq_admin / instructor)
-// ─────────────────────────────────────────────────────────────
+/* ─────────────────────────────────────────────────────────────
+   deleteManagedAccount  (기존 유지)
+───────────────────────────────────────────────────────────── */
 exports.deleteManagedAccount = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
   await ensureSuperAdmin(request.auth.uid);
@@ -320,16 +304,12 @@ exports.deleteManagedAccount = onCall(OPTS, async (request) => {
   return { uid, empNo: profile.empNo ?? "", role: profile.role ?? "", message: "삭제 완료" };
 });
 
-// ─────────────────────────────────────────────────────────────
-// 공통 헬퍼
-// ─────────────────────────────────────────────────────────────
-
+/* ─────────────────────────────────────────────────────────────
+   공통 헬퍼
+───────────────────────────────────────────────────────────── */
 async function deleteAuthAndProfile(uid) {
-  try {
-    await auth.deleteUser(uid);
-  } catch (err) {
-    if (err?.code !== "auth/user-not-found") throw err;
-  }
+  try { await auth.deleteUser(uid); }
+  catch (err) { if (err?.code !== "auth/user-not-found") throw err; }
   await db.ref(`users/${uid}`).remove();
 }
 
@@ -387,9 +367,8 @@ async function saveManagedProfile(uid, payload) {
 }
 
 async function getAuthUserByEmail(email) {
-  try {
-    return await auth.getUserByEmail(email);
-  } catch (err) {
+  try { return await auth.getUserByEmail(email); }
+  catch (err) {
     if (err?.code === "auth/user-not-found") return null;
     throw err;
   }
