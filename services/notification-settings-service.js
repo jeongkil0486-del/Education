@@ -46,21 +46,32 @@ export function normalizeDeadlineBuckets(input) {
       ? input.find((item) => item?.key === defaultBucket.key) ?? input[index] ?? {}
       : {};
 
-    const type = source?.type === "overdue" ? "overdue"
-              : source?.type === "completed" ? "completed"
-              : "withinDays";
+    // bucket4(index 3)는 항상 completed 타입 고정
+    // DB에 overdue로 저장된 구버전 데이터도 completed로 강제 변환
+    const isCompletedSlot = index === 3 || defaultBucket.key === "bucket4";
+    const rawType = source?.type ?? defaultBucket.type;
+    const type = isCompletedSlot
+      ? "completed"
+      : rawType === "overdue" ? "overdue" : "withinDays";
+
     const fallbackDays = defaultBucket.days ?? 0;
     const parsedDays = Number(source?.days);
 
+    // bucket4 label도 DB에 구버전("기한 초과")으로 저장된 경우 기본값으로 강제
+    const rawLabel = String(source?.label ?? defaultBucket.label).trim();
+    const label = isCompletedSlot && (rawLabel === "기한 초과" || rawLabel === "")
+      ? defaultBucket.label  // "완료된 교육"
+      : rawLabel || defaultBucket.label;
+
     return {
       key: String(source?.key ?? defaultBucket.key),
-      label: String(source?.label ?? defaultBucket.label).trim() || defaultBucket.label,
+      label,
       type,
       days: type === "withinDays"
         ? normalizeDays(Number.isFinite(parsedDays) ? parsedDays : fallbackDays)
-        : null,  // overdue / completed 는 days 불필요
+        : null,
       enabled: source?.enabled ?? defaultBucket.enabled,
-      notify: source?.notify ?? defaultBucket.notify,
+      notify: isCompletedSlot ? false : (source?.notify ?? defaultBucket.notify),
     };
   });
 }
