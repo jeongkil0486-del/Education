@@ -10,8 +10,9 @@
 
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const logger                 = require("firebase-functions/logger");
+const { defineSecret }       = require("firebase-functions/params");
 const admin                  = require("firebase-admin");
-const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl }               = require("@aws-sdk/s3-request-presigner");
 
 admin.initializeApp();
@@ -23,6 +24,21 @@ const EMAIL_DOMAIN = "tas.local";
 
 /** 모든 함수 공통 옵션 */
 const OPTS = { region: "us-central1", cors: true };
+const R2_ACCESS_KEY_ID     = defineSecret("R2_ACCESS_KEY_ID");
+const R2_SECRET_ACCESS_KEY = defineSecret("R2_SECRET_ACCESS_KEY");
+const R2_ENDPOINT          = defineSecret("R2_ENDPOINT");
+const R2_BUCKET            = defineSecret("R2_BUCKET");
+const R2_PUBLIC_BASE_URL   = defineSecret("R2_PUBLIC_BASE_URL");
+const R2_OPTS = {
+  ...OPTS,
+  secrets: [
+    R2_ACCESS_KEY_ID,
+    R2_SECRET_ACCESS_KEY,
+    R2_ENDPOINT,
+    R2_BUCKET,
+    R2_PUBLIC_BASE_URL,
+  ],
+};
 
 /* ─────────────────────────────────────────────────────────────
    R2 상수
@@ -46,10 +62,18 @@ const MAX_MATERIAL_FILE_SIZE = 50 * 1024 * 1024;
      R2_BUCKET            tas-education-materials
      R2_PUBLIC_BASE_URL   https://pub-<hash>.r2.dev  (또는 커스텀 도메인)
 ───────────────────────────────────────────────────────────── */
-function buildR2Client() {
-  const endpoint  = process.env.R2_ENDPOINT;
-  const accessKey = process.env.R2_ACCESS_KEY_ID;
-  const secretKey = process.env.R2_SECRET_ACCESS_KEY;
+function getR2Config() {
+  return {
+    endpoint: String(R2_ENDPOINT.value() || "").trim(),
+    accessKey: String(R2_ACCESS_KEY_ID.value() || "").trim(),
+    secretKey: String(R2_SECRET_ACCESS_KEY.value() || "").trim(),
+    bucket: String(R2_BUCKET.value() || "").trim(),
+    publicBaseUrl: String(R2_PUBLIC_BASE_URL.value() || "").trim().replace(/\/$/, ""),
+  };
+}
+
+function buildR2Client(r2Config = getR2Config()) {
+  const { endpoint, accessKey, secretKey } = r2Config;
 
   if (!endpoint || !accessKey || !secretKey) {
     logger.error("[R2] env missing", {
@@ -86,7 +110,7 @@ function buildR2Key(materialId, fileName) {
    ─ Firebase DB에 materialId 사전 생성
    ─ 반환: { uploadUrl, publicUrl, materialId, key }
 ───────────────────────────────────────────────────────────── */
-exports.createMaterialUploadUrl = onCall(OPTS, async (request) => {
+exports.createMaterialUploadUrl = onCall(R2_OPTS, async (request) => {
   // 1) 인증
   ensureAuthenticated(request);
 
@@ -115,11 +139,10 @@ exports.createMaterialUploadUrl = onCall(OPTS, async (request) => {
   }
 
   // 4) R2 환경변수 추가 확인
-  const bucket        = process.env.R2_BUCKET;
-  const publicBaseUrl = (process.env.R2_PUBLIC_BASE_URL || "").replace(/\/$/, "");
-  if (!bucket || !publicBaseUrl) {
-    logger.error("[R2] R2_BUCKET or R2_PUBLIC_BASE_URL missing");
-    throw new HttpsError("failed-precondition", "R2_BUCKET 또는 R2_PUBLIC_BASE_URL 환경변수가 없습니다.");
+  const { bucket, publicBaseUrl } = getR2Config();
+  if (!bucket) {
+    logger.error("[R2] R2_BUCKET missing");
+    throw new HttpsError("failed-precondition", "R2_BUCKET 환경변수가 없습니다.");
   }
 
   // 5) Firebase RTDB에 materialId 사전 생성 (메타는 업로드 후 클라이언트가 저장)
@@ -152,13 +175,80 @@ exports.createMaterialUploadUrl = onCall(OPTS, async (request) => {
     throw new HttpsError("internal", `presigned URL 생성 실패: ${err?.message || "알 수 없는 오류"}`);
   }
 
-  const publicUrl = `${publicBaseUrl}/${key}`;
+  const publicUrl = publicBaseUrl ? `${publicBaseUrl}/${key}` : "";
 
   logger.info("[R2] presign ok", {
     uid: request.auth.uid, materialId, key, fileSize, fileType,
   });
 
   return { uploadUrl, publicUrl, materialId, key };
+});
+
+exports.getMaterialDownloadUrl = onCall(R2_OPTS, async (request) => {
+  ensureAuthenticated(request);
+
+  const materialId = normalizeText(request.data?.materialId);
+  if (!materialId) {
+    throw new HttpsError("invalid-argument", "materialId가 필요합니다.");
+  }
+
+  const profileSnap = await db.ref(`users/${request.auth.uid}`).get();
+  if (!profileSnap.exists()) {
+    throw new HttpsError("permission-denied", "사용자 프로필을 찾을 수 없습니다.");
+  }
+
+  const profile = profileSnap.val();
+  if (!["super_admin", "hq_admin", "instructor"].includes(profile.role)) {
+    throw new HttpsError("permission-denied", "교육자료 다운로드 권한이 없습니다.");
+  }
+
+  const materialSnap = await db.ref(`materials/${materialId}`).get();
+  if (!materialSnap.exists()) {
+    throw new HttpsError("not-found", "교육자료를 찾을 수 없습니다.");
+  }
+
+  const material = materialSnap.val();
+  if (
+    profile.role !== "super_admin" &&
+    profile.companyId &&
+    material.companyId &&
+    profile.companyId !== material.companyId
+  ) {
+    throw new HttpsError("permission-denied", "다른 회사의 교육자료에는 접근할 수 없습니다.");
+  }
+
+  if (!material.r2Key) {
+    if (material.url) {
+      return { downloadUrl: material.url };
+    }
+    throw new HttpsError("failed-precondition", "다운로드 가능한 파일 경로가 없습니다.");
+  }
+
+  const { bucket } = getR2Config();
+  if (!bucket) {
+    throw new HttpsError("failed-precondition", "R2_BUCKET 환경변수가 없습니다.");
+  }
+
+  const r2 = buildR2Client();
+  const command = new GetObjectCommand({
+    Bucket: bucket,
+    Key: material.r2Key,
+    ResponseContentType: material.fileType || "application/pdf",
+    ResponseContentDisposition: `attachment; filename*=UTF-8''${encodeURIComponent(material.fileName || "download.pdf")}`,
+  });
+
+  try {
+    const downloadUrl = await getSignedUrl(r2, command, { expiresIn: PRESIGN_EXPIRES_SEC });
+    return { downloadUrl };
+  } catch (err) {
+    logger.error("[R2] download presign failed", {
+      materialId,
+      key: material.r2Key,
+      code: err?.code,
+      message: err?.message,
+    });
+    throw new HttpsError("internal", `download presigned URL 생성 실패: ${err?.message || "알 수 없는 오류"}`);
+  }
 });
 
 /* ─────────────────────────────────────────────────────────────

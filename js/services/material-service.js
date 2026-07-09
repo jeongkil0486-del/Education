@@ -98,6 +98,27 @@ export async function requestUploadUrl(file) {
   return { uploadUrl, publicUrl, materialId, key };
 }
 
+export async function requestMaterialDownloadUrl(materialId) {
+  const fn = httpsCallable(functions, "getMaterialDownloadUrl");
+
+  let result;
+  try {
+    result = await fn({ materialId });
+  } catch (err) {
+    console.error("[material-service] requestMaterialDownloadUrl failed",
+      { code: err?.code, message: err?.message }, err);
+    const e = new Error(err?.message ?? "다운로드 URL 요청에 실패했습니다.");
+    e.code = err?.code ?? "functions/unknown";
+    throw e;
+  }
+
+  const { downloadUrl } = result.data ?? {};
+  if (!downloadUrl) {
+    throw new Error("서버에서 다운로드 URL을 받지 못했습니다.");
+  }
+  return downloadUrl;
+}
+
 /* ══════════════════════════════════════════════════════════
    Step 2 — 브라우저 → R2 PUT 업로드
    XHR을 사용해 진행률(onProgress)을 추적합니다.
