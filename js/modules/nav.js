@@ -7,12 +7,18 @@ const NAV_CONFIG = {
     {
       group: TEXT.nav.groups.system,
       items: [
-        { path: "dashboard", label: TEXT.routes.dashboard, icon: iconGrid() },
-        { path: "admin/companies", label: TEXT.routes.companies, icon: iconBuilding() },
-        { path: "admin/branches", label: TEXT.routes.branches, icon: iconMapPin() },
-        { path: "admin/accounts", label: TEXT.routes.accounts, icon: iconUsers() },
-        { path: "admin/employees", label: TEXT.routes.adminEmployees, icon: iconUserPlus() },
-        { path: "admin/settings", label: TEXT.routes.adminSettings, icon: iconSettings() },
+        { path: "dashboard",        label: TEXT.routes.dashboard,      icon: iconGrid() },
+        { path: "admin/companies",  label: TEXT.routes.companies,      icon: iconBuilding() },
+        { path: "admin/branches",   label: TEXT.routes.branches,       icon: iconMapPin() },
+        { path: "admin/accounts",   label: TEXT.routes.accounts,       icon: iconUsers() },
+        { path: "admin/employees",  label: TEXT.routes.adminEmployees, icon: iconUserPlus() },
+        { path: "admin/settings",   label: TEXT.routes.adminSettings,  icon: iconSettings() },
+      ],
+    },
+    {
+      group: TEXT.nav.groups.operations,
+      items: [
+        { path: "materials", label: TEXT.routes.materials, icon: iconFile() },
       ],
     },
   ],
