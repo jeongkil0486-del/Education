@@ -41,9 +41,17 @@ export function getTrainingTypeLabel(type) {
 export function computeTrainingStatus(training, now = Date.now()) {
   if (!training) return "scheduled";
   if (training.status === "closed" || training.closedAt) return "closed";
+  // 수료기한 초과: deadline 존재 & 오늘 이전 & ended/closed 아님
   if (training.deadline && training.deadline < now) return "overdue";
-  if (training.startDate && training.startDate > now) return "scheduled";
-  return "in_progress";
+  // 진행중: startDate AND endDate 모두 존재 & 오늘이 기간 안에 있을 때만
+  if (training.startDate && training.endDate) {
+    if (training.startDate > now) return "scheduled";
+    if (training.endDate >= now) return "in_progress";
+    // endDate 지났지만 deadline 없거나 아직 안 지남 → overdue 아니므로 scheduled 처리
+    return "scheduled";
+  }
+  // startDate/endDate 중 하나라도 없으면 예정으로 처리 (진행중 카운트 제외)
+  return "scheduled";
 }
 
 export function statusTone(status) {
@@ -100,10 +108,11 @@ export async function loadTrainingReferences() {
  */
 export function isDeadlineSoon(training, now = Date.now()) {
   if (!training?.deadline) return false;
-  const status = computeTrainingStatus(training, now);
-  if (status === "closed" || status === "overdue") return false;
+  if (training.status === "closed" || training.closedAt) return false;
+  // deadline이 오늘 이후(미래)이어야 함
+  if (training.deadline < now) return false;
   const diffMs = training.deadline - now;
-  return diffMs >= 0 && diffMs <= DEADLINE_SOON_DAYS * 24 * 60 * 60 * 1000;
+  return diffMs <= DEADLINE_SOON_DAYS * 24 * 60 * 60 * 1000;
 }
 
 /**
@@ -248,8 +257,10 @@ export async function getTrainingDetail(trainingId) {
     })
     .sort((a, b) => Number(b.completedAt ?? 0) - Number(a.completedAt ?? 0));
 
+  // training.id가 반드시 존재하도록 보장 (Firebase getVal은 id 필드를 포함하지 않을 수 있음)
+  const trainingWithId = { ...training, id: training.id ?? trainingId };
   return {
-    training: enrichTrainingRecord(training),
+    training: enrichTrainingRecord(trainingWithId),
     references,
     assignments: assignmentRows,
     completions: completionRows,
@@ -257,14 +268,31 @@ export async function getTrainingDetail(trainingId) {
 }
 
 export async function assignEmployees(training, employeeIds, references = null) {
+  // training 객체에서 id를 명시적으로 추출 (enrichTrainingRecord를 거쳐도 id가 있어야 함)
+  const trainingId = training?.id ?? training?.trainingId;
+  if (!trainingId) {
+    const err = new Error("assignEmployees: trainingId가 undefined입니다. training 객체를 확인하세요.");
+    console.error("[training-service] assignEmployees error", { training, employeeIds }, err.message);
+    throw err;
+  }
   const refs = references ?? await loadTrainingReferences();
   const selectedUsers = refs.employees.filter((employee) => employeeIds.includes(employee.id ?? employee.uid));
-  await assignmentsDB.assignUsers(training.id, selectedUsers, {
-    assignedBy: authStore.uid,
-    status: "pending",
-    trainingTitle: training.title,
-    deadline: training.deadline ?? null,
-  });
+  if (!selectedUsers.length) {
+    console.warn("[training-service] assignEmployees: 매칭된 직원 없음", { employeeIds });
+    return;
+  }
+  try {
+    await assignmentsDB.assignUsers(trainingId, selectedUsers, {
+      assignedBy: authStore.uid,
+      status: "pending",
+      trainingTitle: training.title ?? "",
+      deadline: training.deadline ?? null,
+    });
+  } catch (err) {
+    console.error("[training-service] assignUsers failed",
+      { trainingId, employeeIds, code: err?.code, message: err?.message }, err);
+    throw err;
+  }
 }
 
 export async function unassignEmployee(trainingId, uid) {

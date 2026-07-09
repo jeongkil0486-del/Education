@@ -251,6 +251,14 @@ function updateSummary() {
 }
 
 async function handleAssign(trainingId) {
+  // trainingId 방어: 파라미터가 undefined면 state에서 재추출
+  const safeTrainingId = trainingId ?? state.detail?.training?.id ?? state.detail?.training?.trainingId;
+  if (!safeTrainingId) {
+    console.error("[training-detail] handleAssign: trainingId를 확인할 수 없습니다.", { trainingId, stateTraining: state.detail?.training });
+    toast.error("교육 ID를 확인할 수 없습니다. 페이지를 새로고침 해주세요.");
+    return;
+  }
+
   const ids = Array.from(state.selectedIds).filter(uid => uid);
   if (!ids.length) { toast.warning("배정할 직원을 먼저 선택해 주세요."); return; }
 
@@ -263,12 +271,15 @@ async function handleAssign(trainingId) {
   if (btn) { btn.disabled = true; btn.textContent = "배정 중…"; }
 
   try {
-    console.log("[training-detail] assigning uids:", newIds, "to training:", trainingId);
-    await assignEmployees(state.detail.training, newIds, state.detail.references);
+    console.log("[training-detail] assigning uids:", newIds, "to trainingId:", safeTrainingId);
+    // training 객체에 id가 있는지 보장
+    const trainingObj = { ...state.detail.training, id: safeTrainingId };
+    await assignEmployees(trainingObj, newIds, state.detail.references);
     toast.success(`${newIds.length}명에게 교육이 배정되었습니다.`);
-    await loadDetail(document.getElementById("page-content"), trainingId);
+    await loadDetail(document.getElementById("page-content"), safeTrainingId);
   } catch (err) {
-    console.error("[training-detail] assign failed", err?.code, err?.message, err);
+    console.error("[training-detail] assign failed",
+      { trainingId: safeTrainingId, selectedUids: newIds, code: err?.code, message: err?.message }, err);
     toast.error(`교육 배정 중 오류: ${err?.message ?? "알 수 없는 오류"}`);
     if (btn) { btn.disabled = false; btn.textContent = "선택 직원 배정"; }
   }

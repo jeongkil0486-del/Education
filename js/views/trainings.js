@@ -100,10 +100,29 @@ async function loadData() {
 function fillInstructorFilter() {
   const sel = document.getElementById("filter-instructor");
   if (!sel) return;
-  const map = new Map();
-  state.trainings.forEach(t => { if (t.instructorId && t.instructorName) map.set(t.instructorId, t.instructorName); });
+
+  // instructorId 기준 dedupe, 없는 경우 instructorName 기준 dedupe
+  const byId   = new Map(); // instructorId → instructorName
+  const byName = new Map(); // instructorName → true (id 없는 강사)
+
+  state.trainings.forEach(t => {
+    if (t.instructorId && t.instructorName) {
+      // id가 있으면 id 기준으로 한 번만 등록
+      if (!byId.has(t.instructorId)) byId.set(t.instructorId, t.instructorName);
+    } else if (t.instructorName) {
+      // id 없으면 이름 기준으로 dedupe (value = name)
+      byName.set(t.instructorName, true);
+    }
+  });
+
+  const optionsById   = Array.from(byId.entries())
+    .map(([uid, name]) => `<option value="${uid}">${esc(name)}</option>`);
+  const optionsByName = Array.from(byName.keys())
+    .filter(name => ![...byId.values()].includes(name)) // id 있는 강사는 이미 포함됨
+    .map(name => `<option value="${esc(name)}">${esc(name)}</option>`);
+
   sel.innerHTML = `<option value="">전체 강사</option>` +
-    Array.from(map.entries()).map(([uid, name]) => `<option value="${uid}">${esc(name)}</option>`).join("");
+    optionsById.join("") + optionsByName.join("");
 }
 
 function fillBranchFilter() {
@@ -156,7 +175,7 @@ function renderTable() {
     if (activeStatFilter === "soon"       && !isDeadlineSoon(t,now))                          return false;
     if (activeStatFilter === "overdue"    && computeTrainingStatus(t,now) !== "overdue")       return false;
     if (search     && !String(t.title ?? "").toLowerCase().includes(search))         return false;
-    if (instructor && t.instructorId !== instructor)                                  return false;
+    if (instructor && t.instructorId !== instructor && t.instructorName !== instructor) return false;
     if (status     && t.computedStatus !== status)                                    return false;
     if (type       && t.trainingType   !== type)                                      return false;
     if (branch     && !t.branchIds?.includes(branch))                                 return false;
