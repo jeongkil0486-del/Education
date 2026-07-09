@@ -325,6 +325,17 @@ select.form-control {
 .stat-card__delta--down { color: var(--color-danger); }
 .stat-card__delta--flat { color: var(--gray-400); }
 
+/* 클릭 가능한 통계 카드 */
+.stat-card--clickable { transition: box-shadow 0.15s, border-color 0.15s, transform 0.1s; user-select: none; }
+.stat-card--clickable:hover { box-shadow: var(--shadow-md); transform: translateY(-1px); }
+.stat-card--active { border: 2px solid var(--brand-400); background: var(--brand-50, #eff6ff); }
+.stat-card--active .stat-card__label { color: var(--brand-500); }
+
+/* value 색상 variant */
+.stat-card__value--success { color: var(--color-success); }
+.stat-card__value--warning { color: var(--color-warning, #d97706); }
+.stat-card__value--danger  { color: var(--color-danger); }
+
 .stat-card__icon {
   position: absolute;
   top: var(--space-4);

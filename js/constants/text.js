@@ -50,6 +50,7 @@ export const TEXT = {
     accounts: "계정 관리",
     adminEmployees: "직원 관리",
     adminSettings: "시스템 설정",
+    instructorTrainings: "교육 관리",
   },
   nav: {
     groups: {

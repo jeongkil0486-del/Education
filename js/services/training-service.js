@@ -8,6 +8,9 @@ import {
   usersDB,
 } from "../core/db.js";
 
+/** 수료기한 임박 기준: 오늘 포함 N일 이내 */
+export const DEADLINE_SOON_DAYS = 3;
+
 export const TRAINING_TYPES = [
   "online",
   "offline",
@@ -98,12 +101,45 @@ export async function loadTrainingReferences() {
   };
 }
 
+/**
+ * 수료기한 임박 여부 (status가 overdue가 아닌 것 중, deadline이 DEADLINE_SOON_DAYS일 이내)
+ */
+export function isDeadlineSoon(training, now = Date.now()) {
+  if (!training?.deadline) return false;
+  const status = computeTrainingStatus(training, now);
+  if (status === "closed" || status === "overdue") return false;
+  const diffMs = training.deadline - now;
+  return diffMs >= 0 && diffMs <= DEADLINE_SOON_DAYS * 24 * 60 * 60 * 1000;
+}
+
+/**
+ * hq_admin: 전체 교육 목록 조회 (등록 권한 없음)
+ * super_admin: 전체 조회
+ */
 export async function listManagedTrainings() {
   const trainings = authStore.role === ROLES.SUPER_ADMIN
     ? await trainingsDB.listAll()
     : await trainingsDB.list(authStore.companyId);
 
   return sortByRecent(trainings, "createdAt").map(enrichTrainingRecord);
+}
+
+/**
+ * instructor: 본인이 등록(createdBy)하거나 담당 강사(instructorId)인 교육 목록
+ */
+export async function listInstructorTrainings() {
+  const uid = authStore.uid;
+  const companyId = authStore.companyId ?? null;
+
+  const allTrainings = companyId
+    ? await trainingsDB.list(companyId)
+    : await trainingsDB.listAll();
+
+  const myTrainings = allTrainings.filter(
+    (t) => t.createdBy === uid || t.instructorId === uid
+  );
+
+  return sortByRecent(myTrainings, "createdAt").map(enrichTrainingRecord);
 }
 
 export function enrichTrainingRecord(training) {
