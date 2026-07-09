@@ -9,6 +9,7 @@ import {
   TRAINING_TYPE_LABELS,
   buildStatusChip,
   closeTraining,
+  completeTraining,
   computeTrainingStatus,
   deleteTraining,
   listManagedTrainings,
@@ -55,11 +56,11 @@ export async function render(container) {
         <div style="display:flex;gap:var(--space-3);flex-wrap:wrap">
           <select class="form-control" id="filter-status" style="flex:1;min-width:110px">
             <option value="">전체 상태</option>
-            ${Object.entries(TRAINING_STATUS_LABELS).map(([key, value]) => `<option value="${key}">${value}</option>`).join("")}
+            ${Object.entries(TRAINING_STATUS_LABELS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}
           </select>
           <select class="form-control" id="filter-type" style="flex:1;min-width:110px">
             <option value="">전체 유형</option>
-            ${TRAINING_TYPES.map((type) => `<option value="${type}">${TRAINING_TYPE_LABELS[type]}</option>`).join("")}
+            ${TRAINING_TYPES.map((t) => `<option value="${t}">${TRAINING_TYPE_LABELS[t]}</option>`).join("")}
           </select>
           <select class="form-control" id="filter-branch" style="flex:1;min-width:130px">
             <option value="">전체 지점</option>
@@ -97,7 +98,7 @@ async function loadData() {
       trainings,
       notificationSettings: normalizeNotificationSettings(notifications ?? {}),
     };
-    if (!getVisibleDeadlineBuckets(state.notificationSettings).some((bucket) => bucket.key === activeStatFilter)) {
+    if (!getVisibleDeadlineBuckets(state.notificationSettings).some((b) => b.key === activeStatFilter)) {
       activeStatFilter = null;
     }
 
@@ -114,34 +115,23 @@ async function loadData() {
 function fillInstructorFilter() {
   const select = document.getElementById("filter-instructor");
   if (!select) return;
-
-  const byId = new Map();
+  const byId   = new Map();
   const byName = new Map();
-
-  state.trainings.forEach((training) => {
-    if (training.instructorId && training.instructorName) {
-      if (!byId.has(training.instructorId)) byId.set(training.instructorId, training.instructorName);
-    } else if (training.instructorName) {
-      byName.set(training.instructorName, true);
-    }
+  state.trainings.forEach((t) => {
+    if (t.instructorId && t.instructorName) { if (!byId.has(t.instructorId)) byId.set(t.instructorId, t.instructorName); }
+    else if (t.instructorName) { byName.set(t.instructorName, true); }
   });
-
-  const optionsById = Array.from(byId.entries())
-    .map(([uid, name]) => `<option value="${uid}">${esc(name)}</option>`);
-  const optionsByName = Array.from(byName.keys())
-    .filter((name) => ![...byId.values()].includes(name))
-    .map((name) => `<option value="${esc(name)}">${esc(name)}</option>`);
-
-  select.innerHTML = `<option value="">전체 강사</option>${optionsById.join("")}${optionsByName.join("")}`;
+  const optById   = Array.from(byId.entries()).map(([uid, name]) => `<option value="${uid}">${esc(name)}</option>`);
+  const optByName = Array.from(byName.keys()).filter((n) => ![...byId.values()].includes(n)).map((n) => `<option value="${esc(n)}">${esc(n)}</option>`);
+  select.innerHTML = `<option value="">전체 강사</option>${optById.join("")}${optByName.join("")}`;
 }
 
 function fillBranchFilter() {
   const select = document.getElementById("filter-branch");
   if (!select) return;
-
   const branches = state.references?.branches ?? [];
   select.innerHTML = `<option value="">전체 지점</option>${
-    branches.map((branch) => `<option value="${branch.id}">${esc(branch.name ?? branch.code ?? branch.id)}</option>`).join("")
+    branches.map((b) => `<option value="${b.id}">${esc(b.name ?? b.code ?? b.id)}</option>`).join("")
   }`;
 }
 
@@ -151,19 +141,15 @@ function renderStats() {
 
   const visibleBuckets = getVisibleDeadlineBuckets(state.notificationSettings);
   wrap.innerHTML = visibleBuckets.map((bucket) => {
-    const count = state.trainings.filter((training) => bucketIncludesTraining(bucket, training)).length;
-    const sub = bucket.type === "overdue"
-      ? "수료기한이 지난 교육"
-      : `오늘부터 ${bucket.days}일 이내 마감`;
-    const tone = bucket.type === "overdue" ? "danger" : "warning";
-
+    const count = state.trainings.filter((t) => bucketIncludesTraining(bucket, t)).length;
+    const sub   = bucket.type === "overdue" ? "수료기한이 지난 교육" : `오늘부터 ${bucket.days}일 이내 마감`;
+    const tone  = bucket.type === "overdue" ? "danger" : "warning";
     return `
       <div class="stat-card stat-card--clickable ${activeStatFilter === bucket.key ? "stat-card--active" : ""}" data-key="${bucket.key}" style="cursor:pointer">
         <div class="stat-card__label">${esc(bucket.label)}</div>
         <div class="stat-card__value ${tone ? `stat-card__value--${tone}` : ""}">${count}</div>
         <div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:2px">${sub}</div>
-      </div>
-    `;
+      </div>`;
   }).join("");
 
   wrap.querySelectorAll(".stat-card--clickable").forEach((card) => {
@@ -179,20 +165,20 @@ function renderTable() {
   const wrap = document.getElementById("trainings-table-wrap");
   if (!wrap) return;
 
-  const search = (document.getElementById("search-trainings")?.value ?? "").trim().toLowerCase();
+  const search     = (document.getElementById("search-trainings")?.value ?? "").trim().toLowerCase();
   const instructor = document.getElementById("filter-instructor")?.value ?? "";
-  const status = document.getElementById("filter-status")?.value ?? "";
-  const type = document.getElementById("filter-type")?.value ?? "";
-  const branch = document.getElementById("filter-branch")?.value ?? "";
-  const activeBucket = state.notificationSettings?.deadlineBuckets?.find((bucket) => bucket.key === activeStatFilter) ?? null;
+  const status     = document.getElementById("filter-status")?.value ?? "";
+  const type       = document.getElementById("filter-type")?.value ?? "";
+  const branch     = document.getElementById("filter-branch")?.value ?? "";
+  const activeBucket = state.notificationSettings?.deadlineBuckets?.find((b) => b.key === activeStatFilter) ?? null;
 
-  const filtered = state.trainings.filter((training) => {
-    if (activeBucket && !bucketIncludesTraining(activeBucket, training)) return false;
-    if (search && !String(training.title ?? "").toLowerCase().includes(search)) return false;
-    if (instructor && training.instructorId !== instructor && training.instructorName !== instructor) return false;
-    if (status && training.computedStatus !== status) return false;
-    if (type && training.trainingType !== type) return false;
-    if (branch && !training.branchIds?.includes(branch)) return false;
+  const filtered = state.trainings.filter((t) => {
+    if (activeBucket && !bucketIncludesTraining(activeBucket, t)) return false;
+    if (search && !String(t.title ?? "").toLowerCase().includes(search)) return false;
+    if (instructor && t.instructorId !== instructor && t.instructorName !== instructor) return false;
+    if (status && t.computedStatus !== status) return false;
+    if (type && t.trainingType !== type) return false;
+    if (branch && !t.branchIds?.includes(branch)) return false;
     return true;
   });
 
@@ -213,64 +199,105 @@ function renderTable() {
           <th>담당 강사</th>
           <th>상태</th>
           <th>생성일</th>
-          <th style="width:90px"></th>
+          <th style="width:130px"></th>
         </tr>
       </thead>
       <tbody>
-        ${filtered.map((training) => {
-          const branchSummary = training.branchNames?.length ? training.branchNames.join(", ") : "전체 지점";
+        ${filtered.map((t) => {
+          const branchSummary = t.branchNames?.length ? t.branchNames.join(", ") : "전체 지점";
+          const isCompleted   = t.computedStatus === "completed";
+          const isClosed      = t.computedStatus === "closed";
           return `
-            <tr data-id="${training.id}" style="cursor:pointer">
-              <td><div style="font-weight:var(--weight-semibold);color:var(--gray-800)">${esc(training.title)}</div></td>
-              <td>${esc(TRAINING_TYPE_LABELS[training.trainingType] ?? "기타")}</td>
-              <td><div>${esc(training.companyName || "-")}</div><div style="font-size:var(--text-xs);color:var(--gray-400)">${esc(branchSummary)}</div></td>
-              <td style="white-space:nowrap">${formatDate(training.startDate)} ~ ${formatDate(training.endDate)}</td>
-              <td style="white-space:nowrap">${formatDate(training.deadline)}</td>
-              <td>${esc(training.instructorName || "-")}</td>
-              <td>${buildStatusChip(training.computedStatus)}</td>
-              <td>${formatDate(training.createdAt)}</td>
+            <tr data-id="${t.id}" style="cursor:pointer">
+              <td><div style="font-weight:var(--weight-semibold);color:var(--gray-800)">${esc(t.title)}</div></td>
+              <td>${esc(TRAINING_TYPE_LABELS[t.trainingType] ?? "기타")}</td>
+              <td>
+                <div>${esc(t.companyName || "–")}</div>
+                <div style="font-size:var(--text-xs);color:var(--gray-400)">${esc(branchSummary)}</div>
+              </td>
+              <td style="white-space:nowrap">${formatDate(t.startDate)} ~ ${formatDate(t.endDate)}</td>
+              <td style="white-space:nowrap">${formatDate(t.deadline)}</td>
+              <td>${esc(t.instructorName || "–")}</td>
+              <td>${buildStatusChip(t.computedStatus)}</td>
+              <td>${formatDate(t.createdAt)}</td>
               <td class="cell--actions">
-                <div style="display:flex;gap:4px;justify-content:flex-end">
-                  ${training.computedStatus !== "closed" ? `<button class="btn btn--ghost btn--sm btn-close" data-id="${training.id}">종료</button>` : ""}
-                  <button class="btn btn--ghost btn--sm btn-del" data-id="${training.id}" style="color:var(--color-danger)">삭제</button>
+                <div style="display:flex;gap:4px;justify-content:flex-end;flex-wrap:wrap">
+                  ${!isCompleted ? `<button class="btn btn--ghost btn--sm btn-complete" data-id="${t.id}" style="color:var(--color-success,#16a34a)" title="완료 처리">완료</button>` : ""}
+                  ${!isClosed && !isCompleted ? `<button class="btn btn--ghost btn--sm btn-close" data-id="${t.id}" title="종료 처리">종료</button>` : ""}
+                  <button class="btn btn--ghost btn--sm btn-del" data-id="${t.id}" style="color:var(--color-danger)" title="삭제">삭제</button>
                 </div>
               </td>
-            </tr>
-          `;
+            </tr>`;
         }).join("")}
       </tbody>
     </table>
   `;
 
   wrap.querySelectorAll("tr[data-id]").forEach((row) => {
-    row.addEventListener("click", (event) => {
-      if (!event.target.closest(".cell--actions")) {
-        router.push("training-detail", { id: row.dataset.id });
-      }
+    row.addEventListener("click", (e) => {
+      if (!e.target.closest(".cell--actions")) router.push("training-detail", { id: row.dataset.id });
     });
   });
-  wrap.querySelectorAll(".btn-close").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      confirmClose(button.dataset.id);
-    });
+  wrap.querySelectorAll(".btn-complete").forEach((btn) => {
+    btn.addEventListener("click", (e) => { e.stopPropagation(); confirmComplete(btn.dataset.id); });
   });
-  wrap.querySelectorAll(".btn-del").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      confirmDelete(button.dataset.id);
-    });
+  wrap.querySelectorAll(".btn-close").forEach((btn) => {
+    btn.addEventListener("click", (e) => { e.stopPropagation(); confirmClose(btn.dataset.id); });
+  });
+  wrap.querySelectorAll(".btn-del").forEach((btn) => {
+    btn.addEventListener("click", (e) => { e.stopPropagation(); confirmDelete(btn.dataset.id); });
   });
 }
 
+/* ── 완료 확인 팝업 ── */
+function confirmComplete(id) {
+  const t = state.trainings.find((item) => item.id === id);
+  if (!t) return;
+
+  modal.open({
+    title: "교육 완료 처리",
+    size: "sm",
+    body: `
+      <p style="font-size:var(--text-sm);color:var(--gray-600)">
+        <strong>${esc(t.title)}</strong> 교육을 완료 처리하시겠습니까?<br/>
+        배정된 직원의 교육 이력카드에 자동으로 수료 기록이 생성됩니다.
+      </p>`,
+    actions: [
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      {
+        label: "완료",
+        variant: "primary",
+        onClick: async () => {
+          modal.setLoading("완료", true);
+          try {
+            await completeTraining(id);
+            toast.success("교육을 완료 처리했습니다. 직원 이력카드에 수료 기록이 생성되었습니다.");
+            modal.close();
+            await loadData();
+          } catch (err) {
+            if (err?.message === "NO_ASSIGNMENTS") {
+              toast.error("배정된 직원이 없습니다. 직원을 먼저 배정해 주세요.");
+            } else {
+              console.error("[trainings] complete failed", err);
+              toast.error("완료 처리 중 오류가 발생했습니다.");
+            }
+            modal.setLoading("완료", false);
+          }
+        },
+      },
+    ],
+  });
+}
+
+/* ── 종료 확인 팝업 ── */
 function confirmClose(id) {
-  const training = state.trainings.find((item) => item.id === id);
-  if (!training) return;
+  const t = state.trainings.find((item) => item.id === id);
+  if (!t) return;
 
   modal.open({
     title: "교육 종료 처리",
     size: "sm",
-    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)"><strong>${esc(training.title)}</strong> 교육을 종료 처리하시겠습니까?</p>`,
+    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)"><strong>${esc(t.title)}</strong> 교육을 종료 처리하시겠습니까?</p>`,
     actions: [
       { label: "취소", variant: "secondary", onClick: () => modal.close() },
       {
@@ -294,14 +321,15 @@ function confirmClose(id) {
   });
 }
 
+/* ── 삭제 확인 팝업 ── */
 function confirmDelete(id) {
-  const training = state.trainings.find((item) => item.id === id);
-  if (!training) return;
+  const t = state.trainings.find((item) => item.id === id);
+  if (!t) return;
 
   modal.open({
     title: "교육 삭제",
     size: "sm",
-    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)"><strong>${esc(training.title)}</strong> 교육을 삭제하시겠습니까?</p>`,
+    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)"><strong>${esc(t.title)}</strong> 교육을 삭제하시겠습니까?</p>`,
     actions: [
       { label: "취소", variant: "secondary", onClick: () => modal.close() },
       {
@@ -325,10 +353,6 @@ function confirmDelete(id) {
   });
 }
 
-function esc(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+function esc(v) {
+  return String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }

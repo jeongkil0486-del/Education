@@ -471,7 +471,7 @@
 }
 
 .dashboard-grid--compact {
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .detail-layout {
@@ -569,29 +569,71 @@
   color: var(--gray-400);
 }
 
-/* 교육이력카드 섹션 테이블 */
-.hc-section-table {
+/* ─── 교육이력카드 전용 CSS (scope: .hc-wrap) ─── */
+.hc-wrap .hc-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.hc-wrap .hc-employee-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.hc-wrap .hc-employee-table th,
+.hc-wrap .hc-employee-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--gray-100);
+  text-align: left;
+}
+
+.hc-wrap .hc-employee-table th {
+  background: var(--gray-50);
+  font-weight: var(--weight-semibold);
+  color: var(--gray-600);
+  font-size: var(--text-xs);
+  border-bottom: 1px solid var(--gray-200);
+}
+
+.hc-wrap .hc-employee-table tbody tr {
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.hc-wrap .hc-employee-table tbody tr:hover {
+  background: var(--gray-50);
+}
+
+.hc-wrap .hc-employee-table tbody tr.hc-row--selected {
+  background: var(--brand-50, #eff6ff);
+  box-shadow: inset 3px 0 0 var(--brand-400);
+}
+
+.hc-wrap .hc-section-table {
   width: 100%;
   border-collapse: collapse;
   font-size: var(--text-xs);
 }
 
-.hc-section-table th,
-.hc-section-table td {
+.hc-wrap .hc-section-table th,
+.hc-wrap .hc-section-table td {
   border: 1px solid var(--gray-200);
   padding: 6px 8px;
   text-align: left;
   vertical-align: middle;
 }
 
-.hc-section-table th {
+.hc-wrap .hc-section-table th {
   background: var(--gray-50);
   font-weight: var(--weight-semibold);
   color: var(--gray-600);
   white-space: nowrap;
 }
 
-.hc-section-table tbody tr:hover {
+.hc-wrap .hc-section-table tbody tr:hover {
   background: var(--gray-50);
 }
 
@@ -603,14 +645,6 @@
 
 @media (max-width: 768px) {
   .detail-info-grid,
-  .dashboard-grid--compact {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 768px) {
-  .detail-info-grid,
-  .history-card-summary,
   .dashboard-grid--compact {
     grid-template-columns: 1fr;
   }
