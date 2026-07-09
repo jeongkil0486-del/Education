@@ -142,8 +142,12 @@ function renderStats() {
   const visibleBuckets = getVisibleDeadlineBuckets(state.notificationSettings);
   wrap.innerHTML = visibleBuckets.map((bucket) => {
     const count = state.trainings.filter((t) => bucketIncludesTraining(bucket, t)).length;
-    const sub   = bucket.type === "overdue" ? "수료기한이 지난 교육" : `오늘부터 ${bucket.days}일 이내 마감`;
-    const tone  = bucket.type === "overdue" ? "danger" : "warning";
+    const sub   = bucket.type === "completed" ? "완료 처리된 교육"
+                : bucket.type === "overdue"   ? "수료기한이 지난 교육"
+                : `오늘부터 ${bucket.days}일 이내 마감`;
+    const tone  = bucket.type === "completed" ? "success"
+                : bucket.type === "overdue"   ? "danger"
+                : "warning";
     return `
       <div class="stat-card stat-card--clickable ${activeStatFilter === bucket.key ? "stat-card--active" : ""}" data-key="${bucket.key}" style="cursor:pointer">
         <div class="stat-card__label">${esc(bucket.label)}</div>

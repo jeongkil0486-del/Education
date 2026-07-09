@@ -25,11 +25,11 @@ export const DEFAULT_DEADLINE_BUCKETS = [
   },
   {
     key: "bucket4",
-    label: "기한 초과",
-    type: "overdue",
+    label: "완료된 교육",
+    type: "completed",
     days: null,
     enabled: true,
-    notify: true,
+    notify: false,
   },
 ];
 
@@ -46,19 +46,32 @@ export function normalizeDeadlineBuckets(input) {
       ? input.find((item) => item?.key === defaultBucket.key) ?? input[index] ?? {}
       : {};
 
-    const type = source?.type === "overdue" ? "overdue" : "withinDays";
+    // bucket4(index 3)는 항상 completed 타입 고정
+    // DB에 overdue로 저장된 구버전 데이터도 completed로 강제 변환
+    const isCompletedSlot = index === 3 || defaultBucket.key === "bucket4";
+    const rawType = source?.type ?? defaultBucket.type;
+    const type = isCompletedSlot
+      ? "completed"
+      : rawType === "overdue" ? "overdue" : "withinDays";
+
     const fallbackDays = defaultBucket.days ?? 0;
     const parsedDays = Number(source?.days);
 
+    // bucket4 label도 DB에 구버전("기한 초과")으로 저장된 경우 기본값으로 강제
+    const rawLabel = String(source?.label ?? defaultBucket.label).trim();
+    const label = isCompletedSlot && (rawLabel === "기한 초과" || rawLabel === "")
+      ? defaultBucket.label  // "완료된 교육"
+      : rawLabel || defaultBucket.label;
+
     return {
       key: String(source?.key ?? defaultBucket.key),
-      label: String(source?.label ?? defaultBucket.label).trim() || defaultBucket.label,
+      label,
       type,
       days: type === "withinDays"
         ? normalizeDays(Number.isFinite(parsedDays) ? parsedDays : fallbackDays)
         : null,
       enabled: source?.enabled ?? defaultBucket.enabled,
-      notify: source?.notify ?? defaultBucket.notify,
+      notify: isCompletedSlot ? false : (source?.notify ?? defaultBucket.notify),
     };
   });
 }
@@ -73,7 +86,15 @@ export function normalizeNotificationSettings(settings = {}) {
 
 export function bucketIncludesTraining(bucket, training, now = Date.now()) {
   if (!bucket?.enabled) return false;
+
+  // ── 완료된 교육 카드: status=completed 만 카운트
+  if (bucket.type === "completed") {
+    return training?.computedStatus === "completed" || training?.status === "completed";
+  }
+
+  // ── D-N / 기한초과 카드: completed 교육은 제외
   if (!training?.deadline) return false;
+  if (training?.computedStatus === "completed" || training?.status === "completed" || training?.completedAt) return false;
   if (training?.computedStatus === "closed" || training?.status === "closed" || training?.closedAt) return false;
 
   if (bucket.type === "overdue") {

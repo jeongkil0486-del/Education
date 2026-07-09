@@ -81,6 +81,7 @@ function renderBucketSettings() {
             <select class="form-control bucket-input" data-key="${bucket.key}" data-field="type">
               <option value="withinDays" ${bucket.type === "withinDays" ? "selected" : ""}>마감 N일 이내</option>
               <option value="overdue" ${bucket.type === "overdue" ? "selected" : ""}>기한 초과</option>
+              <option value="completed" ${bucket.type === "completed" ? "selected" : ""}>완료된 교육</option>
             </select>
           </div>
           <div class="form-group">
@@ -93,9 +94,13 @@ function renderBucketSettings() {
               min="1"
               max="365"
               value="${bucket.days ?? ""}"
-              ${bucket.type === "overdue" ? "disabled" : ""}
+              ${(bucket.type === "overdue" || bucket.type === "completed") ? "disabled" : ""}
             />
-            <div class="form-hint">${bucket.type === "overdue" ? "기한 초과는 기준일을 사용하지 않습니다." : "오늘부터 N일 이내인 교육을 집계합니다."}</div>
+            <div class="form-hint">${
+              bucket.type === "completed" ? "완료된 교육(status=completed)을 집계합니다." :
+              bucket.type === "overdue"   ? "기한 초과는 기준일을 사용하지 않습니다." :
+              "오늘부터 N일 이내인 교육을 집계합니다."
+            }</div>
           </div>
         </div>
         <div style="display:flex;gap:var(--space-4);flex-wrap:wrap">
@@ -136,7 +141,7 @@ function handleBucketChange(event) {
   }
 
   if (field === "type") {
-    bucket.days = bucket.type === "overdue" ? null : Math.max(1, Number(bucket.days || 1));
+    bucket.days = (bucket.type === "overdue" || bucket.type === "completed") ? null : Math.max(1, Number(bucket.days || 1));
     renderBucketSettings();
     return;
   }
@@ -154,7 +159,7 @@ function updatePreview() {
         key: bucket.key,
         label: bucket.label,
         type: bucket.type,
-        ...(bucket.type === "withinDays" ? { days: Number(bucket.days ?? 1) } : {}),
+        ...(bucket.type === "withinDays" ? { days: Number(bucket.days ?? 1) } : {}),  // overdue/completed는 days 없음
         enabled: !!bucket.enabled,
         notify: !!bucket.notify,
       })),
