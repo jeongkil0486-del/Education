@@ -9,6 +9,7 @@ const routes = [
   { path: "my-history", title: TEXT.routes.myHistory, allow: [ROLES.EMPLOYEE], view: () => import("../views/my-history.js").then((m) => m.render) },
   { path: "trainings", title: TEXT.routes.trainings, allow: [ROLES.HQ_ADMIN, ROLES.SUPER_ADMIN], view: () => import("../views/trainings.js").then((m) => m.render) },
   { path: "training-detail", title: TEXT.routes.trainingDetail, allow: [ROLES.HQ_ADMIN, ROLES.SUPER_ADMIN], view: () => import("../views/training-detail.js").then((m) => m.render) },
+  { path: "history-cards", title: TEXT.routes.historyCards, allow: [ROLES.HQ_ADMIN], view: () => import("../views/history-cards.js").then((m) => m.render) },
   { path: "materials", title: TEXT.routes.materials, allow: [ROLES.HQ_ADMIN, ROLES.INSTRUCTOR], view: () => import("../views/materials.js").then((m) => m.render) },
   { path: "employees", title: TEXT.routes.employees, allow: [ROLES.HQ_ADMIN], view: () => import("../views/employees.js").then((m) => m.render) },
   { path: "employee-detail", title: TEXT.routes.employeeDetail, allow: [ROLES.HQ_ADMIN], view: () => import("../views/employee-detail.js").then((m) => m.render) },

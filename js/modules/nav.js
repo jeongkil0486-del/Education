@@ -30,6 +30,7 @@ const NAV_CONFIG = {
       group: TEXT.nav.groups.people,
       items: [
         { path: "employees", label: TEXT.routes.employees, icon: iconUsers() },
+        { path: "history-cards", label: TEXT.routes.historyCards, icon: iconHistory() },
         { path: "statistics", label: TEXT.routes.statistics, icon: iconChart() },
       ],
     },

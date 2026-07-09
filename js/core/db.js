@@ -117,11 +117,36 @@ export const departmentsDB = {
 ══════════════════════════════════════════════════════════ */
 export const trainingsDB = {
   get:     (id)        => getVal(`trainings/${id}`),
-  create:  (data)      => push(r("trainings"), { ...data, createdAt: Date.now() }),
+  create:  (data)      => {
+    const now = Date.now();
+    return push(r("trainings"), { ...data, createdAt: data.createdAt ?? now, updatedAt: now });
+  },
   update:  (id, data)  => update(r("trainings", id), { ...data, updatedAt: Date.now() }),
+  close:   (id, data = {}) => update(r("trainings", id), {
+    ...data,
+    status: "closed",
+    closedAt: Date.now(),
+    updatedAt: Date.now(),
+  }),
   delete:  (id)        => remove(r("trainings", id)),
   list:    (companyId) => getList("trainings", "companyId", companyId),
   listAll: ()          => getList("trainings"),
+  deleteCascade: async (id) => {
+    const [assignments, completions] = await Promise.all([
+      getList(`trainingAssignments/${id}`),
+      getList(`trainingCompletions/${id}`),
+    ]);
+    const updates = { [`trainings/${id}`]: null };
+    assignments.forEach(({ uid }) => {
+      updates[`trainingAssignments/${id}/${uid}`] = null;
+      updates[`userAssignments/${uid}/${id}`] = null;
+    });
+    completions.forEach(({ uid }) => {
+      updates[`trainingCompletions/${id}/${uid}`] = null;
+      updates[`userCompletions/${uid}/${id}`] = null;
+    });
+    return update(ref(db), updates);
+  },
 };
 
 /* ══════════════════════════════════════════════════════════
@@ -135,9 +160,47 @@ export const assignmentsDB = {
   assign: async (trainingId, userIds, extraData = {}) => {
     const updates = {};
     userIds.forEach(uid => {
-      const record = { uid, assignedAt: Date.now(), status: "pending", ...extraData };
+      const record = {
+        uid,
+        trainingId,
+        assignedAt: extraData.assignedAt ?? Date.now(),
+        assignedBy: extraData.assignedBy ?? "",
+        status: extraData.status ?? "pending",
+        trainingTitle: extraData.trainingTitle ?? "",
+        deadline: extraData.deadline ?? null,
+        ...extraData,
+      };
       updates[`trainingAssignments/${trainingId}/${uid}`] = record;
       updates[`userAssignments/${uid}/${trainingId}`]     = record;
+    });
+    return update(ref(db), updates);
+  },
+
+  assignUsers: async (trainingId, users, extraData = {}) => {
+    const updates = {};
+    const assignedAt = extraData.assignedAt ?? Date.now();
+    users.forEach((user) => {
+      const uid = user.uid ?? user.id;
+      if (!uid) return;
+      const record = {
+        uid,
+        trainingId,
+        assignedAt,
+        assignedBy: extraData.assignedBy ?? "",
+        status: extraData.status ?? "pending",
+        trainingTitle: extraData.trainingTitle ?? "",
+        deadline: extraData.deadline ?? null,
+        employeeName: user.name ?? "",
+        empNo: user.empNo ?? "",
+        branchId: user.branchId ?? "",
+        branchName: user.branchName ?? "",
+        branchCode: user.branchCode ?? "",
+        companyId: user.companyId ?? "",
+        companyName: user.companyName ?? "",
+        ...extraData,
+      };
+      updates[`trainingAssignments/${trainingId}/${uid}`] = record;
+      updates[`userAssignments/${uid}/${trainingId}`] = record;
     });
     return update(ref(db), updates);
   },
@@ -161,7 +224,15 @@ export const completionsDB = {
   get: (trainingId, uid) => getVal(`trainingCompletions/${trainingId}/${uid}`),
 
   complete: async (trainingId, uid, data) => {
-    const record = { uid, trainingId, completedAt: Date.now(), ...data };
+    const record = {
+      uid,
+      trainingId,
+      completedAt: data.completedAt ?? Date.now(),
+      signedAt: data.signedAt ?? Date.now(),
+      signatureUrl: data.signatureUrl ?? "",
+      status: data.status ?? "completed",
+      ...data,
+    };
     const updates = {};
     updates[`trainingCompletions/${trainingId}/${uid}`] = record;
     updates[`userCompletions/${uid}/${trainingId}`]     = record;
@@ -239,6 +310,10 @@ export const settingsDB = {
   setNotifications: (data)   => set(r("settings", "notifications"), data),
   get:  (key)                => getVal(`settings/${key}`),
   set:  (key, data)          => set(r("settings", key), data),
+};
+
+export const batchDB = {
+  update: (updates) => update(ref(db), updates),
 };
 
 /* ══════════════════════════════════════════════════════════
