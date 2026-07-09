@@ -1,12 +1,8 @@
-/**
- * trainings.js — hq_admin / super_admin 전용 교육 관리 화면
- * 교육 등록 버튼 없음 (instructor 전용)
- */
-
-import { modal }        from "../utils/modal.js";
-import { toast }        from "../utils/toast.js";
-import { formatDate }   from "../utils/date.js";
-import { router }       from "../core/router.js";
+import { modal } from "../utils/modal.js";
+import { toast } from "../utils/toast.js";
+import { formatDate } from "../utils/date.js";
+import { router } from "../core/router.js";
+import { settingsDB } from "../core/db.js";
 import {
   TRAINING_STATUS_LABELS,
   TRAINING_TYPES,
@@ -15,20 +11,28 @@ import {
   closeTraining,
   computeTrainingStatus,
   deleteTraining,
-  isDeadlineSoon,
   listManagedTrainings,
   loadTrainingReferences,
 } from "../services/training-service.js";
+import {
+  getVisibleDeadlineBuckets,
+  normalizeNotificationSettings,
+  bucketIncludesTraining,
+} from "../services/notification-settings-service.js";
 
 let activeStatFilter = null;
-let state = { references: null, trainings: [] };
+let state = {
+  references: null,
+  trainings: [],
+  notificationSettings: null,
+};
 
 export async function render(container) {
   container.innerHTML = `
     <div class="section-header">
       <div>
         <div class="section-title">교육 관리</div>
-        <div class="section-subtitle">강사들이 등록한 교육 목록을 조회하고 운영 현황을 관리합니다.</div>
+        <div class="section-subtitle">강사가 등록한 교육 목록을 조회하고 운영 현황을 관리합니다.</div>
       </div>
     </div>
 
@@ -51,11 +55,11 @@ export async function render(container) {
         <div style="display:flex;gap:var(--space-3);flex-wrap:wrap">
           <select class="form-control" id="filter-status" style="flex:1;min-width:110px">
             <option value="">전체 상태</option>
-            ${Object.entries(TRAINING_STATUS_LABELS).map(([k,v])=>`<option value="${k}">${v}</option>`).join("")}
+            ${Object.entries(TRAINING_STATUS_LABELS).map(([key, value]) => `<option value="${key}">${value}</option>`).join("")}
           </select>
           <select class="form-control" id="filter-type" style="flex:1;min-width:110px">
             <option value="">전체 유형</option>
-            ${TRAINING_TYPES.map(t=>`<option value="${t}">${TRAINING_TYPE_LABELS[t]}</option>`).join("")}
+            ${TRAINING_TYPES.map((type) => `<option value="${type}">${TRAINING_TYPE_LABELS[type]}</option>`).join("")}
           </select>
           <select class="form-control" id="filter-branch" style="flex:1;min-width:130px">
             <option value="">전체 지점</option>
@@ -71,22 +75,32 @@ export async function render(container) {
     </div>
   `;
 
-  document.getElementById("search-trainings")  ?.addEventListener("input",  renderTable);
-  document.getElementById("filter-instructor") ?.addEventListener("change", renderTable);
-  document.getElementById("filter-status")     ?.addEventListener("change", renderTable);
-  document.getElementById("filter-type")       ?.addEventListener("change", renderTable);
-  document.getElementById("filter-branch")     ?.addEventListener("change", renderTable);
+  document.getElementById("search-trainings")?.addEventListener("input", renderTable);
+  document.getElementById("filter-instructor")?.addEventListener("change", renderTable);
+  document.getElementById("filter-status")?.addEventListener("change", renderTable);
+  document.getElementById("filter-type")?.addEventListener("change", renderTable);
+  document.getElementById("filter-branch")?.addEventListener("change", renderTable);
 
   await loadData();
 }
 
 async function loadData() {
   try {
-    const [references, trainings] = await Promise.all([
+    const [references, trainings, notifications] = await Promise.all([
       loadTrainingReferences(),
       listManagedTrainings(),
+      settingsDB.getNotifications().catch(() => null),
     ]);
-    state = { references, trainings };
+
+    state = {
+      references,
+      trainings,
+      notificationSettings: normalizeNotificationSettings(notifications ?? {}),
+    };
+    if (!getVisibleDeadlineBuckets(state.notificationSettings).some((bucket) => bucket.key === activeStatFilter)) {
+      activeStatFilter = null;
+    }
+
     fillInstructorFilter();
     fillBranchFilter();
     renderStats();
@@ -98,60 +112,61 @@ async function loadData() {
 }
 
 function fillInstructorFilter() {
-  const sel = document.getElementById("filter-instructor");
-  if (!sel) return;
+  const select = document.getElementById("filter-instructor");
+  if (!select) return;
 
-  // instructorId 기준 dedupe, 없는 경우 instructorName 기준 dedupe
-  const byId   = new Map(); // instructorId → instructorName
-  const byName = new Map(); // instructorName → true (id 없는 강사)
+  const byId = new Map();
+  const byName = new Map();
 
-  state.trainings.forEach(t => {
-    if (t.instructorId && t.instructorName) {
-      // id가 있으면 id 기준으로 한 번만 등록
-      if (!byId.has(t.instructorId)) byId.set(t.instructorId, t.instructorName);
-    } else if (t.instructorName) {
-      // id 없으면 이름 기준으로 dedupe (value = name)
-      byName.set(t.instructorName, true);
+  state.trainings.forEach((training) => {
+    if (training.instructorId && training.instructorName) {
+      if (!byId.has(training.instructorId)) byId.set(training.instructorId, training.instructorName);
+    } else if (training.instructorName) {
+      byName.set(training.instructorName, true);
     }
   });
 
-  const optionsById   = Array.from(byId.entries())
+  const optionsById = Array.from(byId.entries())
     .map(([uid, name]) => `<option value="${uid}">${esc(name)}</option>`);
   const optionsByName = Array.from(byName.keys())
-    .filter(name => ![...byId.values()].includes(name)) // id 있는 강사는 이미 포함됨
-    .map(name => `<option value="${esc(name)}">${esc(name)}</option>`);
+    .filter((name) => ![...byId.values()].includes(name))
+    .map((name) => `<option value="${esc(name)}">${esc(name)}</option>`);
 
-  sel.innerHTML = `<option value="">전체 강사</option>` +
-    optionsById.join("") + optionsByName.join("");
+  select.innerHTML = `<option value="">전체 강사</option>${optionsById.join("")}${optionsByName.join("")}`;
 }
 
 function fillBranchFilter() {
-  const sel = document.getElementById("filter-branch");
-  if (!sel) return;
+  const select = document.getElementById("filter-branch");
+  if (!select) return;
+
   const branches = state.references?.branches ?? [];
-  sel.innerHTML = `<option value="">전체 지점</option>` +
-    branches.map(b => `<option value="${b.id}">${esc(b.name ?? b.code ?? b.id)}</option>`).join("");
+  select.innerHTML = `<option value="">전체 지점</option>${
+    branches.map((branch) => `<option value="${branch.id}">${esc(branch.name ?? branch.code ?? branch.id)}</option>`).join("")
+  }`;
 }
 
 function renderStats() {
   const wrap = document.getElementById("training-stats");
   if (!wrap) return;
-  const now  = Date.now();
-  const list = state.trainings;
-  const cards = [
-    { key:"total",      label:"전체교육", value:list.length,                                                          sub:"조회 가능한 전체 교육",   tone:"" },
-    { key:"inProgress", label:"진행중",   value:list.filter(t=>computeTrainingStatus(t,now)==="in_progress").length,  sub:"현재 운영 중인 교육",     tone:"success" },
-    { key:"soon",       label:"기한촉박", value:list.filter(t=>isDeadlineSoon(t,now)).length,                         sub:"수료기한 3일 이내",       tone:"warning" },
-    { key:"overdue",    label:"기한초과", value:list.filter(t=>computeTrainingStatus(t,now)==="overdue").length,       sub:"기한이 지난 교육",        tone:"danger" },
-  ];
-  wrap.innerHTML = cards.map(({key,label,value,sub,tone}) => `
-    <div class="stat-card stat-card--clickable ${activeStatFilter===key?"stat-card--active":""}" data-key="${key}" style="cursor:pointer">
-      <div class="stat-card__label">${label}</div>
-      <div class="stat-card__value ${tone?`stat-card__value--${tone}`:""}">${value}</div>
-      <div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:2px">${sub}</div>
-    </div>
-  `).join("");
-  wrap.querySelectorAll(".stat-card--clickable").forEach(card => {
+
+  const visibleBuckets = getVisibleDeadlineBuckets(state.notificationSettings);
+  wrap.innerHTML = visibleBuckets.map((bucket) => {
+    const count = state.trainings.filter((training) => bucketIncludesTraining(bucket, training)).length;
+    const sub = bucket.type === "overdue"
+      ? "수료기한이 지난 교육"
+      : `오늘부터 ${bucket.days}일 이내 마감`;
+    const tone = bucket.type === "overdue" ? "danger" : "warning";
+
+    return `
+      <div class="stat-card stat-card--clickable ${activeStatFilter === bucket.key ? "stat-card--active" : ""}" data-key="${bucket.key}" style="cursor:pointer">
+        <div class="stat-card__label">${esc(bucket.label)}</div>
+        <div class="stat-card__value ${tone ? `stat-card__value--${tone}` : ""}">${count}</div>
+        <div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:2px">${sub}</div>
+      </div>
+    `;
+  }).join("");
+
+  wrap.querySelectorAll(".stat-card--clickable").forEach((card) => {
     card.addEventListener("click", () => {
       activeStatFilter = activeStatFilter === card.dataset.key ? null : card.dataset.key;
       renderStats();
@@ -163,22 +178,21 @@ function renderStats() {
 function renderTable() {
   const wrap = document.getElementById("trainings-table-wrap");
   if (!wrap) return;
-  const now        = Date.now();
-  const search     = (document.getElementById("search-trainings")?.value  ?? "").trim().toLowerCase();
-  const instructor = document.getElementById("filter-instructor")?.value  ?? "";
-  const status     = document.getElementById("filter-status")?.value      ?? "";
-  const type       = document.getElementById("filter-type")?.value        ?? "";
-  const branch     = document.getElementById("filter-branch")?.value      ?? "";
 
-  const filtered = state.trainings.filter(t => {
-    if (activeStatFilter === "inProgress" && computeTrainingStatus(t,now) !== "in_progress") return false;
-    if (activeStatFilter === "soon"       && !isDeadlineSoon(t,now))                          return false;
-    if (activeStatFilter === "overdue"    && computeTrainingStatus(t,now) !== "overdue")       return false;
-    if (search     && !String(t.title ?? "").toLowerCase().includes(search))         return false;
-    if (instructor && t.instructorId !== instructor && t.instructorName !== instructor) return false;
-    if (status     && t.computedStatus !== status)                                    return false;
-    if (type       && t.trainingType   !== type)                                      return false;
-    if (branch     && !t.branchIds?.includes(branch))                                 return false;
+  const search = (document.getElementById("search-trainings")?.value ?? "").trim().toLowerCase();
+  const instructor = document.getElementById("filter-instructor")?.value ?? "";
+  const status = document.getElementById("filter-status")?.value ?? "";
+  const type = document.getElementById("filter-type")?.value ?? "";
+  const branch = document.getElementById("filter-branch")?.value ?? "";
+  const activeBucket = state.notificationSettings?.deadlineBuckets?.find((bucket) => bucket.key === activeStatFilter) ?? null;
+
+  const filtered = state.trainings.filter((training) => {
+    if (activeBucket && !bucketIncludesTraining(activeBucket, training)) return false;
+    if (search && !String(training.title ?? "").toLowerCase().includes(search)) return false;
+    if (instructor && training.instructorId !== instructor && training.instructorName !== instructor) return false;
+    if (status && training.computedStatus !== status) return false;
+    if (type && training.trainingType !== type) return false;
+    if (branch && !training.branchIds?.includes(branch)) return false;
     return true;
   });
 
@@ -191,29 +205,34 @@ function renderTable() {
     <table class="data-table">
       <thead>
         <tr>
-          <th>교육명</th><th>유형</th><th>회사/지점</th><th>교육기간</th>
-          <th>수료기한</th><th>담당 강사</th><th>상태</th><th>생성일</th>
+          <th>교육명</th>
+          <th>유형</th>
+          <th>회사/지점</th>
+          <th>교육기간</th>
+          <th>수료기한</th>
+          <th>담당 강사</th>
+          <th>상태</th>
+          <th>생성일</th>
           <th style="width:90px"></th>
         </tr>
       </thead>
       <tbody>
-        ${filtered.map(t => {
-          const branch = t.branchNames?.length ? t.branchNames.join(", ") : "전체 지점";
-          const soon   = isDeadlineSoon(t, now);
+        ${filtered.map((training) => {
+          const branchSummary = training.branchNames?.length ? training.branchNames.join(", ") : "전체 지점";
           return `
-            <tr data-id="${t.id}" style="cursor:pointer">
-              <td><div style="font-weight:var(--weight-semibold);color:var(--gray-800)">${esc(t.title)}</div></td>
-              <td>${esc(TRAINING_TYPE_LABELS[t.trainingType] ?? "기타")}</td>
-              <td><div>${esc(t.companyName||"-")}</div><div style="font-size:var(--text-xs);color:var(--gray-400)">${esc(branch)}</div></td>
-              <td style="white-space:nowrap">${formatDate(t.startDate)} ~ ${formatDate(t.endDate)}</td>
-              <td style="white-space:nowrap">${soon?`<span style="color:var(--color-warning)">⚠ </span>`:""}${formatDate(t.deadline)}</td>
-              <td>${esc(t.instructorName||"-")}</td>
-              <td>${buildStatusChip(t.computedStatus)}</td>
-              <td>${formatDate(t.createdAt)}</td>
+            <tr data-id="${training.id}" style="cursor:pointer">
+              <td><div style="font-weight:var(--weight-semibold);color:var(--gray-800)">${esc(training.title)}</div></td>
+              <td>${esc(TRAINING_TYPE_LABELS[training.trainingType] ?? "기타")}</td>
+              <td><div>${esc(training.companyName || "-")}</div><div style="font-size:var(--text-xs);color:var(--gray-400)">${esc(branchSummary)}</div></td>
+              <td style="white-space:nowrap">${formatDate(training.startDate)} ~ ${formatDate(training.endDate)}</td>
+              <td style="white-space:nowrap">${formatDate(training.deadline)}</td>
+              <td>${esc(training.instructorName || "-")}</td>
+              <td>${buildStatusChip(training.computedStatus)}</td>
+              <td>${formatDate(training.createdAt)}</td>
               <td class="cell--actions">
                 <div style="display:flex;gap:4px;justify-content:flex-end">
-                  ${t.computedStatus !== "closed" ? `<button class="btn btn--ghost btn--sm btn-close" data-id="${t.id}">종료</button>` : ""}
-                  <button class="btn btn--ghost btn--sm btn-del" data-id="${t.id}" style="color:var(--color-danger)">삭제</button>
+                  ${training.computedStatus !== "closed" ? `<button class="btn btn--ghost btn--sm btn-close" data-id="${training.id}">종료</button>` : ""}
+                  <button class="btn btn--ghost btn--sm btn-del" data-id="${training.id}" style="color:var(--color-danger)">삭제</button>
                 </div>
               </td>
             </tr>
@@ -223,49 +242,93 @@ function renderTable() {
     </table>
   `;
 
-  wrap.querySelectorAll("tr[data-id]").forEach(row =>
-    row.addEventListener("click", e => { if (!e.target.closest(".cell--actions")) router.push("training-detail", {id: row.dataset.id}); })
-  );
-  wrap.querySelectorAll(".btn-close").forEach(btn =>
-    btn.addEventListener("click", e => { e.stopPropagation(); confirmClose(btn.dataset.id); })
-  );
-  wrap.querySelectorAll(".btn-del").forEach(btn =>
-    btn.addEventListener("click", e => { e.stopPropagation(); confirmDelete(btn.dataset.id); })
-  );
+  wrap.querySelectorAll("tr[data-id]").forEach((row) => {
+    row.addEventListener("click", (event) => {
+      if (!event.target.closest(".cell--actions")) {
+        router.push("training-detail", { id: row.dataset.id });
+      }
+    });
+  });
+  wrap.querySelectorAll(".btn-close").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      confirmClose(button.dataset.id);
+    });
+  });
+  wrap.querySelectorAll(".btn-del").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      confirmDelete(button.dataset.id);
+    });
+  });
 }
 
 function confirmClose(id) {
-  const t = state.trainings.find(x => x.id === id);
-  if (!t) return;
+  const training = state.trainings.find((item) => item.id === id);
+  if (!training) return;
+
   modal.open({
-    title: "교육 종료 처리", size: "sm",
-    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)"><strong>${esc(t.title)}</strong> 교육을 종료 처리하시겠습니까?</p>`,
+    title: "교육 종료 처리",
+    size: "sm",
+    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)"><strong>${esc(training.title)}</strong> 교육을 종료 처리하시겠습니까?</p>`,
     actions: [
-      { label:"취소", variant:"secondary", onClick:()=>modal.close() },
-      { label:"종료", variant:"primary", onClick: async()=>{
-        modal.setLoading("종료",true);
-        try { await closeTraining(id); toast.success("종료 처리되었습니다."); modal.close(); await loadData(); }
-        catch(err) { console.error("[trainings] close",err?.message,err); toast.error("오류가 발생했습니다."); modal.setLoading("종료",false); }
-      }},
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      {
+        label: "종료",
+        variant: "primary",
+        onClick: async () => {
+          modal.setLoading("종료", true);
+          try {
+            await closeTraining(id);
+            toast.success("교육을 종료 처리했습니다.");
+            modal.close();
+            await loadData();
+          } catch (err) {
+            console.error("[trainings] close", err?.message, err);
+            toast.error("오류가 발생했습니다.");
+            modal.setLoading("종료", false);
+          }
+        },
+      },
     ],
   });
 }
 
 function confirmDelete(id) {
-  const t = state.trainings.find(x => x.id === id);
-  if (!t) return;
+  const training = state.trainings.find((item) => item.id === id);
+  if (!training) return;
+
   modal.open({
-    title: "교육 삭제", size: "sm",
-    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)"><strong>${esc(t.title)}</strong> 교육을 삭제하시겠습니까?</p>`,
+    title: "교육 삭제",
+    size: "sm",
+    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)"><strong>${esc(training.title)}</strong> 교육을 삭제하시겠습니까?</p>`,
     actions: [
-      { label:"취소", variant:"secondary", onClick:()=>modal.close() },
-      { label:"삭제", variant:"danger", onClick: async()=>{
-        modal.setLoading("삭제",true);
-        try { await deleteTraining(id); toast.success("삭제되었습니다."); modal.close(); await loadData(); }
-        catch(err) { console.error("[trainings] delete",err?.message,err); toast.error("오류가 발생했습니다."); modal.setLoading("삭제",false); }
-      }},
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      {
+        label: "삭제",
+        variant: "danger",
+        onClick: async () => {
+          modal.setLoading("삭제", true);
+          try {
+            await deleteTraining(id);
+            toast.success("삭제했습니다.");
+            modal.close();
+            await loadData();
+          } catch (err) {
+            console.error("[trainings] delete", err?.message, err);
+            toast.error("오류가 발생했습니다.");
+            modal.setLoading("삭제", false);
+          }
+        },
+      },
     ],
   });
 }
 
-function esc(v) { return String(v??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+function esc(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
