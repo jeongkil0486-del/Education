@@ -1,6 +1,6 @@
 import { toast } from "../utils/toast.js";
 import { modal } from "../utils/modal.js";
-import { formatDate, formatDateTime } from "../utils/date.js";
+import { formatDate } from "../utils/date.js";
 import { buildEmployeeHistoryRows, loadTrainingReferences } from "../services/training-service.js";
 import {
   exportEmployeeHistoryCard,
@@ -9,6 +9,39 @@ import {
   uploadHistoryCardTemplate,
 } from "../services/history-card-export.js";
 
+/* ──────────────────────────────────────────────────────────
+   교육유형 → 이력카드 섹션 매핑
+   직무교육(job) → 직무초기교육 / 직무보수교육 (subType으로 분기)
+   법정(legal) / 온라인(online) / 외부(external) / 기타(other)
+────────────────────────────────────────────────────────── */
+const SECTION_ORDER = [
+  "job_initial",
+  "job_recurring",
+  "legal",
+  "online",
+  "external",
+  "other",
+];
+
+const SECTION_LABELS = {
+  job_initial:  "직무초기교육",
+  job_recurring:"직무보수교육",
+  legal:        "법정교육",
+  online:       "온라인교육",
+  external:     "외부교육",
+  other:        "기타",
+};
+
+function getSectionKey(row) {
+  if (row.trainingType === "job") {
+    return row.subType === "initial" ? "job_initial" : "job_recurring";
+  }
+  return row.trainingType; // legal / online / external / other
+}
+
+/* ──────────────────────────────────────────────────────────
+   State
+────────────────────────────────────────────────────────── */
 let historyState = {
   employees: [],
   selectedEmployeeId: "",
@@ -17,29 +50,33 @@ let historyState = {
   templates: [],
 };
 
+/* ──────────────────────────────────────────────────────────
+   render
+────────────────────────────────────────────────────────── */
 export async function render(container, params = {}) {
   container.innerHTML = `
     <div class="section-header">
       <div>
         <div class="section-title">직원 교육 이력카드</div>
-        <div class="section-subtitle">직원별 교육 이력을 조회하고 양식 기반 다운로드 구조를 관리합니다.</div>
+        <div class="section-subtitle">직원별 교육 이력을 조회하고 엑셀 양식으로 다운로드합니다.</div>
       </div>
       <div style="display:flex;gap:var(--space-2);flex-wrap:wrap">
         <button class="btn btn--secondary" id="btn-upload-history-template">양식 업로드</button>
-        <button class="btn btn--primary" id="btn-download-history-card">이력카드 다운로드</button>
+        <button class="btn btn--primary" id="btn-download-history-card" disabled>이력카드 다운로드</button>
       </div>
     </div>
 
+    <!-- 직원 검색/선택 -->
     <div class="card" style="margin-bottom:var(--space-5)">
       <div class="card__body card__body--compact">
         <div class="form-row">
           <div class="form-group">
             <label class="form-label">직원 검색</label>
-            <input class="form-control" id="history-card-search" type="search" placeholder="이름, 사번, 지점으로 검색" />
+            <input class="form-control" id="hc-search" type="search" placeholder="이름, 사번, 지점으로 검색" />
           </div>
           <div class="form-group">
             <label class="form-label">직원 선택</label>
-            <select class="form-control" id="history-card-employee-select">
+            <select class="form-control" id="hc-employee-select">
               <option value="">직원을 선택해 주세요.</option>
             </select>
           </div>
@@ -47,235 +84,244 @@ export async function render(container, params = {}) {
       </div>
     </div>
 
-    <div class="history-card-layout">
-      <div class="card">
-        <div class="card__header">
-          <div>
-            <div class="card__title">직원별 교육 이력</div>
-            <div class="card__subtitle">직원 선택 후 최신 수료 이력과 배정 현황을 확인할 수 있습니다.</div>
-          </div>
-        </div>
-        <div class="card__body" id="history-card-body">
-          <div class="empty-state" style="padding:var(--space-12)">
-            <div class="empty-state__title">직원을 선택해 주세요.</div>
-            <div>검색 후 직원 1명을 선택하면 교육 이력카드 미리보기가 표시됩니다.</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card__header">
-          <div>
-            <div class="card__title">양식 관리</div>
-            <div class="card__subtitle">업로드된 양식 메타와 다운로드 준비 상태</div>
-          </div>
-        </div>
-        <div class="card__body" id="history-template-body"></div>
+    <!-- 이력카드 본문 -->
+    <div id="hc-body">
+      <div class="empty-state" style="padding:var(--space-16)">
+        <div class="empty-state__title">직원을 선택해 주세요.</div>
+        <div>검색 후 직원을 선택하면 교육 이력카드가 표시됩니다.</div>
       </div>
     </div>
   `;
 
   document.getElementById("btn-upload-history-template")?.addEventListener("click", openTemplateUploadModal);
-  document.getElementById("btn-download-history-card")?.addEventListener("click", handleDownloadHistoryCard);
-  document.getElementById("history-card-search")?.addEventListener("input", syncEmployeeOptions);
-  document.getElementById("history-card-employee-select")?.addEventListener("change", async (event) => {
-    historyState.selectedEmployeeId = event.target.value;
-    await loadSelectedEmployeeHistory();
+  document.getElementById("btn-download-history-card")?.addEventListener("click", handleDownload);
+  document.getElementById("hc-search")?.addEventListener("input", syncEmployeeOptions);
+  document.getElementById("hc-employee-select")?.addEventListener("change", async (e) => {
+    historyState.selectedEmployeeId = e.target.value;
+    await loadEmployeeHistory();
   });
 
-  await initializeHistoryCardView(params.uid ?? "");
+  await initView(params.uid ?? "");
 }
 
-async function initializeHistoryCardView(initialEmployeeId = "") {
+/* ──────────────────────────────────────────────────────────
+   초기화
+────────────────────────────────────────────────────────── */
+async function initView(initialUid = "") {
   try {
     const [references, templates] = await Promise.all([
       loadTrainingReferences(),
       listHistoryCardTemplates(),
     ]);
-
-    historyState.employees = references.employees;
-    historyState.templates = templates;
-    historyState.selectedEmployeeId = initialEmployeeId;
-
+    historyState.employees  = references.employees;
+    historyState.templates  = templates;
+    historyState.selectedEmployeeId = initialUid;
     syncEmployeeOptions();
-    renderTemplatePanel();
-
-    if (initialEmployeeId) {
-      await loadSelectedEmployeeHistory();
-    }
-  } catch (error) {
-    console.error("[history-cards] init failed", error);
-    toast.error("직원 교육 이력카드 화면을 불러오지 못했습니다.");
+    if (initialUid) await loadEmployeeHistory();
+  } catch (err) {
+    console.error("[history-cards] init failed", err);
+    toast.error("교육 이력카드 화면을 불러오지 못했습니다.");
   }
 }
 
 function syncEmployeeOptions() {
-  const search = String(document.getElementById("history-card-search")?.value ?? "").trim().toLowerCase();
-  const select = document.getElementById("history-card-employee-select");
+  const search  = String(document.getElementById("hc-search")?.value ?? "").trim().toLowerCase();
+  const select  = document.getElementById("hc-employee-select");
   if (!select) return;
 
-  const filtered = historyState.employees.filter((employee) =>
-    !search || [
-      employee.name,
-      employee.empNo,
-      employee.branchName,
-      employee.companyName,
-    ].some((value) => String(value ?? "").toLowerCase().includes(search))
+  const filtered = historyState.employees.filter((emp) =>
+    !search || [emp.name, emp.empNo, emp.branchName, emp.companyName]
+      .some((v) => String(v ?? "").toLowerCase().includes(search))
   );
 
   select.innerHTML = `
     <option value="">직원을 선택해 주세요.</option>
-    ${filtered.map((employee) => {
-      const uid = employee.id ?? employee.uid;
-      return `<option value="${uid}" ${uid === historyState.selectedEmployeeId ? "selected" : ""}>${escapeHtml(employee.name)} (${escapeHtml(employee.empNo ?? "-")})</option>`;
+    ${filtered.map((emp) => {
+      const uid = emp.id ?? emp.uid;
+      return `<option value="${uid}" ${uid === historyState.selectedEmployeeId ? "selected" : ""}>${esc(emp.name)} (${esc(emp.empNo ?? "-")})</option>`;
     }).join("")}
   `;
 }
 
-async function loadSelectedEmployeeHistory() {
-  const body = document.getElementById("history-card-body");
+async function loadEmployeeHistory() {
+  const body = document.getElementById("hc-body");
+  const dlBtn = document.getElementById("btn-download-history-card");
   if (!body) return;
 
   if (!historyState.selectedEmployeeId) {
+    historyState.selectedEmployee = null;
+    historyState.rows = [];
+    if (dlBtn) dlBtn.disabled = true;
     body.innerHTML = `
-      <div class="empty-state" style="padding:var(--space-12)">
+      <div class="empty-state" style="padding:var(--space-16)">
         <div class="empty-state__title">직원을 선택해 주세요.</div>
-        <div>직원 선택 후 교육 이력카드와 다운로드 정보를 확인할 수 있습니다.</div>
-      </div>
-    `;
+      </div>`;
     return;
   }
 
   body.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:center;padding:var(--space-12)">
+    <div style="display:flex;align-items:center;justify-content:center;padding:var(--space-16)">
       <div class="splash__spinner" style="border-color:var(--gray-200);border-top-color:var(--brand-400)"></div>
-    </div>
-  `;
+    </div>`;
 
   try {
     const { employee, rows } = await buildEmployeeHistoryRows(historyState.selectedEmployeeId);
     historyState.selectedEmployee = employee;
     historyState.rows = rows;
-    renderEmployeeHistory();
-  } catch (error) {
-    console.error("[history-cards] load employee history failed", error);
+    if (dlBtn) dlBtn.disabled = false;
+    renderHistoryCard();
+  } catch (err) {
+    console.error("[history-cards] load failed", err);
     body.innerHTML = `
-      <div class="empty-state" style="padding:var(--space-12)">
+      <div class="empty-state" style="padding:var(--space-16)">
         <div class="empty-state__title">교육 이력을 불러오지 못했습니다.</div>
-        <div>잠시 후 다시 시도해 주세요.</div>
-      </div>
-    `;
+      </div>`;
   }
 }
 
-function renderEmployeeHistory() {
-  const body = document.getElementById("history-card-body");
+/* ──────────────────────────────────────────────────────────
+   웹 화면 렌더링
+────────────────────────────────────────────────────────── */
+function renderHistoryCard() {
+  const body = document.getElementById("hc-body");
   if (!body) return;
 
-  const employee = historyState.selectedEmployee;
+  const emp  = historyState.selectedEmployee;
   const rows = historyState.rows;
-  const completedCount = rows.filter((row) => row.completedAt).length;
+  const now  = Date.now();
 
-  body.innerHTML = `
-    <div class="dashboard-grid dashboard-grid--compact" style="margin-bottom:var(--space-5)">
-      ${statCard("직원명", employee?.name ?? "-", employee?.empNo ?? "-")}
-      ${statCard("회사/지점", employee?.companyName ?? "-", employee?.branchName ?? "-")}
-      ${statCard("전체 이력", rows.length, "배정 + 수료 기준")}
-      ${statCard("수료 완료", completedCount, "전자서명 포함")}
-    </div>
+  // ── 요약 통계
+  const totalCount     = rows.length;
+  const completedCount = rows.filter((r) => r.completionStatus === "completed").length;
+  const inProgressCount= rows.filter((r) => r.completionStatus !== "completed" && (!r.deadline || r.deadline >= now)).length;
+  const failCount      = rows.filter((r) => r.completionStatus !== "completed" && r.deadline && r.deadline < now).length;
+  const lastDate       = rows.filter((r) => r.completedAt).sort((a, b) => b.completedAt - a.completedAt)[0]?.completedAt ?? null;
+  const nextDate       = rows.filter((r) => r.deadline && r.deadline > now).sort((a, b) => a.deadline - b.deadline)[0]?.deadline ?? null;
 
-    <div class="history-card-summary">
-      <div class="info-row"><span class="info-row__label">회사</span><span class="info-row__value">${escapeHtml(employee?.companyName ?? "-")}</span></div>
-      <div class="info-row"><span class="info-row__label">지점</span><span class="info-row__value">${escapeHtml(employee?.branchName ?? "-")}</span></div>
-      <div class="info-row"><span class="info-row__label">직급</span><span class="info-row__value">${escapeHtml(employee?.position ?? "-")}</span></div>
-    </div>
-
-    <div class="table-wrap" style="margin-top:var(--space-4)">
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th>직원명</th>
-            <th>사번</th>
-            <th>회사</th>
-            <th>지점</th>
-            <th>교육명</th>
-            <th>교육유형</th>
-            <th>배정일</th>
-            <th>완료일시</th>
-            <th>서명 여부</th>
-            <th>수료 상태</th>
-            <th>담당 강사</th>
-            <th>비고</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows.length ? rows.map((row) => `
-            <tr>
-              <td>${escapeHtml(row.employeeName)}</td>
-              <td class="cell--mono">${escapeHtml(row.empNo)}</td>
-              <td>${escapeHtml(row.companyName)}</td>
-              <td>${escapeHtml(row.branchName)}</td>
-              <td>${escapeHtml(row.title)}</td>
-              <td>${escapeHtml(row.trainingTypeLabel)}</td>
-              <td>${formatDate(row.assignedAt)}</td>
-              <td>${formatDateTime(row.completedAt)}</td>
-              <td>${row.signedAt ? '<span class="chip chip--success">완료</span>' : '<span class="chip chip--neutral">미완료</span>'}</td>
-              <td>${row.completedAt ? '<span class="chip chip--success">수료</span>' : '<span class="chip chip--info">진행중</span>'}</td>
-              <td>${escapeHtml(row.instructorName)}</td>
-              <td>${escapeHtml(row.note || "-")}</td>
-            </tr>
-          `).join("") : `
-            <tr>
-              <td colspan="12" style="text-align:center;padding:var(--space-10);color:var(--gray-400)">표시할 교육 이력이 없습니다.</td>
-            </tr>
-          `}
-        </tbody>
-      </table>
-    </div>
-  `;
-}
-
-function renderTemplatePanel() {
-  const body = document.getElementById("history-template-body");
-  if (!body) return;
-
-  const latest = historyState.templates[0];
-  if (!latest) {
-    body.innerHTML = `
-      <div class="empty-state" style="padding:var(--space-10)">
-        <div class="empty-state__title">업로드된 양식이 없습니다.</div>
-        <div>개인교육이력카드 양식을 업로드하면 다운로드 구조와 함께 연결됩니다.</div>
-      </div>
-    `;
-    return;
+  // ── 섹션 분류
+  const sections = {};
+  for (const row of rows) {
+    const key = getSectionKey(row);
+    if (!sections[key]) sections[key] = [];
+    sections[key].push(row);
   }
 
   body.innerHTML = `
-    <div style="display:flex;flex-direction:column;gap:var(--space-4)">
-      <div class="info-row"><span class="info-row__label">파일명</span><span class="info-row__value">${escapeHtml(latest.fileName || "-")}</span></div>
-      <div class="info-row"><span class="info-row__label">업로드일</span><span class="info-row__value">${formatDateTime(latest.uploadedAt || latest.createdAt)}</span></div>
-      <div class="info-row"><span class="info-row__label">업로드 사용자</span><span class="info-row__value">${escapeHtml(latest.uploadedByName || "-")}</span></div>
-      <div class="info-row"><span class="info-row__label">시트 수</span><span class="info-row__value">${latest.sheetNames?.length ?? 0}</span></div>
-      <div class="info-row"><span class="info-row__label">병합 셀 수</span><span class="info-row__value">${latest.mergeCount ?? 0}</span></div>
-      <div class="info-row"><span class="info-row__label">내보내기 방식</span><span class="info-row__value">양식 유지 + 이력 데이터 시트 추가</span></div>
-      <div style="font-size:var(--text-xs);color:var(--gray-400);line-height:var(--leading-relaxed)">
-        현재 단계에서는 업로드된 양식의 기본 서식을 최대한 유지하고, 실제 직원 이력 데이터는 별도 데이터 시트에 함께 기록합니다.
-        실제 셀 매핑과 서명 이미지 배치는 다음 단계에서 <code>history-card-export.js</code>에서 확장할 수 있습니다.
+    <!-- 요약 카드 (웹 전용) -->
+    <div class="dashboard-grid dashboard-grid--compact" style="margin-bottom:var(--space-5)">
+      ${summaryCard("총 교육 건수", totalCount, "")}
+      ${summaryCard("수료 건수", completedCount, "PASS")}
+      ${summaryCard("진행중", inProgressCount, "")}
+      ${summaryCard("미수료", failCount, "")}
+      ${summaryCard("최근 교육일", lastDate ? formatDate(lastDate) : "–", "")}
+      ${summaryCard("다음 교육 예정일", nextDate ? formatDate(nextDate) : "–", "")}
+    </div>
+
+    <!-- 인적사항 카드 -->
+    <div class="card" style="margin-bottom:var(--space-5)">
+      <div class="card__header">
+        <div class="card__title">인적사항</div>
+      </div>
+      <div class="card__body">
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:var(--space-3)">
+          ${infoItem("성명",     emp?.name ?? "–")}
+          ${infoItem("사번",     emp?.empNo ?? "–")}
+          ${infoItem("생년월일", emp?.birthDate ? formatDate(emp.birthDate) : "–")}
+          ${infoItem("입사일",   emp?.joinDate  ? formatDate(emp.joinDate)  : "–")}
+          ${infoItem("신입/경력", emp?.entryType ?? "–")}
+          ${infoItem("사내 자격", emp?.internalLicense ?? "–")}
+          ${infoItem("사외 자격", emp?.externalLicense ?? "–")}
+          ${infoItem("지점",     emp?.branchName ?? "–")}
+          ${infoItem("직책",     emp?.position ?? "–")}
+        </div>
       </div>
     </div>
+
+    <!-- 교육유형별 섹션 -->
+    ${SECTION_ORDER.map((key) => {
+      const sectionRows = sections[key] ?? [];
+      return `
+        <div class="card" style="margin-bottom:var(--space-4)">
+          <div class="card__header" style="background:var(--gray-50);border-bottom:1px solid var(--gray-200)">
+            <div class="card__title" style="font-size:var(--text-sm)">
+              ${esc(SECTION_LABELS[key])}
+              <span class="chip chip--info" style="margin-left:var(--space-2)">${sectionRows.length}건</span>
+            </div>
+          </div>
+          <div class="card__body" style="padding:0">
+            ${sectionRows.length === 0
+              ? `<div style="padding:var(--space-6);text-align:center;color:var(--gray-400);font-size:var(--text-sm)">이력 없음</div>`
+              : `<div class="table-wrap">
+                  <table class="data-table" style="font-size:var(--text-xs)">
+                    <thead>
+                      <tr>
+                        <th>교육과정명</th>
+                        <th>교육과목</th>
+                        <th>강사</th>
+                        <th>교육시간</th>
+                        <th>교육기간</th>
+                        <th>수료일</th>
+                        <th>결과</th>
+                        <th>초기/보수</th>
+                        <th>비고</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${sectionRows.map((row) => historyRow(row)).join("")}
+                    </tbody>
+                  </table>
+                </div>`
+            }
+          </div>
+        </div>
+      `;
+    }).join("")}
   `;
 }
 
+function historyRow(row) {
+  const period = (row.startDate && row.endDate)
+    ? `${formatDate(row.startDate)} ~ ${formatDate(row.endDate)}`
+    : (row.startDate ? formatDate(row.startDate) : "–");
+
+  const result = row.completionStatus === "completed" ? "PASS" : "–";
+  const subType = row.trainingType === "job"
+    ? (row.subType === "initial" ? "초기" : "보수")
+    : "–";
+
+  return `
+    <tr>
+      <td>${esc(row.title)}</td>
+      <td>–</td>
+      <td>${esc(row.instructorName)}</td>
+      <td>–</td>
+      <td style="white-space:nowrap">${period}</td>
+      <td style="white-space:nowrap">${row.completedAt ? formatDate(row.completedAt) : "–"}</td>
+      <td>${result}</td>
+      <td>${subType}</td>
+      <td>${esc(row.note || "–")}</td>
+    </tr>
+  `;
+}
+
+/* ──────────────────────────────────────────────────────────
+   양식 업로드 모달
+────────────────────────────────────────────────────────── */
 function openTemplateUploadModal() {
   modal.open({
-    title: "개인교육이력카드 양식 업로드",
+    title: "교육이력카드 양식 업로드",
     size: "md",
     body: `
       <div style="display:flex;flex-direction:column;gap:var(--space-4)">
+        <div style="background:var(--blue-50,#eff6ff);border:1px solid var(--blue-200,#bfdbfe);border-radius:var(--radius-md);padding:var(--space-4);font-size:var(--text-sm);color:var(--blue-800,#1e40af)">
+          <strong>안내</strong><br/>
+          회사에서 사용 중인 교육이력카드 엑셀 양식(.xlsx)을 업로드하세요.<br/>
+          원본 서식(병합셀·글꼴·테두리·색상·행높이·열너비)을 그대로 유지하고 셀 매핑 후 직원 데이터를 채워 넣습니다.
+        </div>
         <div class="form-group">
-          <label class="form-label form-label--required">양식 파일</label>
-          <input class="form-control" id="history-template-file" type="file" accept=".xlsx,.xlsm,.xls" />
-          <div class="form-hint">업로드한 양식은 메타 정보와 함께 저장되며, 내보내기 시 동일 워크북 구조를 기반으로 사용합니다.</div>
+          <label class="form-label form-label--required">양식 파일 (.xlsx)</label>
+          <input class="form-control" id="hc-template-file" type="file" accept=".xlsx,.xlsm,.xls" />
+          <div class="form-hint">병합 셀, 인쇄 설정이 포함된 원본 양식을 올려주세요.</div>
         </div>
       </div>
     `,
@@ -285,21 +331,16 @@ function openTemplateUploadModal() {
         label: "업로드",
         variant: "primary",
         onClick: async () => {
-          const file = document.getElementById("history-template-file")?.files?.[0];
-          if (!file) {
-            toast.warning("업로드할 양식 파일을 선택해 주세요.");
-            return;
-          }
-
+          const file = document.getElementById("hc-template-file")?.files?.[0];
+          if (!file) { toast.warning("양식 파일을 선택해 주세요."); return; }
           modal.setLoading("업로드", true);
           try {
             await uploadHistoryCardTemplate(file);
             historyState.templates = await listHistoryCardTemplates();
-            renderTemplatePanel();
-            toast.success("개인교육이력카드 양식이 업로드되었습니다.");
+            toast.success("교육이력카드 양식이 업로드되었습니다.");
             modal.close();
-          } catch (error) {
-            console.error("[history-cards] upload template failed", error);
+          } catch (err) {
+            console.error("[history-cards] upload failed", err);
             toast.error("양식 업로드 중 오류가 발생했습니다.");
             modal.setLoading("업로드", false);
           }
@@ -309,42 +350,63 @@ function openTemplateUploadModal() {
   });
 }
 
-async function handleDownloadHistoryCard() {
+/* ──────────────────────────────────────────────────────────
+   다운로드
+────────────────────────────────────────────────────────── */
+async function handleDownload() {
   if (!historyState.selectedEmployee) {
     toast.warning("먼저 직원을 선택해 주세요.");
     return;
   }
 
+  const template = await getLatestHistoryCardTemplate().catch(() => null);
+
+  if (!template) {
+    toast.warning("업로드된 양식이 없습니다. 먼저 교육이력카드 양식을 업로드해 주세요.");
+    return;
+  }
+
   try {
-    const template = await getLatestHistoryCardTemplate();
     const result = await exportEmployeeHistoryCard({
       employee: historyState.selectedEmployee,
       rows: historyState.rows,
       template,
     });
-    toast.success(result.mode === "json-fallback"
-      ? "엑셀 라이브러리를 불러오지 못해 JSON 형식으로 다운로드했습니다."
-      : "직원 교육 이력카드 다운로드가 시작되었습니다.");
-  } catch (error) {
-    console.error("[history-cards] export failed", error);
+    toast.success(
+      result.mode === "json-fallback"
+        ? "라이브러리를 불러오지 못해 JSON 형식으로 다운로드했습니다."
+        : `${result.fileName} 다운로드가 시작되었습니다.`
+    );
+  } catch (err) {
+    console.error("[history-cards] export failed", err);
     toast.error("이력카드 다운로드 중 오류가 발생했습니다.");
   }
 }
 
-function statCard(label, value, subtitle) {
+/* ──────────────────────────────────────────────────────────
+   UI 헬퍼
+────────────────────────────────────────────────────────── */
+function summaryCard(label, value, sub) {
   return `
     <div class="stat-card">
-      <div class="stat-card__label">${label}</div>
-      <div class="stat-card__value">${escapeHtml(value)}</div>
-      <div style="font-size:var(--text-xs);color:var(--gray-400)">${escapeHtml(subtitle)}</div>
+      <div class="stat-card__label">${esc(label)}</div>
+      <div class="stat-card__value">${esc(String(value))}</div>
+      ${sub ? `<div style="font-size:var(--text-xs);color:var(--gray-400)">${esc(sub)}</div>` : ""}
     </div>
   `;
 }
 
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+function infoItem(label, value) {
+  return `
+    <div style="display:flex;flex-direction:column;gap:2px">
+      <div style="font-size:var(--text-xs);color:var(--gray-400)">${esc(label)}</div>
+      <div style="font-size:var(--text-sm);font-weight:var(--weight-medium);color:var(--gray-800)">${esc(value)}</div>
+    </div>
+  `;
+}
+
+function esc(v) {
+  return String(v ?? "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }

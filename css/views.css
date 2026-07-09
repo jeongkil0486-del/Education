@@ -471,7 +471,7 @@
 }
 
 .dashboard-grid--compact {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
 }
 
 .detail-layout {
@@ -569,27 +569,41 @@
   color: var(--gray-400);
 }
 
-.history-card-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.9fr);
-  gap: var(--space-5);
+/* 교육이력카드 섹션 테이블 */
+.hc-section-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-xs);
 }
 
-.history-card-summary {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--space-3);
+.hc-section-table th,
+.hc-section-table td {
+  border: 1px solid var(--gray-200);
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: middle;
 }
 
-.history-card-summary .info-row {
-  border: var(--border-thin);
-  border-radius: var(--radius-md);
-  padding: var(--space-3);
+.hc-section-table th {
+  background: var(--gray-50);
+  font-weight: var(--weight-semibold);
+  color: var(--gray-600);
+  white-space: nowrap;
+}
+
+.hc-section-table tbody tr:hover {
+  background: var(--gray-50);
 }
 
 @media (max-width: 1100px) {
-  .detail-layout,
-  .history-card-layout {
+  .detail-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  .detail-info-grid,
+  .dashboard-grid--compact {
     grid-template-columns: 1fr;
   }
 }

@@ -46,6 +46,7 @@ export const TRAINING_STATUS_LABELS = {
   in_progress: "진행중",
   closed: "종료",
   overdue: "기한초과",
+  completed: "완료",
 };
 
 export function normalizeTrainingType(type) {
@@ -59,6 +60,7 @@ export function getTrainingTypeLabel(type) {
 
 export function computeTrainingStatus(training, now = Date.now()) {
   if (!training) return "scheduled";
+  if (training.status === "completed" || training.completedAt) return "completed";
   if (training.status === "closed" || training.closedAt) return "closed";
   if (training.deadline && training.deadline < now) return "overdue";
 
@@ -77,6 +79,7 @@ export function statusTone(status) {
     in_progress: "success",
     closed: "neutral",
     overdue: "danger",
+    completed: "success",
   }[status] ?? "neutral";
 }
 
@@ -122,6 +125,7 @@ export async function loadTrainingReferences() {
 
 export function isDeadlineSoon(training, now = Date.now()) {
   if (!training?.deadline) return false;
+  if (training.status === "completed" || training.completedAt) return false;
   if (training.status === "closed" || training.closedAt) return false;
   if (training.deadline < now) return false;
 
@@ -170,7 +174,9 @@ export function buildTrainingPayload(values, references, currentTraining = null)
     .map((branchId) => branchMap.get(branchId))
     .filter(Boolean);
   const selectedInstructor = references.instructors.find((user) => (user.id ?? user.uid) === values.instructorId);
-  const computedStatus = currentTraining?.status === "closed"
+  const computedStatus = currentTraining?.status === "completed"
+    ? "completed"
+    : currentTraining?.status === "closed"
     ? "closed"
     : computeTrainingStatus({
         ...currentTraining,
@@ -213,6 +219,53 @@ export async function closeTraining(trainingId) {
   await trainingsDB.close(trainingId, {
     closedBy: authStore.uid,
     closedByName: authStore.name,
+  });
+}
+
+/**
+ * 강사가 교육 완료 처리:
+ * 1. training.status = "completed" 저장
+ * 2. 배정된 모든 직원에게 교육이력카드(completion) 생성 (중복 방지)
+ */
+export async function completeTraining(trainingId) {
+  const [training, assignments, existingCompletions] = await Promise.all([
+    trainingsDB.get(trainingId),
+    assignmentsDB.forTraining(trainingId),
+    completionsDB.forTraining(trainingId),
+  ]);
+
+  if (!training) throw new Error("교육 정보를 찾을 수 없습니다.");
+  if (!assignments.length) throw new Error("NO_ASSIGNMENTS");
+
+  const existingUids = new Set(existingCompletions.map((c) => c.uid));
+  const now = Date.now();
+
+  // 배정 직원 중 아직 완료 기록이 없는 직원만 생성 (중복 방지)
+  const pendingAssignments = assignments.filter((a) => !existingUids.has(a.uid));
+
+  for (const assignment of pendingAssignments) {
+    await completionsDB.complete(trainingId, assignment.uid, {
+      uid: assignment.uid,
+      trainingId,
+      trainingTitle: training.title ?? "",
+      trainingType: training.trainingType ?? "other",
+      instructorName: training.instructorName ?? "",
+      startDate: training.startDate ?? null,
+      endDate: training.endDate ?? null,
+      completedAt: now,
+      signedAt: now,
+      signatureUrl: "",
+      status: "completed",
+      completedByInstructor: true,
+      completedBy: authStore.uid,
+      completedByName: authStore.name,
+    });
+  }
+
+  // training 상태 완료로 업데이트
+  await trainingsDB.complete(trainingId, {
+    completedBy: authStore.uid,
+    completedByName: authStore.name,
   });
 }
 
@@ -373,6 +426,8 @@ export async function buildEmployeeHistoryRows(uid) {
       trainingType,
       trainingTypeLabel: getTrainingTypeLabel(trainingType),
       assignedAt: assignment.assignedAt ?? null,
+      startDate: training.startDate ?? null,
+      endDate: training.endDate ?? null,
       completedAt: completion.completedAt ?? null,
       signedAt: completion.signedAt ?? null,
       signatureUrl: completion.signatureUrl ?? "",
@@ -380,6 +435,8 @@ export async function buildEmployeeHistoryRows(uid) {
       instructorName: training.instructorName ?? "-",
       deadline: assignment.deadline ?? training.deadline ?? null,
       note: completion.note ?? "",
+      // 엑셀 양식용: 초기/보수 구분 (직무교육은 initial/recurring 구분, 나머지는 "-")
+      subType: training.subType ?? "",
     };
   });
 
