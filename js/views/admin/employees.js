@@ -1,4 +1,4 @@
-import { branchesDB, usersDB } from "../../core/db.js";
+import { branchesDB, companiesDB, usersDB } from "../../core/db.js";
 import { TEXT } from "../../constants/text.js";
 import { createEmployeeAccounts, deleteEmployeeAccount, bulkDeleteEmployeeAccounts } from "../../core/admin-api.js";
 import { modal } from "../../utils/modal.js";
@@ -7,6 +7,7 @@ import { formatDate } from "../../utils/date.js";
 import { authStore } from "../../core/auth.js";
 
 let employees = [];
+let companies = [];
 let branches = [];
 let pendingUploadRows = [];
 
@@ -41,6 +42,9 @@ export async function render(container) {
     </div>
 
     <div class="filter-bar">
+      <select class="form-control" id="employee-company-filter" style="max-width:220px">
+        <option value="">${t.allCompanies ?? "전체 회사"}</option>
+      </select>
       <select class="form-control" id="employee-branch-filter" style="max-width:220px">
         <option value="">${t.allBranches}</option>
       </select>
@@ -62,6 +66,7 @@ export async function render(container) {
 
   document.getElementById("btn-upload-employees")?.addEventListener("click", openUploadModal);
   document.getElementById("btn-download-template")?.addEventListener("click", downloadTemplate);
+  document.getElementById("employee-company-filter")?.addEventListener("change", handleCompanyFilterChange);
   document.getElementById("employee-branch-filter")?.addEventListener("change", applyFilters);
   document.getElementById("employee-search")?.addEventListener("input", applyFilters);
   document.getElementById("btn-bulk-delete-employees")?.addEventListener("click", confirmBulkDelete);
@@ -71,17 +76,20 @@ export async function render(container) {
 
 async function loadData() {
   try {
-    const [allUsers, branchList] = await Promise.all([
+    const [allUsers, branchList, companyList] = await Promise.all([
       usersDB.listAll().catch(() => []),
       branchesDB.listAll().catch(() => []),
+      companiesDB.list().catch(() => []),
     ]);
     employees = allUsers
       .filter((item) => item?.role === "employee")
       .sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0));
     branches = branchList;
+    companies = buildCompanies(companyList, branchList, employees);
   } catch (err) {
     console.error("[employees] load failed", err);
     employees = [];
+    companies = [];
     branches = [];
   }
 
@@ -89,29 +97,53 @@ async function loadData() {
   selectedUids = new Set();
   updateBulkDeleteButton();
 
+  fillCompanyFilter();
   fillBranchFilter();
-  renderStats();
   applyFilters();
 }
 
-function renderStats() {
-  setText("employee-count", String(employees.length));
-  setText("employee-active-count", String(employees.filter((item) => item.active !== false && !item.disabled).length));
+function renderStats(list = employees) {
+  setText("employee-count", String(list.length));
+  setText("employee-active-count", String(list.filter((item) => item.active !== false && !item.disabled).length));
   setText(
     "employee-branch-count",
-    String(new Set(employees.map((item) => employeeBranchKey(item)).filter(Boolean)).size)
+    String(new Set(list.map((item) => employeeBranchKey(item)).filter(Boolean)).size)
   );
+}
+
+function fillCompanyFilter() {
+  const select = document.getElementById("employee-company-filter");
+  if (!select) return;
+
+  const currentValue = select.value;
+  while (select.options.length > 1) select.remove(1);
+
+  companies
+    .slice()
+    .sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""), "ko"))
+    .forEach((company) => {
+      const option = document.createElement("option");
+      option.value = company.id;
+      option.textContent = company.name ?? company.id;
+      select.appendChild(option);
+    });
+
+  const hasSelectedCompany = Array.from(select.options).some((option) => option.value === currentValue);
+  select.value = hasSelectedCompany ? currentValue : "";
 }
 
 function fillBranchFilter() {
   const select = document.getElementById("employee-branch-filter");
   if (!select) return;
 
+  const selectedCompanyId = document.getElementById("employee-company-filter")?.value ?? "";
+  const currentValue = select.value;
   while (select.options.length > 1) select.remove(1);
 
   branches
+    .filter((branch) => !selectedCompanyId || branch.companyId === selectedCompanyId)
     .slice()
-    .sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""), "en"))
+    .sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""), "ko"))
     .forEach((branch) => {
       const option = document.createElement("option");
       option.value = branch.id;
@@ -119,15 +151,25 @@ function fillBranchFilter() {
       select.appendChild(option);
     });
 
-  const hasSelectedBranch = Array.from(select.options).some((option) => option.value === select.value);
-  if (!hasSelectedBranch) select.value = "";
+  const hasSelectedBranch = Array.from(select.options).some((option) => option.value === currentValue);
+  select.value = hasSelectedBranch ? currentValue : "";
+}
+
+function handleCompanyFilterChange() {
+  fillBranchFilter();
+  applyFilters();
 }
 
 function applyFilters() {
+  const companyId = document.getElementById("employee-company-filter")?.value ?? "";
   const branchId = document.getElementById("employee-branch-filter")?.value ?? "";
   const query = (document.getElementById("employee-search")?.value ?? "").trim().toLowerCase();
 
   let filtered = employees.slice();
+
+  if (companyId) {
+    filtered = filtered.filter((item) => item.companyId === companyId);
+  }
 
   if (branchId) {
     const selectedBranch = branches.find((branch) => branch.id === branchId) ?? null;
@@ -147,6 +189,7 @@ function applyFilters() {
     });
   }
 
+  renderStats(filtered);
   renderTable(filtered);
 }
 
@@ -749,10 +792,43 @@ function matchesSelectedBranch(item, branch) {
 }
 
 function resetFilters() {
+  const companyFilter = document.getElementById("employee-company-filter");
   const branchFilter = document.getElementById("employee-branch-filter");
   const searchInput = document.getElementById("employee-search");
+  if (companyFilter) companyFilter.value = "";
+  fillBranchFilter();
   if (branchFilter) branchFilter.value = "";
   if (searchInput) searchInput.value = "";
+}
+
+function buildCompanies(companyList, branchList, employeeList) {
+  const companyMap = new Map();
+
+  companyList.forEach((company) => {
+    if (!company?.id) return;
+    companyMap.set(company.id, {
+      id: company.id,
+      name: company.name ?? company.id,
+    });
+  });
+
+  branchList.forEach((branch) => {
+    if (!branch?.companyId || companyMap.has(branch.companyId)) return;
+    companyMap.set(branch.companyId, {
+      id: branch.companyId,
+      name: branch.companyName ?? branch.companyId,
+    });
+  });
+
+  employeeList.forEach((employee) => {
+    if (!employee?.companyId || companyMap.has(employee.companyId)) return;
+    companyMap.set(employee.companyId, {
+      id: employee.companyId,
+      name: employee.companyName ?? employee.companyId,
+    });
+  });
+
+  return Array.from(companyMap.values());
 }
 
 function setText(id, value) {

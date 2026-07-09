@@ -4,14 +4,29 @@ import { materialsDB } from "../core/db.js";
 
 const { functions } = window.__firebase;
 
-export const MATERIAL_TYPES = ["initial", "recurring", "external", "online", "other"];
+export const MATERIAL_TYPES = ["job", "legal", "external", "online", "other"];
 
 export const MATERIAL_TYPE_LABELS = {
-  initial: "초기교육",
-  recurring: "정기교육",
+  job: "직무교육",
+  legal: "법정교육",
   external: "외부교육",
   online: "온라인교육",
   other: "기타",
+};
+
+const LEGACY_MATERIAL_TYPE_MAP = {
+  initial: "job",
+  recurring: "legal",
+  external: "external",
+  online: "online",
+  other: "other",
+  job: "job",
+  legal: "legal",
+  "직무교육": "job",
+  "법정교육": "legal",
+  "외부교육": "external",
+  "온라인교육": "online",
+  "기타": "other",
 };
 
 export const ALLOWED_MIME = ["application/pdf"];
@@ -40,6 +55,11 @@ export function validateFile(file) {
   if (file.size <= 0) return "파일이 비어 있습니다.";
   if (file.size > MAX_FILE_SIZE) return PDF_SIZE_MESSAGE;
   return null;
+}
+
+export function normalizeMaterialType(type) {
+  const normalized = String(type ?? "").trim();
+  return LEGACY_MATERIAL_TYPE_MAP[normalized] ?? "other";
 }
 
 export async function requestUploadUrl(file) {
@@ -128,7 +148,7 @@ export function putFileToR2(uploadUrl, file, opts = {}) {
 export async function saveMaterialMeta(materialId, values, fileInfo) {
   await materialsDB.update(materialId, {
     title: values.title.trim(),
-    trainingType: values.trainingType,
+    trainingType: normalizeMaterialType(values.trainingType),
     description: values.description?.trim() ?? "",
     fileName: fileInfo.fileName,
     fileType: fileInfo.fileType,
@@ -172,7 +192,14 @@ export async function listMaterials() {
     : await materialsDB.list(companyId);
 
   return items
-    .map((item) => ({ ...item, typeLabel: MATERIAL_TYPE_LABELS[item.trainingType] ?? "기타" }))
+    .map((item) => {
+      const trainingType = normalizeMaterialType(item.trainingType);
+      return {
+        ...item,
+        trainingType,
+        typeLabel: MATERIAL_TYPE_LABELS[trainingType] ?? "기타",
+      };
+    })
     .sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0));
 }
 

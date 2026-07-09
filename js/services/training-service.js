@@ -8,23 +8,37 @@ import {
   usersDB,
 } from "../core/db.js";
 
-/** 수료기한 임박 기준: 오늘 포함 N일 이내 */
 export const DEADLINE_SOON_DAYS = 3;
 
 export const TRAINING_TYPES = [
-  "initial",
-  "recurring",
+  "job",
+  "legal",
   "external",
   "online",
   "other",
 ];
 
 export const TRAINING_TYPE_LABELS = {
-  initial:   "초기교육",
-  recurring: "정기교육",
-  external:  "외부교육",
-  online:    "온라인교육",
-  other:     "기타",
+  job: "직무교육",
+  legal: "법정교육",
+  external: "외부교육",
+  online: "온라인교육",
+  other: "기타",
+};
+
+const LEGACY_TRAINING_TYPE_MAP = {
+  initial: "job",
+  recurring: "legal",
+  external: "external",
+  online: "online",
+  other: "other",
+  job: "job",
+  legal: "legal",
+  "직무교육": "job",
+  "법정교육": "legal",
+  "외부교육": "external",
+  "온라인교육": "online",
+  "기타": "other",
 };
 
 export const TRAINING_STATUS_LABELS = {
@@ -34,23 +48,26 @@ export const TRAINING_STATUS_LABELS = {
   overdue: "기한초과",
 };
 
+export function normalizeTrainingType(type) {
+  const normalized = String(type ?? "").trim();
+  return LEGACY_TRAINING_TYPE_MAP[normalized] ?? "other";
+}
+
 export function getTrainingTypeLabel(type) {
-  return TRAINING_TYPE_LABELS[type] ?? "기타";
+  return TRAINING_TYPE_LABELS[normalizeTrainingType(type)] ?? TRAINING_TYPE_LABELS.other;
 }
 
 export function computeTrainingStatus(training, now = Date.now()) {
   if (!training) return "scheduled";
   if (training.status === "closed" || training.closedAt) return "closed";
-  // 수료기한 초과: deadline 존재 & 오늘 이전 & ended/closed 아님
   if (training.deadline && training.deadline < now) return "overdue";
-  // 진행중: startDate AND endDate 모두 존재 & 오늘이 기간 안에 있을 때만
+
   if (training.startDate && training.endDate) {
     if (training.startDate > now) return "scheduled";
     if (training.endDate >= now) return "in_progress";
-    // endDate 지났지만 deadline 없거나 아직 안 지남 → overdue 아니므로 scheduled 처리
     return "scheduled";
   }
-  // startDate/endDate 중 하나라도 없으면 예정으로 처리 (진행중 카운트 제외)
+
   return "scheduled";
 }
 
@@ -103,22 +120,15 @@ export async function loadTrainingReferences() {
   };
 }
 
-/**
- * 수료기한 임박 여부 (status가 overdue가 아닌 것 중, deadline이 DEADLINE_SOON_DAYS일 이내)
- */
 export function isDeadlineSoon(training, now = Date.now()) {
   if (!training?.deadline) return false;
   if (training.status === "closed" || training.closedAt) return false;
-  // deadline이 오늘 이후(미래)이어야 함
   if (training.deadline < now) return false;
+
   const diffMs = training.deadline - now;
   return diffMs <= DEADLINE_SOON_DAYS * 24 * 60 * 60 * 1000;
 }
 
-/**
- * hq_admin: 전체 교육 목록 조회 (등록 권한 없음)
- * super_admin: 전체 조회
- */
 export async function listManagedTrainings() {
   const trainings = authStore.role === ROLES.SUPER_ADMIN
     ? await trainingsDB.listAll()
@@ -127,31 +137,29 @@ export async function listManagedTrainings() {
   return sortByRecent(trainings, "createdAt").map(enrichTrainingRecord);
 }
 
-/**
- * instructor: 본인이 등록(createdBy)하거나 담당 강사(instructorId)인 교육 목록
- */
 export async function listInstructorTrainings() {
   const uid = authStore.uid;
   const companyId = authStore.companyId ?? null;
-
   const allTrainings = companyId
     ? await trainingsDB.list(companyId)
     : await trainingsDB.listAll();
 
-  const myTrainings = allTrainings.filter(
-    (t) => t.createdBy === uid || t.instructorId === uid
-  );
-
-  return sortByRecent(myTrainings, "createdAt").map(enrichTrainingRecord);
+  return sortByRecent(
+    allTrainings.filter((training) => training.createdBy === uid || training.instructorId === uid),
+    "createdAt"
+  ).map(enrichTrainingRecord);
 }
 
 export function enrichTrainingRecord(training) {
   const status = computeTrainingStatus(training);
+  const trainingType = normalizeTrainingType(training.trainingType);
+
   return {
     ...training,
+    trainingType,
     computedStatus: status,
     computedStatusLabel: TRAINING_STATUS_LABELS[status],
-    typeLabel: getTrainingTypeLabel(training.trainingType),
+    typeLabel: getTrainingTypeLabel(trainingType),
   };
 }
 
@@ -172,7 +180,7 @@ export function buildTrainingPayload(values, references, currentTraining = null)
 
   return {
     title: values.title,
-    trainingType: values.trainingType,
+    trainingType: normalizeTrainingType(values.trainingType),
     description: values.description,
     companyId: references.company.id ?? currentTraining?.companyId ?? null,
     companyName: references.company.name ?? currentTraining?.companyName ?? "",
@@ -257,10 +265,8 @@ export async function getTrainingDetail(trainingId) {
     })
     .sort((a, b) => Number(b.completedAt ?? 0) - Number(a.completedAt ?? 0));
 
-  // training.id가 반드시 존재하도록 보장 (Firebase getVal은 id 필드를 포함하지 않을 수 있음)
-  const trainingWithId = { ...training, id: training.id ?? trainingId };
   return {
-    training: enrichTrainingRecord(trainingWithId),
+    training: enrichTrainingRecord({ ...training, id: training.id ?? trainingId }),
     references,
     assignments: assignmentRows,
     completions: completionRows,
@@ -268,19 +274,20 @@ export async function getTrainingDetail(trainingId) {
 }
 
 export async function assignEmployees(training, employeeIds, references = null) {
-  // training 객체에서 id를 명시적으로 추출 (enrichTrainingRecord를 거쳐도 id가 있어야 함)
   const trainingId = training?.id ?? training?.trainingId;
   if (!trainingId) {
-    const err = new Error("assignEmployees: trainingId가 undefined입니다. training 객체를 확인하세요.");
-    console.error("[training-service] assignEmployees error", { training, employeeIds }, err.message);
-    throw err;
+    const error = new Error("assignEmployees: trainingId is required.");
+    console.error("[training-service] assignEmployees error", { training, employeeIds }, error.message);
+    throw error;
   }
+
   const refs = references ?? await loadTrainingReferences();
   const selectedUsers = refs.employees.filter((employee) => employeeIds.includes(employee.id ?? employee.uid));
   if (!selectedUsers.length) {
-    console.warn("[training-service] assignEmployees: 매칭된 직원 없음", { employeeIds });
+    console.warn("[training-service] assignEmployees: no matched employees", { employeeIds });
     return;
   }
+
   try {
     await assignmentsDB.assignUsers(trainingId, selectedUsers, {
       assignedBy: authStore.uid,
@@ -289,8 +296,11 @@ export async function assignEmployees(training, employeeIds, references = null) 
       deadline: training.deadline ?? null,
     });
   } catch (err) {
-    console.error("[training-service] assignUsers failed",
-      { trainingId, employeeIds, code: err?.code, message: err?.message }, err);
+    console.error(
+      "[training-service] assignUsers failed",
+      { trainingId, employeeIds, code: err?.code, message: err?.message },
+      err
+    );
     throw err;
   }
 }
@@ -350,6 +360,7 @@ export async function buildEmployeeHistoryRows(uid) {
     const training = trainingMap.get(trainingId) ?? {};
     const assignment = assignmentMap.get(trainingId) ?? {};
     const completion = completionMap.get(trainingId) ?? {};
+    const trainingType = normalizeTrainingType(training.trainingType);
 
     return {
       uid,
@@ -359,8 +370,8 @@ export async function buildEmployeeHistoryRows(uid) {
       companyName: user?.companyName ?? training.companyName ?? "-",
       branchName: user?.branchName ?? assignment.branchName ?? "-",
       title: training.title ?? assignment.trainingTitle ?? "-",
-      trainingType: training.trainingType ?? "other",
-      trainingTypeLabel: getTrainingTypeLabel(training.trainingType),
+      trainingType,
+      trainingTypeLabel: getTrainingTypeLabel(trainingType),
       assignedAt: assignment.assignedAt ?? null,
       completedAt: completion.completedAt ?? null,
       signedAt: completion.signedAt ?? null,
