@@ -24,15 +24,44 @@ export async function render(container) {
       <button class="btn btn--secondary" id="btn-open-history-cards">직원 교육 이력카드</button>
     </div>
 
+    <!-- 개인 교육이력 일괄 등록 카드 -->
     <div class="card" style="margin-bottom:var(--space-5);border-left:4px solid var(--brand-400)">
-      <div class="card__body" style="display:flex;align-items:center;justify-content:space-between;gap:var(--space-4);flex-wrap:wrap">
+      <div class="card__header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:var(--space-2)">
         <div>
-          <div style="font-weight:var(--weight-semibold);color:var(--gray-800)">개인 교육이력 일괄 관리</div>
-          <div style="font-size:var(--text-sm);color:var(--gray-500);margin-top:4px">양식을 내려받아 기존 수료 이력을 입력한 뒤 업로드하면 재교육 예정일과 잔여일이 계산됩니다.</div>
+          <div class="card__title">개인 교육이력 일괄 등록</div>
+          <div class="card__subtitle">양식을 내려받아 수료 이력을 입력한 뒤 업로드하면 재교육 예정일과 잔여일이 자동 계산됩니다.</div>
         </div>
-        <div style="display:flex;gap:var(--space-2);flex-wrap:wrap">
-          <button class="btn btn--secondary" id="btn-history-template">양식 다운로드</button>
-          <button class="btn btn--primary" id="btn-history-upload">작성 양식 업로드</button>
+        <button class="btn btn--secondary btn--sm" id="btn-history-template">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="margin-right:4px"><path d="M8 2v8m0 0L5 7m3 3l3-3M3 13h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          양식 다운로드
+        </button>
+      </div>
+      <div class="card__body" style="display:flex;flex-direction:column;gap:var(--space-4)">
+        <!-- ① 파일 선택 -->
+        <div style="display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap">
+          <label class="btn btn--secondary" style="cursor:pointer;margin:0">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="margin-right:4px"><path d="M3 4h10M3 8h6M3 12h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><rect x="9" y="8" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.2"/><path d="M12 9.5v3M10.5 11h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+            Excel 파일 선택
+            <input type="file" id="history-upload-file-inline" accept=".xlsx,.xls,.csv" style="display:none"/>
+          </label>
+          <span id="history-upload-filename" style="font-size:var(--text-sm);color:var(--gray-500)">선택된 파일 없음</span>
+        </div>
+
+        <!-- ② 미리보기 + 검증 결과 -->
+        <div id="history-upload-preview-inline">
+          <!-- 파일 선택 전 안내 -->
+          <div style="background:var(--gray-50);border:1px dashed var(--gray-300);border-radius:var(--radius-md);padding:var(--space-6);text-align:center;color:var(--gray-400);font-size:var(--text-sm)">
+            Excel 파일을 선택하면 내용 미리보기와 검증 결과가 여기에 표시됩니다.
+          </div>
+        </div>
+
+        <!-- ③ 업로드 실행 버튼 + 결과 -->
+        <div style="display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap">
+          <button class="btn btn--primary" id="btn-history-upload-submit" disabled>
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="margin-right:4px"><path d="M8 10V2m0 0L5 5m3-3l3 3M3 13h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            이력 업로드
+          </button>
+          <div id="history-upload-result" style="font-size:var(--text-sm);color:var(--gray-600)"></div>
         </div>
       </div>
     </div>
@@ -56,7 +85,8 @@ export async function render(container) {
 
   document.getElementById("btn-open-history-cards")?.addEventListener("click", () => router.push("history-cards"));
   document.getElementById("btn-history-template")?.addEventListener("click", downloadHistoryTemplate);
-  document.getElementById("btn-history-upload")?.addEventListener("click", openHistoryUploadModal);
+  document.getElementById("history-upload-file-inline")?.addEventListener("change", parseHistoryUploadFileInline);
+  document.getElementById("btn-history-upload-submit")?.addEventListener("click", submitHistoryUploadInline);
   document.getElementById("employee-search")?.addEventListener("input", () => renderTable(container));
   document.getElementById("employee-branch-filter")?.addEventListener("change", () => renderTable(container));
   renderTable(container);
@@ -98,6 +128,138 @@ async function downloadHistoryTemplate() {
   } catch (err) { console.error(err); toast.error("양식을 만들지 못했습니다."); }
 }
 
+/* ──────────────────────────────────────────────────────────
+   인라인 Excel 업로드 (화면 본문)
+────────────────────────────────────────────────────────── */
+async function parseHistoryUploadFileInline(event) {
+  const file = event.target.files?.[0];
+  const filenameEl = document.getElementById("history-upload-filename");
+  const previewEl  = document.getElementById("history-upload-preview-inline");
+  const submitBtn  = document.getElementById("btn-history-upload-submit");
+  const resultEl   = document.getElementById("history-upload-result");
+
+  if (filenameEl) filenameEl.textContent = file ? file.name : "선택된 파일 없음";
+  if (resultEl)   resultEl.textContent = "";
+  if (submitBtn)  submitBtn.disabled = true;
+  pendingHistoryRows = [];
+
+  if (!file || !previewEl) return;
+
+  previewEl.innerHTML = `<div style="padding:var(--space-4);text-align:center;color:var(--gray-400);font-size:var(--text-sm)">파일을 분석하는 중...</div>`;
+
+  try {
+    const XLSX = await loadXlsx();
+    const wb   = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
+    const raw  = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: "", raw: false });
+
+    pendingHistoryRows = raw.map(normalizeUploadRow);
+    const employees = viewState.employees;
+    const empByNo   = new Map(employees.map((e) => [String(e.empNo ?? "").trim(), e]));
+
+    // 사번·이름 교차 검증
+    pendingHistoryRows.forEach((r) => {
+      const emp = empByNo.get(r.empNo);
+      if (r.empNo && !emp) {
+        r._errors.push("존재하지 않는 사번");
+      } else if (emp && r.employeeName && emp.name && emp.name !== r.employeeName) {
+        r._errors.push("사번과 이름 불일치");
+      }
+    });
+
+    const total   = pendingHistoryRows.length;
+    const invalid = pendingHistoryRows.filter((r) => r._errors.length).length;
+    const valid   = total - invalid;
+
+    const summaryColor = invalid > 0 ? "var(--color-warning, #d97706)" : "var(--color-success, #16a34a)";
+
+    previewEl.innerHTML = `
+      <div style="display:flex;gap:var(--space-4);margin-bottom:var(--space-3);flex-wrap:wrap">
+        <div style="background:var(--gray-50);border:1px solid var(--gray-200);border-radius:var(--radius-md);padding:var(--space-2) var(--space-4);font-size:var(--text-sm)">전체 <strong>${total}건</strong></div>
+        <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:var(--radius-md);padding:var(--space-2) var(--space-4);font-size:var(--text-sm);color:#15803d">정상 <strong>${valid}건</strong></div>
+        <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:var(--radius-md);padding:var(--space-2) var(--space-4);font-size:var(--text-sm);color:#c2410c">오류 <strong>${invalid}건</strong></div>
+        ${invalid > 0 ? `<div style="font-size:var(--text-xs);color:var(--gray-500);align-self:center">※ 오류 행을 수정 후 재업로드하거나, 정상 행만 업로드할 수 있습니다.</div>` : ""}
+      </div>
+      <div class="table-wrap" style="max-height:360px;overflow-y:auto;border:1px solid var(--gray-200);border-radius:var(--radius-md)">
+        <table class="data-table" style="min-width:720px">
+          <thead>
+            <tr>
+              <th style="width:40px">행</th>
+              <th>사번</th>
+              <th>이름</th>
+              <th>교육유형</th>
+              <th>세부분류</th>
+              <th>교육과정명</th>
+              <th>수료일</th>
+              <th>재교육주기</th>
+              <th>검증 결과</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${pendingHistoryRows.map((r, i) => `
+              <tr style="background:${r._errors.length ? "#fff7ed" : ""}">
+                <td style="color:var(--gray-400);text-align:center">${i + 2}</td>
+                <td>${escapeHtml(r.empNo)}</td>
+                <td>${escapeHtml(r.employeeName)}</td>
+                <td>${escapeHtml(r.trainingType)}</td>
+                <td>${escapeHtml(r.subjectName)}</td>
+                <td>${escapeHtml(r.title)}</td>
+                <td>${escapeHtml(String(r.completedAt || ""))}</td>
+                <td style="text-align:center">${r.cycleMonths ? `${r.cycleMonths}개월` : "–"}</td>
+                <td>${r._errors.length
+                  ? `<span style="color:#c2410c;font-size:var(--text-xs)">${escapeHtml(r._errors.join(" / "))}</span>`
+                  : `<span style="color:#15803d;font-size:var(--text-xs)">✓ 정상</span>`
+                }</td>
+              </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>`;
+
+    if (submitBtn) submitBtn.disabled = valid === 0;
+  } catch (err) {
+    console.error("[employees] parseHistoryUploadFileInline", err);
+    pendingHistoryRows = [];
+    previewEl.innerHTML = `<div style="color:var(--color-danger);font-size:var(--text-sm);padding:var(--space-3)">파일을 읽지 못했습니다. xlsx 형식인지 확인해 주세요.</div>`;
+  }
+}
+
+async function submitHistoryUploadInline() {
+  const submitBtn = document.getElementById("btn-history-upload-submit");
+  const resultEl  = document.getElementById("history-upload-result");
+
+  const validRows = pendingHistoryRows.filter((r) => !r._errors.length);
+  if (!validRows.length) { toast.warning("업로드할 수 있는 정상 행이 없습니다."); return; }
+
+  if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = "업로드 중..."; }
+  if (resultEl)  resultEl.textContent = "";
+
+  try {
+    const rows   = validRows.map(({ _errors, ...row }) => row);
+    const result = await bulkImportManualTrainingHistories({ rows });
+
+    const msg = `✅ 등록 ${result.succeededCount ?? 0}건 · 중복 ${result.skippedCount ?? 0}건 · 실패 ${result.failedCount ?? 0}건`;
+    if (resultEl) resultEl.innerHTML = `<span style="color:var(--color-success,#16a34a)">${escapeHtml(msg)}</span>`;
+    toast.success(msg);
+
+    // 결과 표시 후 초기화
+    pendingHistoryRows = [];
+    const fileInput = document.getElementById("history-upload-file-inline");
+    if (fileInput) fileInput.value = "";
+    const filenameEl = document.getElementById("history-upload-filename");
+    if (filenameEl) filenameEl.textContent = "선택된 파일 없음";
+    const previewEl = document.getElementById("history-upload-preview-inline");
+    if (previewEl) previewEl.innerHTML = `<div style="background:var(--gray-50);border:1px dashed var(--gray-300);border-radius:var(--radius-md);padding:var(--space-6);text-align:center;color:var(--gray-400);font-size:var(--text-sm)">업로드가 완료되었습니다. 다음 파일을 선택하세요.</div>`;
+  } catch (err) {
+    console.error("[employees] submitHistoryUploadInline", err);
+    if (resultEl) resultEl.innerHTML = `<span style="color:var(--color-danger)">${escapeHtml(err?.message || "업로드에 실패했습니다.")}</span>`;
+    toast.error(err?.message || "업로드에 실패했습니다.");
+  } finally {
+    if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="margin-right:4px"><path d="M8 10V2m0 0L5 5m3-3l3 3M3 13h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>이력 업로드`; }
+  }
+}
+
+/* ──────────────────────────────────────────────────────────
+   Excel 업로드 모달 (기존 — 유지)
+────────────────────────────────────────────────────────── */
 function openHistoryUploadModal() {
   pendingHistoryRows = [];
   modal.open({
