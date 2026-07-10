@@ -51,6 +51,7 @@ import {
   getSessionDetail,
   getItemDetail,
 } from "../services/training-service.js";
+import { render as renderHistoryCards } from "./history-cards.js";
 import {
   bucketIncludesTraining,
   getVisibleDeadlineBuckets,
@@ -60,7 +61,7 @@ import {
 /* ──────────────────────────────────────────────────────────
    State
 ────────────────────────────────────────────────────────── */
-let activeTab       = "items";   // "items" | "legacy"
+let activeTab       = "items";   // "items" | "history"
 let activeStatFilter = null;
 let expandedItemId  = null;      // 현재 회차 패널이 열린 항목 ID
 
@@ -72,8 +73,7 @@ let S = {
   items:               [],       // enrichItemRecord 처리된 교육 항목 배열
   sessionsByItem:      {},       // { [itemId]: session[] }
   sessionDetail:       null,     // 현재 열린 회차 상세 { sessionId, detail }
-  /* 레거시 */
-  trainings:           [],
+  allowedBranchIds:    [],
 };
 
 /* ──────────────────────────────────────────────────────────
@@ -99,7 +99,7 @@ export async function render(container) {
     <!-- 탭 -->
     <div style="display:flex;gap:0;border-bottom:2px solid var(--gray-200);margin-bottom:var(--space-5)">
       <button class="tab-btn active" id="tab-items"  style="padding:var(--space-3) var(--space-5);font-size:var(--text-sm)">교육 항목</button>
-      <button class="tab-btn"        id="tab-legacy" style="padding:var(--space-3) var(--space-5);font-size:var(--text-sm)">기존 교육</button>
+      <button class="tab-btn" id="tab-history" style="padding:var(--space-3) var(--space-5);font-size:var(--text-sm)">교육이력카드</button>
     </div>
 
     <!-- 신규: 교육 항목 탭 -->
@@ -123,60 +123,21 @@ export async function render(container) {
       </div>
     </div>
 
-    <!-- 레거시: 기존 교육 탭 -->
-    <div id="pane-legacy" style="display:none">
-      <div class="dashboard-grid dashboard-grid--compact" id="training-stats" style="margin-bottom:var(--space-5)"></div>
-      <div class="card" style="margin-bottom:var(--space-5)">
-        <div class="card__body card__body--compact">
-          <div class="filter-bar" style="margin-bottom:var(--space-3)">
-            <div class="filter-bar__search input-group" style="flex:1;min-width:220px">
-              <svg class="input-group__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
-                <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.25"/>
-                <path d="M11 11l3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
-              </svg>
-              <input class="form-control" id="search-trainings" type="search" placeholder="교육명으로 검색" />
-            </div>
-          </div>
-          <div style="display:flex;gap:var(--space-3);flex-wrap:wrap">
-            <select class="form-control" id="filter-status" style="flex:1;min-width:120px">
-              <option value="">전체 상태</option>
-              ${Object.entries(TRAINING_STATUS_LABELS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}
-            </select>
-            <select class="form-control" id="filter-type" style="flex:1;min-width:120px">
-              <option value="">전체 유형</option>
-              ${TRAINING_TYPES.map((t) => `<option value="${t}">${TRAINING_TYPE_LABELS[t]}</option>`).join("")}
-            </select>
-            <select class="form-control" id="filter-branch" style="flex:1;min-width:140px">
-              <option value="">전체 지점</option>
-            </select>
-          </div>
-        </div>
-      </div>
-      <div style="margin-bottom:var(--space-4)">
-        <button class="btn btn--secondary btn--sm" id="btn-create-legacy">+ 기존 방식으로 교육 등록</button>
-      </div>
-      <div class="table-wrap" id="trainings-table-wrap">
-        <div style="display:flex;align-items:center;justify-content:center;padding:var(--space-12)">
-          <div class="splash__spinner" style="border-color:var(--gray-200);border-top-color:var(--brand-400)"></div>
-        </div>
-      </div>
+    <!-- 강사용 교육이력카드 탭 -->
+    <div id="pane-history" style="display:none">
+      <div id="instructor-history-root"></div>
     </div>
   `;
 
   /* 탭 이벤트 */
   document.getElementById("tab-items")?.addEventListener("click",  () => switchTab("items"));
-  document.getElementById("tab-legacy")?.addEventListener("click", () => switchTab("legacy"));
+  document.getElementById("tab-history")?.addEventListener("click", () => switchTab("history"));
 
   /* 신규 항목 이벤트 */
   document.getElementById("btn-new-item")?.addEventListener("click",   () => openItemModal());
   document.getElementById("search-items")?.addEventListener("input",   () => renderItemsTable());
 
   /* 레거시 이벤트 */
-  document.getElementById("btn-create-legacy")?.addEventListener("click", () => openTrainingModal());
-  document.getElementById("search-trainings")?.addEventListener("input",  () => renderTrainingTable());
-  document.getElementById("filter-status")?.addEventListener("change",    () => renderTrainingTable());
-  document.getElementById("filter-type")?.addEventListener("change",      () => renderTrainingTable());
-  document.getElementById("filter-branch")?.addEventListener("change",    () => renderTrainingTable());
 
   await loadAll();
 }
@@ -186,28 +147,29 @@ export async function render(container) {
 ────────────────────────────────────────────────────────── */
 async function loadAll() {
   try {
-    const [references, items, trainings, notifications] = await Promise.all([
+    const [references, items, notifications] = await Promise.all([
       loadTrainingReferences(),
       listInstructorItems(),
-      listInstructorTrainings(),
       settingsDB.getNotifications().catch(() => null),
     ]);
 
     S.references           = references;
     S.items                = items;
-    S.trainings            = trainings;
     S.notificationSettings = normalizeNotificationSettings(notifications ?? {});
-    S.sessionsByItem       = {};  // 회차는 항목 클릭 시 lazy load
+    S.sessionsByItem       = {};
 
-    if (!getVisibleDeadlineBuckets(S.notificationSettings).some((b) => b.key === activeStatFilter)) {
-      activeStatFilter = null;
-    }
+    const details = await Promise.all(items.map((item) => getItemDetail(item.id).catch(() => ({ sessions: [] }))));
+    const branchIds = new Set();
+    items.forEach((item, index) => {
+      (item.branchIds ?? []).forEach((id) => branchIds.add(id));
+      const sessions = details[index]?.sessions ?? [];
+      S.sessionsByItem[item.id] = sessions;
+      sessions.forEach((session) => (session.branchIds ?? []).forEach((id) => branchIds.add(id)));
+    });
+    S.allowedBranchIds = [...branchIds];
 
-    renderBranchFilter();
     renderItemStats();
     renderItemsTable();
-    renderTrainingStats();
-    renderTrainingTable();
   } catch (err) {
     console.error("[instructor-trainings] loadAll failed", err);
     toast.error("데이터를 불러오지 못했습니다.");
@@ -219,13 +181,24 @@ async function loadAll() {
 ────────────────────────────────────────────────────────── */
 function switchTab(tab) {
   activeTab = tab;
-  document.getElementById("pane-items").style.display  = tab === "items"  ? "" : "none";
-  document.getElementById("pane-legacy").style.display = tab === "legacy" ? "" : "none";
-  document.getElementById("tab-items").classList.toggle("active",  tab === "items");
-  document.getElementById("tab-legacy").classList.toggle("active", tab === "legacy");
+  document.getElementById("pane-items").style.display   = tab === "items" ? "" : "none";
+  document.getElementById("pane-history").style.display = tab === "history" ? "" : "none";
+  document.getElementById("tab-items").classList.toggle("active", tab === "items");
+  document.getElementById("tab-history").classList.toggle("active", tab === "history");
 
   const headerBtn = document.getElementById("btn-new-item");
   if (headerBtn) headerBtn.style.display = tab === "items" ? "" : "none";
+
+  if (tab === "history") {
+    const root = document.getElementById("instructor-history-root");
+    if (root) {
+      if (!S.allowedBranchIds.length) {
+        root.innerHTML = `<div class="empty-state" style="padding:var(--space-16)"><div class="empty-state__title">조회 가능한 지점이 없습니다.</div><div>담당 교육 회차에 직원을 배정하면 해당 지점 직원의 교육이력카드를 조회할 수 있습니다.</div></div>`;
+      } else {
+        renderHistoryCards(root, { allowedBranchIds: S.allowedBranchIds });
+      }
+    }
+  }
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -436,7 +409,7 @@ function renderSessionPanel(itemId) {
               <th>수료기한</th>
               <th>지점</th>
               <th>상태</th>
-              <th style="width:190px"></th>
+              <th style="width:160px"></th>
             </tr>
           </thead>
           <tbody>
@@ -449,9 +422,6 @@ function renderSessionPanel(itemId) {
     if (item) openSessionModal(item);
   });
 
-  panelBody.querySelectorAll(".btn-session-detail").forEach((btn) => {
-    btn.addEventListener("click", () => openSessionDetailModal(btn.dataset.sid, btn.dataset.iid));
-  });
   panelBody.querySelectorAll(".btn-session-edit").forEach((btn) => {
     btn.addEventListener("click", () => {
       const s = (S.sessionsByItem[itemId] ?? []).find((x) => x.id === btn.dataset.sid);
@@ -486,8 +456,6 @@ function sessionRow(s, item) {
       <td>${buildSessionStatusChip(s.computedStatus)}</td>
       <td class="cell--actions">
         <div style="display:flex;gap:4px;justify-content:flex-end">
-          <button class="btn btn--ghost btn--sm btn-session-detail"
-            data-sid="${s.id}" data-iid="${item?.id ?? ""}" title="배정 관리">배정</button>
           ${!isDone && !isClosed
             ? `<button class="btn btn--ghost btn--sm btn-session-complete"
                 data-sid="${s.id}" style="color:var(--color-success,#16a34a)" title="완료 처리">완료</button>`
@@ -603,7 +571,19 @@ function openItemModal(item = null) {
 /* ──────────────────────────────────────────────────────────
    회차 모달 (등록/수정 + 직원 즉시 배정)
 ────────────────────────────────────────────────────────── */
-function openSessionModal(item, session = null) {
+async function openSessionModal(item, session = null) {
+  let existingAssignments = [];
+  if (session?.id) {
+    try {
+      const detail = await getSessionDetail(session.id);
+      existingAssignments = detail?.assignments ?? [];
+    } catch (err) {
+      console.error("[instructor-trainings] session assignments load failed", err);
+      toast.error("기존 배정 직원을 불러오지 못했습니다.");
+      return;
+    }
+  }
+
   const label    = session ? "수정" : "추가";
   const refs     = S.references;
   const branches = refs?.branches ?? [];
@@ -613,7 +593,8 @@ function openSessionModal(item, session = null) {
   /* 직원 필터 상태 (모달 내부 클로저로 관리) */
   let filterBranchId = "";
   let filterSearch   = "";
-  let selectedUids   = new Set();
+  const originalUids = new Set(existingAssignments.map((a) => a.uid));
+  let selectedUids   = new Set(originalUids);
 
   function getFilteredEmployees() {
     return employees.filter((e) => {
@@ -717,7 +698,7 @@ function openSessionModal(item, session = null) {
           <div class="picker-list" id="ss-emp-list" style="max-height:240px;overflow-y:auto">
             <div style="padding:var(--space-4);color:var(--gray-400);font-size:var(--text-sm);text-align:center">불러오는 중…</div>
           </div>
-          <div class="form-hint">회차 저장 시 선택한 직원이 자동 배정됩니다. 저장 후 배정 버튼으로 추가 배정도 가능합니다.</div>
+          <div class="form-hint">회차 저장 시 선택한 직원 배정이 함께 갱신됩니다.</div>
         </div>
 
       </div>`,
@@ -757,18 +738,21 @@ function openSessionModal(item, session = null) {
               });
             }
 
-            /* 선택된 직원 즉시 배정 */
-            let assignedCount = 0;
-            if (selectedUids.size > 0) {
-              const sessionObj = { id: sessionId, deadline, title: item.title, itemId: item.id };
+            /* 배정 직원 동기화: 신규 추가 + 체크 해제된 직원 배정 해제 */
+            const sessionObj = { id: sessionId, deadline, title: item.title, itemId: item.id };
+            const toAdd = [...selectedUids].filter((uid) => !originalUids.has(uid));
+            const toRemove = [...originalUids].filter((uid) => !selectedUids.has(uid));
+            if (!session && selectedUids.size > 0) {
               await assignEmployeesToSession(sessionObj, [...selectedUids], refs);
-              assignedCount = selectedUids.size;
+            } else {
+              if (toAdd.length) await assignEmployeesToSession(sessionObj, toAdd, refs);
+              for (const uid of toRemove) await unassignFromSession(sessionId, uid);
             }
 
             /* 모든 처리 완료 후 단일 알림 */
             const msg = session
-              ? `회차를 수정했습니다.${assignedCount ? ` (${assignedCount}명 배정)` : ""}`
-              : `회차를 추가했습니다.${assignedCount ? ` (${assignedCount}명 배정)` : ""}`;
+              ? `회차를 수정했습니다. (배정 ${selectedUids.size}명)`
+              : `회차를 추가했습니다.${selectedUids.size ? ` (${selectedUids.size}명 배정)` : ""}`;
             toast.success(msg);
 
             modal.close();
