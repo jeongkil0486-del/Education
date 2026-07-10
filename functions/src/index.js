@@ -725,6 +725,217 @@ exports.deleteEmployeeHistory = onCall(OPTS, async (request) => {
 });
 
 
+exports.updateEmployeeManagementProfile = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await ensureHQAdminProfile(request.auth.uid);
+
+  const uid = normalizeText(request.data?.uid || request.data?.employeeUid || request.data?.targetUid);
+  if (!uid) {
+    throw new HttpsError("invalid-argument", "직원 UID가 필요합니다.");
+  }
+
+  const employeeSnap = await db.ref(`users/${uid}`).get();
+  if (!employeeSnap.exists()) {
+    throw new HttpsError("not-found", "직원 정보를 찾을 수 없습니다.");
+  }
+
+  const employee = { uid, ...employeeSnap.val() };
+  if (employee.role !== "employee") {
+    throw new HttpsError("failed-precondition", "직원 계정만 처리할 수 있습니다.");
+  }
+  assertSameCompany(actor, employee);
+
+  const source = request.data?.profile && typeof request.data.profile === "object"
+    ? request.data.profile
+    : request.data?.fields && typeof request.data.fields === "object"
+      ? request.data.fields
+      : request.data ?? {};
+
+  const updates = buildEmployeeManagementUpdates(source);
+  if (!Object.keys(updates).length) {
+    throw new HttpsError("invalid-argument", "업데이트할 관리 프로필 필드가 없습니다.");
+  }
+
+  updates.updatedAt = admin.database.ServerValue.TIMESTAMP;
+  updates.updatedBy = request.auth.uid;
+  updates.updatedByName = actor.name ?? "";
+
+  await db.ref(`users/${uid}`).update(updates);
+
+  return {
+    uid,
+    updatedFields: Object.keys(updates).filter((key) => !["updatedAt", "updatedBy", "updatedByName"].includes(key)),
+    message: "직원 관리정보가 저장되었습니다.",
+  };
+});
+
+exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await ensureHQAdminProfile(request.auth.uid);
+
+  const historyIds = normalizeStringArray(request.data?.historyIds ?? request.data?.selectedHistoryIds);
+  const singleHistoryId = normalizeText(request.data?.historyId);
+  const uid = normalizeText(request.data?.uid || request.data?.employeeUid);
+  const uids = normalizeStringArray(request.data?.uids ?? request.data?.selectedUids);
+  const trainingType = normalizeTrainingTypeValue(request.data?.trainingType);
+  const subjectCode = normalizeText(request.data?.subjectCode);
+  const subjectName = normalizeText(request.data?.subjectName);
+  const title = normalizeText(request.data?.title || request.data?.courseName);
+  const sourceFilter = normalizeText(request.data?.source || request.data?.historySource).toLowerCase();
+  const allowAllForUser = Boolean(request.data?.resetAllForUser || request.data?.resetAll || request.data?.all);
+
+  const targetHistoryIds = Array.from(new Set([singleHistoryId, ...historyIds].filter(Boolean)));
+  const targetUids = Array.from(new Set([uid, ...uids].filter(Boolean)));
+
+  if (!targetHistoryIds.length && !targetUids.length) {
+    throw new HttpsError("invalid-argument", "초기화할 개인 이력 또는 직원을 선택해야 합니다.");
+  }
+
+  const updates = {};
+  const deletedHistoryIds = [];
+  const deletedByUid = {};
+
+  const shouldDeleteRecord = (record) => {
+    if (!record) return false;
+    const recordSource = normalizeText(record.source).toLowerCase();
+    if (recordSource && !["manual", "manual_excel"].includes(recordSource)) return false;
+    if (sourceFilter && recordSource !== sourceFilter) return false;
+    if (trainingType && normalizeTrainingTypeValue(record.trainingType) !== trainingType) return false;
+    if (subjectCode && normalizeText(record.subjectCode) !== subjectCode) return false;
+    if (subjectName && normalizeText(record.subjectName) !== subjectName) return false;
+    if (title && normalizeText(record.title || record.courseName) !== title) return false;
+    return true;
+  };
+
+  if (targetHistoryIds.length) {
+    const historySnaps = await Promise.all(
+      targetHistoryIds.map((id) => db.ref(`manualTrainingHistories/${id}`).get())
+    );
+
+    for (let index = 0; index < targetHistoryIds.length; index += 1) {
+      const historyId = targetHistoryIds[index];
+      const snap = historySnaps[index];
+      if (!snap.exists()) continue;
+
+      const record = snap.val();
+      const employeeSnap = await db.ref(`users/${record.uid}`).get();
+      if (employeeSnap.exists()) {
+        assertSameCompany(actor, { uid: record.uid, ...employeeSnap.val() });
+      } else if (actor.companyId && record.companyId && actor.companyId !== record.companyId) {
+        throw new HttpsError("permission-denied", "다른 회사 이력은 초기화할 수 없습니다.");
+      }
+
+      if (!shouldDeleteRecord(record)) continue;
+
+      updates[`manualTrainingHistories/${historyId}`] = null;
+      updates[`userManualTrainingHistories/${record.uid}/${historyId}`] = null;
+      deletedHistoryIds.push(historyId);
+      deletedByUid[record.uid] = (deletedByUid[record.uid] ?? 0) + 1;
+    }
+  }
+
+  if (targetUids.length) {
+    const employeeSnaps = await Promise.all(targetUids.map((targetUid) => db.ref(`users/${targetUid}`).get()));
+    const userHistorySnaps = await Promise.all(targetUids.map((targetUid) => db.ref(`userManualTrainingHistories/${targetUid}`).get()));
+
+    for (let index = 0; index < targetUids.length; index += 1) {
+      const targetUid = targetUids[index];
+      const employeeSnap = employeeSnaps[index];
+      if (!employeeSnap.exists()) continue;
+
+      const employee = { uid: targetUid, ...employeeSnap.val() };
+      assertSameCompany(actor, employee);
+
+      const records = userHistorySnaps[index].val() ?? {};
+      const hasFilter = Boolean(targetHistoryIds.length || trainingType || subjectCode || subjectName || title || sourceFilter);
+      if (!hasFilter && !allowAllForUser) {
+        throw new HttpsError("invalid-argument", "선택 초기화 기능은 교육 항목 또는 이력 선택이 필요합니다.");
+      }
+
+      for (const [historyId, record] of Object.entries(records)) {
+        if (targetHistoryIds.length && !targetHistoryIds.includes(historyId)) continue;
+        if (!shouldDeleteRecord(record)) continue;
+
+        updates[`manualTrainingHistories/${historyId}`] = null;
+        updates[`userManualTrainingHistories/${targetUid}/${historyId}`] = null;
+        deletedHistoryIds.push(historyId);
+        deletedByUid[targetUid] = (deletedByUid[targetUid] ?? 0) + 1;
+      }
+    }
+  }
+
+  const uniqueDeletedHistoryIds = Array.from(new Set(deletedHistoryIds));
+  if (Object.keys(updates).length) {
+    await db.ref().update(updates);
+  }
+
+  return {
+    deletedCount: uniqueDeletedHistoryIds.length,
+    deletedHistoryIds: uniqueDeletedHistoryIds,
+    deletedByUid,
+    message: uniqueDeletedHistoryIds.length
+      ? `${uniqueDeletedHistoryIds.length}건의 개인 교육이력을 초기화했습니다.`
+      : "초기화할 개인 교육이력이 없습니다.",
+  };
+});
+
+exports.saveEducationCycleConfig = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await ensureHQAdminProfile(request.auth.uid);
+
+  const payload = request.data && typeof request.data === "object" ? request.data : {};
+  const companyId = normalizeText(payload.companyId) || normalizeText(actor.companyId);
+  const trainingType = normalizeTrainingTypeValue(payload.trainingType);
+  const subjectCode = normalizeText(payload.subjectCode);
+  const subjectName = normalizeText(payload.subjectName);
+
+  if (!companyId) {
+    throw new HttpsError("failed-precondition", "companyId를 결정할 수 없습니다.");
+  }
+  if (!subjectCode && !subjectName) {
+    throw new HttpsError("invalid-argument", "subjectCode 또는 subjectName이 필요합니다.");
+  }
+
+  const cycleInfo = normalizeCycleMonths(payload.cycleMonths ?? payload.value ?? payload.months);
+  const configKey = buildEducationCycleConfigKey(trainingType, subjectCode, subjectName);
+  const targetPath = `educationCycleConfigs/${companyId}/${configKey}`;
+
+  if (cycleInfo.unset) {
+    await db.ref(targetPath).remove();
+    return {
+      companyId,
+      trainingType,
+      subjectCode,
+      subjectName,
+      cycleMonths: null,
+      unset: true,
+      message: "교육 주기 설정을 해제했습니다.",
+    };
+  }
+
+  await db.ref(targetPath).set({
+    companyId,
+    trainingType,
+    subjectCode,
+    subjectName,
+    cycleMonths: cycleInfo.value,
+    updatedAt: admin.database.ServerValue.TIMESTAMP,
+    updatedBy: request.auth.uid,
+    updatedByName: actor.name ?? "",
+  });
+
+  return {
+    companyId,
+    configKey,
+    trainingType,
+    subjectCode,
+    subjectName,
+    cycleMonths: cycleInfo.value,
+    unset: false,
+    message: "교육 주기 설정이 저장되었습니다.",
+  };
+});
+
 async function ensureHQAdminProfile(uid) {
   const snap = await db.ref(`users/${uid}`).get();
   if (!snap.exists() || snap.val()?.role !== "hq_admin") {
@@ -771,12 +982,6 @@ function normalizeManualHistory(data, employee, actorUid, actorName) {
 
   const cycleMonths = Math.max(0, Number(data?.cycleMonths ?? data?.retrainingCycleMonths ?? 0) || 0);
   const hours = Math.max(0, Number(data?.hours ?? data?.trainingHours ?? 0) || 0);
-
-  // educationStage: initial | previous_year | current_year (Excel 교육항목 양식 업로드용)
-  const educationStage = normalizeText(data?.educationStage);
-  // source: manual | manual_excel
-  const sourceValue = ["manual_excel"].includes(normalizeText(data?.source)) ? "manual_excel" : "manual";
-
   return {
     trainingType,
     subjectCode: normalizeText(data?.subjectCode),
@@ -792,8 +997,6 @@ function normalizeManualHistory(data, employee, actorUid, actorName) {
     subType: normalizeText(data?.subType),
     note: normalizeText(data?.note),
     cycleMonths,
-    educationStage: educationStage || null,
-    source: sourceValue,
     enteredBy: actorUid,
     enteredByName: actorName,
   };
@@ -1047,201 +1250,88 @@ function normalizeText(value) {
   return String(value ?? "").trim();
 }
 
+function normalizeStringArray(value) {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value.map((item) => normalizeText(item)).filter(Boolean)));
+}
+
+function normalizeProfileDate(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 100000000000) {
+    return numeric;
+  }
+
+  const parsed = Date.parse(String(value));
+  if (!Number.isFinite(parsed)) {
+    throw new HttpsError("invalid-argument", "날짜 형식이 올바르지 않습니다.");
+  }
+  return parsed;
+}
+
+function buildEmployeeManagementUpdates(source) {
+  const updates = {};
+  const textFields = [
+    "position",
+    "jobTitle",
+    "note",
+    "birthDate",
+    "entryType",
+    "internalLicense",
+    "externalLicense",
+    "departmentName",
+    "departmentId",
+    "rank",
+  ];
+
+  textFields.forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(source, field)) {
+      updates[field] = normalizeText(source[field]);
+    }
+  });
+
+  ["hireDate", "joinDate", "employmentDate"].forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(source, field)) {
+      updates[field] = normalizeProfileDate(source[field]);
+    }
+  });
+
+  return updates;
+}
+
+function buildEducationCycleConfigKey(trainingType, subjectCode, subjectName) {
+  const typeKey = normalizeText(trainingType || "other").toLowerCase();
+  const subjectKey = normalizeText(subjectCode || subjectName)
+    .toLowerCase()
+    .replace(/[^a-z0-9가-힣]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return `${typeKey}__${subjectKey || "default"}`;
+}
+
+function normalizeCycleMonths(value) {
+  if (value === null || value === undefined || value === "") {
+    return { unset: true, value: null };
+  }
+
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    throw new HttpsError("invalid-argument", "재교육 주기는 숫자만 입력할 수 있습니다.");
+  }
+  if (!Number.isInteger(numeric)) {
+    throw new HttpsError("invalid-argument", "재교육 주기는 정수 개월만 허용됩니다.");
+  }
+  if (numeric < 0 || numeric > 120) {
+    throw new HttpsError("invalid-argument", "재교육 주기는 0~120개월 범위에서만 설정할 수 있습니다.");
+  }
+  if (numeric === 0) {
+    return { unset: true, value: null };
+  }
+
+  return { unset: false, value: numeric };
+}
+
 function simplifyError(err) {
   if (err?.code === "auth/email-already-exists") return "동일 이메일 계정이 이미 존재합니다.";
   if (err?.code === "auth/invalid-password") return "비밀번호 정책에 맞지 않습니다.";
   return err?.message || "알 수 없는 오류";
 }
-
-/* ══════════════════════════════════════════════════════════
-   직원관리대장 신규 Cloud Functions
-══════════════════════════════════════════════════════════ */
-
-/**
- * 직원 기본정보 수정 (HQ_ADMIN 전용)
- * 수정 가능: name, hireDate, position, branchId, managementNote
- * 수정 불가: empNo, role, password, Auth email, companyId
- */
-exports.updateEmployeeManagementProfile = onCall(OPTS, async (request) => {
-  ensureAuthenticated(request);
-  const actor = await ensureHQAdminProfile(request.auth.uid);
-
-  const uid           = normalizeText(request.data?.uid);
-  const name          = normalizeText(request.data?.name);
-  const hireDate      = request.data?.hireDate ?? null;
-  const position      = normalizeText(request.data?.position ?? "");
-  const branchId      = normalizeText(request.data?.branchId ?? "");
-  const managementNote = normalizeText(request.data?.managementNote ?? "");
-
-  if (!uid)  throw new HttpsError("invalid-argument", "직원 UID가 필요합니다.");
-  if (!name) throw new HttpsError("invalid-argument", "성명을 입력해 주세요.");
-
-  const empSnap = await db.ref(`users/${uid}`).get();
-  if (!empSnap.exists() || empSnap.val()?.role !== "employee") {
-    throw new HttpsError("not-found", "직원 정보를 찾을 수 없습니다.");
-  }
-  const emp = empSnap.val();
-  assertSameCompany(actor, emp);
-
-  // 선택 지점이 같은 회사 소속인지 확인
-  if (branchId) {
-    const branchSnap = await db.ref(`branches/${branchId}`).get();
-    if (!branchSnap.exists()) throw new HttpsError("invalid-argument", "존재하지 않는 지점입니다.");
-    const branch = branchSnap.val();
-    if (actor.companyId && branch.companyId && actor.companyId !== branch.companyId) {
-      throw new HttpsError("permission-denied", "다른 회사 지점으로 변경할 수 없습니다.");
-    }
-  }
-
-  // hireDate 정규화: 밀리초 timestamp 또는 null
-  let hireDateMs = null;
-  if (hireDate !== null && hireDate !== undefined && hireDate !== "") {
-    const n = Number(hireDate);
-    if (Number.isFinite(n) && n > 0) hireDateMs = n;
-    else if (typeof hireDate === "string" && hireDate.trim()) {
-      const d = Date.parse(hireDate.trim());
-      if (!Number.isNaN(d)) hireDateMs = d;
-    }
-  }
-
-  const updates = {
-    name,
-    position,
-    managementNote,
-    updatedAt: Date.now(),
-    updatedBy: request.auth.uid,
-  };
-  if (hireDateMs !== null) updates.hireDate = hireDateMs;
-  if (branchId) {
-    const branchSnap = await db.ref(`branches/${branchId}`).get();
-    const branch = branchSnap.val() ?? {};
-    updates.branchId   = branchId;
-    updates.branchCode = branch.code ?? emp.branchCode ?? "";
-    updates.branchName = branch.name ?? emp.branchName ?? "";
-  }
-
-  // Auth displayName 업데이트
-  try { await auth.updateUser(uid, { displayName: name }); } catch (e) { /* 무시 */ }
-  await db.ref(`users/${uid}`).update(updates);
-
-  return { uid, message: "직원 정보가 수정되었습니다." };
-});
-
-/**
- * 선택 직원의 Excel 업로드 이력 초기화 (HQ_ADMIN 전용)
- * source==="manual_excel" + 해당 교육항목 이력만 삭제
- */
-exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
-  ensureAuthenticated(request);
-  const actor = await ensureHQAdminProfile(request.auth.uid);
-
-  const companyId    = normalizeText(request.data?.companyId ?? "");
-  const branchId     = normalizeText(request.data?.branchId  ?? "");
-  const itemId       = normalizeText(request.data?.itemId    ?? "");
-  const trainingType = normalizeText(request.data?.trainingType ?? "");
-  const subjectCode  = normalizeText(request.data?.subjectCode ?? "");
-  const subjectName  = normalizeText(request.data?.subjectName ?? "");
-  const employeeUids = Array.isArray(request.data?.employeeUids) ? request.data.employeeUids : [];
-
-  if (!employeeUids.length) throw new HttpsError("invalid-argument", "삭제할 직원을 선택해 주세요.");
-  if (employeeUids.length > 200) throw new HttpsError("invalid-argument", "한 번에 최대 200명까지 처리할 수 있습니다.");
-  if (companyId && actor.companyId && companyId !== actor.companyId) {
-    throw new HttpsError("permission-denied", "다른 회사의 이력은 초기화할 수 없습니다.");
-  }
-
-  // 직원 UID가 해당 회사 소속인지 확인 + manualTrainingHistories 조회
-  const [usersSnap, manualSnap] = await Promise.all([
-    db.ref("users").get(),
-    db.ref("manualTrainingHistories").get(),
-  ]);
-  const users  = usersSnap.val()  ?? {};
-  const manual = manualSnap.val() ?? {};
-
-  const uidSet = new Set(employeeUids);
-
-  // 대상 이력 필터
-  const updates = {};
-  let deletedCount = 0;
-
-  for (const [historyId, h] of Object.entries(manual)) {
-    if (!h || !uidSet.has(h.uid)) continue;
-    if (h.source !== "manual_excel")           continue;
-    if (actor.companyId && h.companyId && h.companyId !== actor.companyId) continue;
-
-    // 교육 항목 매칭
-    const htType = normalizeText(h.trainingType).toLowerCase();
-    const targetType = normalizeText(trainingType).toLowerCase();
-    if (htType !== targetType && targetType) continue;
-
-    const matched =
-      (itemId      && h.itemId      === itemId)      ||
-      (subjectCode && h.subjectCode === subjectCode)  ||
-      (subjectName && (h.subjectName === subjectName || h.title === subjectName || h.courseName === subjectName));
-    if (!matched && (itemId || subjectCode || subjectName)) continue;
-
-    updates[`manualTrainingHistories/${historyId}`] = null;
-    updates[`userManualTrainingHistories/${h.uid}/${historyId}`] = null;
-    deletedCount++;
-  }
-
-  if (Object.keys(updates).length) await db.ref().update(updates);
-
-  return {
-    success: true,
-    selectedEmployeeCount: employeeUids.length,
-    deletedHistoryCount: deletedCount,
-  };
-});
-
-/**
- * 교육 항목별 재교육 주기 저장 (HQ_ADMIN 전용)
- * 저장 경로: /educationCycleConfigs/{companyId}/{educationKey}
- */
-exports.saveEducationCycleConfig = onCall(OPTS, async (request) => {
-  ensureAuthenticated(request);
-  const actor = await ensureHQAdminProfile(request.auth.uid);
-
-  const companyId   = normalizeText(request.data?.companyId   ?? actor.companyId ?? "");
-  const itemId      = normalizeText(request.data?.itemId      ?? "");
-  const trainingType = normalizeText(request.data?.trainingType ?? "");
-  const subjectCode = normalizeText(request.data?.subjectCode ?? "");
-  const subjectName = normalizeText(request.data?.subjectName ?? "");
-  const cycleMonths = Number(request.data?.cycleMonths ?? 0);
-
-  if (!companyId) throw new HttpsError("invalid-argument", "companyId가 필요합니다.");
-  if (actor.companyId && companyId !== actor.companyId) {
-    throw new HttpsError("permission-denied", "다른 회사의 설정은 변경할 수 없습니다.");
-  }
-  if (!Number.isInteger(cycleMonths) || cycleMonths < 0 || cycleMonths > 120) {
-    throw new HttpsError("invalid-argument", "재교육 주기는 0~120 사이 정수여야 합니다.");
-  }
-
-  // educationKey 생성
-  let educationKey;
-  if (itemId)       educationKey = `item_${itemId}`;
-  else if (subjectCode) educationKey = `${trainingType}_${subjectCode}`;
-  else              educationKey = `${trainingType}_${subjectName.replace(/\s+/g, "_")}`;
-
-  const record = {
-    companyId,
-    itemId:       itemId || null,
-    trainingType,
-    subjectCode:  subjectCode || null,
-    subjectName:  subjectName || null,
-    cycleMonths,
-    updatedBy:    request.auth.uid,
-    updatedAt:    Date.now(),
-  };
-
-  await db.ref(`educationCycleConfigs/${companyId}/${educationKey}`).set(record);
-
-  // 해당 trainingItem에도 cycleMonths 반영 (itemId 있을 때)
-  if (itemId) {
-    const itemSnap = await db.ref(`trainingItems/${itemId}`).get();
-    if (itemSnap.exists()) {
-      await db.ref(`trainingItems/${itemId}`).update({ cycleMonths, updatedAt: Date.now() });
-    }
-  }
-
-  return { success: true, educationKey, cycleMonths, message: "재교육 주기가 저장되었습니다." };
-});
