@@ -159,14 +159,18 @@ async function loadAll() {
     S.sessionsByItem       = {};
 
     const details = await Promise.all(items.map((item) => getItemDetail(item.id).catch(() => ({ sessions: [] }))));
-    const branchIds = new Set();
     items.forEach((item, index) => {
-      (item.branchIds ?? []).forEach((id) => branchIds.add(id));
-      const sessions = details[index]?.sessions ?? [];
-      S.sessionsByItem[item.id] = sessions;
-      sessions.forEach((session) => (session.branchIds ?? []).forEach((id) => branchIds.add(id)));
+      S.sessionsByItem[item.id] = details[index]?.sessions ?? [];
     });
-    S.allowedBranchIds = [...branchIds];
+
+    // 강사 교육이력카드 조회 범위는 교육 항목/회차에 포함된 지점을 다시 추정하지 않고,
+    // loadTrainingReferences()가 최신 users/{uid}.assignedBranches 기준으로 이미 제한한
+    // 담당 지점 목록을 단일 기준으로 사용한다.
+    S.allowedBranchIds = Array.from(new Set(
+      (references.branches ?? [])
+        .map((branch) => String(branch.id ?? branch.branchId ?? "").trim())
+        .filter(Boolean)
+    ));
 
     renderItemStats();
     renderItemsTable();
@@ -193,7 +197,7 @@ function switchTab(tab) {
     const root = document.getElementById("instructor-history-root");
     if (root) {
       if (!S.allowedBranchIds.length) {
-        root.innerHTML = `<div class="empty-state" style="padding:var(--space-16)"><div class="empty-state__title">조회 가능한 지점이 없습니다.</div><div>담당 교육 회차에 직원을 배정하면 해당 지점 직원의 교육이력카드를 조회할 수 있습니다.</div></div>`;
+        root.innerHTML = `<div class="empty-state" style="padding:var(--space-16)"><div class="empty-state__title">담당 지점이 지정되지 않았습니다.</div><div>슈퍼관리자에게 담당 지점 설정을 요청해 주세요.</div></div>`;
       } else {
         renderHistoryCards(root, { allowedBranchIds: S.allowedBranchIds });
       }
