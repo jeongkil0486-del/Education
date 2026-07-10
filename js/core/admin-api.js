@@ -161,3 +161,15 @@ export async function getEducationCycleConfig(payload) {
   return null;
 }
 
+
+/* ─── 기존 교육이력 Excel 가져오기 ──────────────────────── */
+const importHistoryExcelDataCallable = httpsCallable(functions, "importHistoryExcelData");
+
+/**
+ * 교육이력 Excel 파싱 결과를 서버에 전달하여 이력 보완/추가
+ * @param {{ rows: object[], mode: "fill"|"overwrite" }} payload
+ */
+export async function importHistoryExcelData(payload) {
+  const result = await importHistoryExcelDataCallable(payload);
+  return result.data;
+}

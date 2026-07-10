@@ -6,10 +6,8 @@ import { authStore, ROLES } from "../core/auth.js";
 import { deleteEmployeeHistory, upsertManualTrainingHistory } from "../core/admin-api.js";
 import {
   exportEmployeeHistoryCard,
-  getLatestHistoryCardTemplate,
-  listHistoryCardTemplates,
-  uploadHistoryCardTemplate,
 } from "../services/history-card-export.js";
+import { importHistoryExcelData } from "../core/admin-api.js";
 
 /* ──────────────────────────────────────────────────────────
    교육유형 → 섹션 매핑
@@ -56,7 +54,10 @@ export async function render(container, params = {}) {
           <div class="section-subtitle">지점별 직원을 선택하여 교육 이력을 조회하고 다운로드합니다.</div>
         </div>
         <div style="display:flex;gap:var(--space-2);flex-wrap:wrap">
-          ${authStore.role === ROLES.HQ_ADMIN ? '<button class="btn btn--secondary" id="btn-add-manual-history">개인 이력 추가</button><button class="btn btn--secondary" id="btn-upload-template">양식 업로드</button>' : ''}
+          ${authStore.role === ROLES.HQ_ADMIN || authStore.role === ROLES.SUPER_ADMIN ? `
+            <button class="btn btn--secondary" id="btn-import-excel">기존 교육이력 가져오기</button>
+          ` : ''}
+          ${authStore.role === ROLES.HQ_ADMIN ? '<button class="btn btn--secondary" id="btn-add-manual-history">개인 이력 추가</button>' : ''}
           <button class="btn btn--primary" id="btn-download-card" disabled>이력카드 다운로드</button>
         </div>
       </div>
@@ -142,7 +143,7 @@ export async function render(container, params = {}) {
   `;
 
   /* 이벤트 */
-  document.getElementById("btn-upload-template")?.addEventListener("click", openUploadModal);
+  document.getElementById("btn-import-excel")?.addEventListener("click", openImportExcelModal);
   document.getElementById("btn-add-manual-history")?.addEventListener("click", () => openManualHistoryModal());
   document.getElementById("btn-download-card")?.addEventListener("click", handleDownload);
   document.getElementById("btn-deselect")?.addEventListener("click", deselectEmployee);
@@ -161,14 +162,11 @@ export async function render(container, params = {}) {
 ────────────────────────────────────────────────────────── */
 async function initView(initialUid = "") {
   try {
-    const [references, templates] = await Promise.all([
-      loadTrainingReferences(),
-      listHistoryCardTemplates(),
-    ]);
+    const references = await loadTrainingReferences();
 
-    S.employees  = references.employees ?? [];
-    S.branches   = references.branches  ?? [];
-    S.templates  = templates;
+    S.employees = references.employees ?? [];
+    S.branches  = references.branches  ?? [];
+    S.templates = [];
 
     // 지점 셀렉트 채우기
     const branchSel = document.getElementById("hc-branch");
@@ -523,43 +521,91 @@ function openManualHistoryModal(row = null) {
 
 
 /* ──────────────────────────────────────────────────────────
-   양식 업로드
+   기존 교육이력 가져오기 (Excel → 세부 필드 보완)
 ────────────────────────────────────────────────────────── */
-function openUploadModal() {
+function openImportExcelModal() {
   modal.open({
-    title: "교육이력카드 양식 업로드",
-    size: "md",
+    title: "기존 교육이력 가져오기",
+    size: "lg",
     body: `
       <div style="display:flex;flex-direction:column;gap:var(--space-4)">
-        <div style="background:var(--blue-50,#eff6ff);border:1px solid var(--blue-200,#bfdbfe);border-radius:var(--radius-md);padding:var(--space-4);font-size:var(--text-sm);color:var(--blue-800,#1e40af)">
+        <div style="background:var(--blue-50,#eff6ff);border:1px solid var(--blue-200,#bfdbfe);border-radius:var(--radius-md);padding:var(--space-3);font-size:var(--text-sm);color:var(--blue-800,#1e40af)">
           <strong>안내</strong><br/>
-          회사에서 사용 중인 교육이력카드 엑셀 양식(.xlsx)을 업로드하세요.<br/>
-          원본 서식(병합셀·글꼴·테두리·색상·행높이·열너비)을 그대로 유지하고 데이터만 채워 넣습니다.
+          기존 교육이력 Excel 파일(법정/직무 시트 포함)을 업로드하면
+          시스템 이력의 빈 항목(강사·교육시간·교육기간·초기/보수·비고)을 자동으로 채웁니다.
+          매칭되지 않은 이력은 신규 이력으로 추가할 수 있습니다.
         </div>
+
         <div class="form-group">
-          <label class="form-label form-label--required">양식 파일 (.xlsx)</label>
-          <input class="form-control" id="hc-template-file" type="file" accept=".xlsx,.xlsm,.xls" />
-          <div class="form-hint">병합 셀, 인쇄 설정이 포함된 원본 양식을 올려주세요.</div>
+          <label class="form-label form-label--required">교육이력 Excel 파일 (.xlsx)</label>
+          <input class="form-control" id="import-excel-file" type="file" accept=".xlsx,.xlsm,.xls"/>
+          <div class="form-hint">법정/직무 시트가 포함된 개인 교육이력 파일을 선택하세요.</div>
         </div>
+
+        <div class="form-group">
+          <label class="form-label">업데이트 방식</label>
+          <div style="display:flex;flex-direction:column;gap:var(--space-2)">
+            <label style="display:flex;align-items:center;gap:var(--space-2);font-size:var(--text-sm);cursor:pointer">
+              <input type="radio" name="import-mode" value="fill" checked/> 빈 항목만 채우기 (기본)
+            </label>
+            <label style="display:flex;align-items:center;gap:var(--space-2);font-size:var(--text-sm);cursor:pointer">
+              <input type="radio" name="import-mode" value="overwrite"/> Excel 값으로 덮어쓰기
+            </label>
+          </div>
+        </div>
+
+        <div id="import-preview" style="display:none">
+          <div style="font-weight:var(--weight-semibold);font-size:var(--text-sm);margin-bottom:var(--space-2)">미리보기</div>
+          <div id="import-preview-content"></div>
+        </div>
+        <div id="import-parse-status" style="font-size:var(--text-sm);color:var(--gray-500)"></div>
       </div>`,
     actions: [
       { label: "취소", variant: "secondary", onClick: () => modal.close() },
       {
-        label: "업로드",
+        label: "분석",
+        variant: "secondary",
+        onClick: async () => {
+          const file = document.getElementById("import-excel-file")?.files?.[0];
+          if (!file) { toast.warning("파일을 선택해 주세요."); return; }
+          const statusEl = document.getElementById("import-parse-status");
+          if (statusEl) statusEl.textContent = "파일 분석 중...";
+          try {
+            const parsed = await parseHistoryExcel(file);
+            window._importParsed = parsed;
+            renderImportPreview(parsed);
+            if (statusEl) statusEl.textContent = `분석 완료: ${parsed.rows.length}개 이력 발견`;
+          } catch (err) {
+            if (statusEl) statusEl.textContent = `분석 실패: ${err.message}`;
+            toast.error("파일을 분석하지 못했습니다.");
+          }
+        },
+      },
+      {
+        label: "저장",
         variant: "primary",
         onClick: async () => {
-          const file = document.getElementById("hc-template-file")?.files?.[0];
-          if (!file) { toast.warning("양식 파일을 선택해 주세요."); return; }
-          modal.setLoading("업로드", true);
+          const parsed = window._importParsed;
+          if (!parsed?.rows?.length) { toast.warning("먼저 파일을 분석해 주세요."); return; }
+          const mode = document.querySelector("input[name='import-mode']:checked")?.value ?? "fill";
+
+          modal.setLoading("저장", true);
           try {
-            await uploadHistoryCardTemplate(file);
-            S.templates = await listHistoryCardTemplates();
-            toast.success("교육이력카드 양식이 업로드되었습니다.");
+            const result = await importHistoryExcelData({ rows: parsed.rows, mode });
+            toast.success([
+              `직원 매칭: ${result.matchedEmployees}명`,
+              `기존 이력 보완: ${result.updatedCount}건`,
+              `신규 이력 추가: ${result.createdCount}건`,
+              `중복 건너뜀: ${result.skippedCount}건`,
+            ].join(" · "));
             modal.close();
+            delete window._importParsed;
+            // 현재 선택 직원 이력 재조회
+            if (S.selectedEmployeeId) await loadCard(S.selectedEmployeeId);
           } catch (err) {
-            console.error("[history-cards] upload failed", err);
-            toast.error("양식 업로드 중 오류가 발생했습니다.");
-            modal.setLoading("업로드", false);
+            console.error("[history-cards] importHistoryExcelData failed", err);
+            toast.error(err?.message || "저장에 실패했습니다.");
+            modal.setLoading("저장", false);
           }
         },
       },
@@ -568,22 +614,324 @@ function openUploadModal() {
 }
 
 /* ──────────────────────────────────────────────────────────
-   다운로드
+   Excel 파싱 (법정/직무 시트)
+────────────────────────────────────────────────────────── */
+async function parseHistoryExcel(file) {
+  const XLSX = await loadXlsx();
+  if (!XLSX) throw new Error("SheetJS 라이브러리를 불러올 수 없습니다.");
+
+  const buffer = await file.arrayBuffer();
+  const wb     = XLSX.read(buffer, { type: "array", cellDates: true, dense: false });
+
+  const SHEET_TYPE_MAP = {
+    "법정": "legal",
+    "직무": "job",
+  };
+
+  const allRows = [];
+
+  for (const sheetName of wb.SheetNames) {
+    if (sheetName.startsWith("_")) continue; // _meta 등 무시
+    const trainingType = Object.entries(SHEET_TYPE_MAP).find(([k]) => sheetName.includes(k))?.[1] ?? "other";
+    const ws = wb.Sheets[sheetName];
+    const rows = parseSheet(XLSX, ws, trainingType);
+    allRows.push(...rows);
+  }
+
+  // 직원 기본정보 (첫 번째 유효 시트에서)
+  let empInfo = { empNo: "", employeeName: "" };
+  for (const sheetName of wb.SheetNames) {
+    if (sheetName.startsWith("_")) continue;
+    const ws = wb.Sheets[sheetName];
+    empInfo = detectEmployeeInfo(XLSX, ws);
+    if (empInfo.empNo || empInfo.employeeName) break;
+  }
+
+  return { empInfo, rows: allRows, fileName: file.name };
+}
+
+function parseSheet(XLSX, ws, trainingType) {
+  if (!ws || !ws["!ref"]) return [];
+  const range = XLSX.utils.decode_range(ws["!ref"]);
+
+  // 헤더 행 탐지 (교육과정명 or 교육과목 포함 행)
+  let headerRow = -1;
+  for (let r = 0; r <= Math.min(range.e.r, 20); r++) {
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const v = getCellValue(ws, r, c);
+      if (v && (v.includes("교육과정") || v.includes("교육과목"))) {
+        headerRow = r; break;
+      }
+    }
+    if (headerRow >= 0) break;
+  }
+  if (headerRow < 0) return [];
+
+  // 컬럼 인덱스 탐지
+  const COL_KEYS = {
+    courseName:    ["교육과정명", "교육과정", "과정명"],
+    subjectName:   ["교육과목", "과목"],
+    instructorName:["강사"],
+    trainingHours: ["교육시간", "시간"],
+    period:        ["교육기간", "기간"],
+    completedAt:   ["수료일자", "수료일", "완료일"],
+    result:        ["결과"],
+    subType:       ["초기/보수", "초기", "보수"],
+    note:          ["비고"],
+  };
+  const colMap = {};
+  for (let c = range.s.c; c <= range.e.c; c++) {
+    const v = getCellValue(ws, headerRow, c) ?? "";
+    const clean = v.replace(/\s+/g, "");
+    for (const [key, patterns] of Object.entries(COL_KEYS)) {
+      if (!colMap[key] !== undefined && patterns.some((p) => clean.includes(p.replace(/\s+/g, "")))) {
+        colMap[key] = c; break;
+      }
+    }
+  }
+
+  // 병합 범위 맵 구축 (셀 주소 → 병합 기준 셀 주소)
+  const mergeMap = buildMergeMap(XLSX, ws);
+
+  // 데이터 행 파싱
+  const rows = [];
+  let lastCourseName = "";
+  let lastInstructor = "";
+  let lastHours      = "";
+  let lastPeriod     = "";
+  let lastCompletedAt= "";
+  let lastResult     = "";
+  let lastSubType    = "";
+  let lastNote       = "";
+
+  for (let r = headerRow + 1; r <= range.e.r; r++) {
+    // 병합 고려해서 값 읽기
+    const getVal = (colKey) => {
+      const c = colMap[colKey];
+      if (c === undefined) return "";
+      return getMergedValue(ws, r, c, mergeMap) ?? "";
+    };
+
+    const courseNameRaw = getVal("courseName");
+    const subjectName   = String(getVal("subjectName")).trim();
+
+    // 과정명: 이전 값 상속 (병합셀 처리)
+    const courseName = courseNameRaw ? String(courseNameRaw).trim() : lastCourseName;
+    if (courseNameRaw) lastCourseName = courseName;
+
+    // 과정명도 없고 과목명도 없으면 행 건너뜀
+    if (!courseName && !subjectName) continue;
+
+    const instructor = getVal("instructorName") || lastInstructor;
+    const hours      = getVal("trainingHours")  || lastHours;
+    const period     = getVal("period")          || lastPeriod;
+    const completedRaw = getVal("completedAt")   || lastCompletedAt;
+    const result     = getVal("result")          || lastResult;
+    const subTypeRaw = getVal("subType")         || lastSubType;
+    const note       = getVal("note")            || lastNote;
+
+    // 값 갱신 (병합 고려)
+    if (getVal("instructorName")) lastInstructor  = instructor;
+    if (getVal("trainingHours"))  lastHours       = hours;
+    if (getVal("period"))         lastPeriod      = period;
+    if (getVal("completedAt"))    lastCompletedAt = completedRaw;
+    if (getVal("result"))         lastResult      = result;
+    if (getVal("subType"))        lastSubType     = subTypeRaw;
+    if (getVal("note"))           lastNote        = note;
+
+    // 날짜 파싱
+    const { startDate, endDate } = parsePeriod(period);
+    const completedAt = parseHistDate(completedRaw);
+    if (!completedAt && !courseNameRaw) continue; // 수료일도 과정명도 없으면 실질 빈 행
+
+    rows.push({
+      trainingType,
+      courseName:     courseName || subjectName,
+      subjectName:    subjectName || courseName,
+      instructorName: String(instructor).trim(),
+      trainingHours:  normalizeHours(hours),
+      startDate,
+      endDate,
+      completedAt,
+      result:         normalizeResult(result),
+      educationStage: normalizeStage(subTypeRaw),
+      subType:        normalizeStage(subTypeRaw),
+      note:           String(note).trim(),
+      source:         "history_excel",
+    });
+  }
+
+  return rows;
+}
+
+function detectEmployeeInfo(XLSX, ws) {
+  const range = XLSX.utils.decode_range(ws["!ref"] ?? "A1:Z20");
+  let empNo = "", employeeName = "";
+  for (let r = 0; r <= Math.min(range.e.r, 12); r++) {
+    for (let c = 0; c <= range.e.c; c++) {
+      const v = getCellValue(ws, r, c);
+      if (!v) continue;
+      const clean = String(v).replace(/\s+/g, "");
+      if (clean === "성명" || clean === "이름") {
+        employeeName = String(getCellValue(ws, r, c + 1) ?? getCellValue(ws, r, c + 2) ?? "").trim();
+      }
+      if (clean === "사번" || clean === "직원번호") {
+        empNo = String(getCellValue(ws, r, c + 1) ?? getCellValue(ws, r, c + 2) ?? "").trim();
+      }
+    }
+  }
+  return { empNo, employeeName };
+}
+
+function buildMergeMap(XLSX, ws) {
+  const map = new Map(); // "R,C" → 기준 셀 값
+  const merges = ws["!merges"] ?? [];
+  for (const m of merges) {
+    const anchorAddr = XLSX.utils.encode_cell({ r: m.s.r, c: m.s.c });
+    const anchorCell = ws[anchorAddr];
+    const val = anchorCell?.v ?? anchorCell?.w ?? null;
+    for (let r = m.s.r; r <= m.e.r; r++) {
+      for (let c = m.s.c; c <= m.e.c; c++) {
+        map.set(`${r},${c}`, val);
+      }
+    }
+  }
+  return map;
+}
+
+function getMergedValue(ws, r, c, mergeMap) {
+  const key = `${r},${c}`;
+  if (mergeMap.has(key)) return mergeMap.get(key);
+  const addr = `${colLetter(c)}${r + 1}`;
+  const cell = ws[addr];
+  return cell?.v ?? cell?.w ?? null;
+}
+
+function getCellValue(ws, r, c) {
+  const addr = `${colLetter(c)}${r + 1}`;
+  const cell = ws[addr];
+  if (!cell) return null;
+  if (cell.v instanceof Date) return cell.w ?? cell.v.toISOString();
+  return cell.v != null ? String(cell.v) : null;
+}
+
+function colLetter(colIdx) {
+  let s = "";
+  let n = colIdx + 1;
+  while (n > 0) { s = String.fromCharCode(64 + (n % 26 || 26)) + s; n = Math.floor((n - 1) / 26); }
+  return s;
+}
+
+/* ──────────────────────────────────────────────────────────
+   날짜 / 서브타입 / 결과 정규화
+────────────────────────────────────────────────────────── */
+function parseHistDate(v) {
+  if (!v) return null;
+  if (v instanceof Date) return isNaN(v.getTime()) ? null : v.getTime();
+  const n = Number(v);
+  // Excel serial
+  if (Number.isFinite(n) && n >= 60 && n < 2958466) {
+    return Math.round((n - 25569) * 86400 * 1000);
+  }
+  const s = String(v).trim().replace(/[./]/g, "-");
+  // 날짜 범위면 첫 번째만
+  const first = s.split(/[~\s]/)[0].trim();
+  const d = new Date(first);
+  return isNaN(d.getTime()) ? null : d.getTime();
+}
+
+function parsePeriod(s) {
+  if (!s) return { startDate: null, endDate: null };
+  s = String(s).trim();
+  // 패턴1: YYYY.MM.DD~YYYY.MM.DD (전체 연도 포함)
+  const m1 = s.match(/^(\d{4}[.\-\/]\d{1,2}[.\-\/]\d{1,2})\s*[~\-–]\s*(\d{4}[.\-\/]\d{1,2}[.\-\/]\d{1,2})$/);
+  if (m1) return { startDate: parseHistDate(m1[1]), endDate: parseHistDate(m1[2]) };
+  // 패턴2: YYYY.MM.DD~MM.DD (단축 종료일 - 연도 공유)
+  const m2 = s.match(/^(\d{4})[.\-\/](\d{1,2})[.\-\/](\d{1,2})\s*[~\-–]\s*(\d{1,2})[.\-\/](\d{1,2})$/);
+  if (m2) {
+    const [, y, sm, sd, em, ed] = m2;
+    return {
+      startDate: parseHistDate(`${y}-${sm.padStart(2,"0")}-${sd.padStart(2,"0")}`),
+      endDate:   parseHistDate(`${y}-${em.padStart(2,"0")}-${ed.padStart(2,"0")}`),
+    };
+  }
+  return { startDate: parseHistDate(s), endDate: null };
+}
+
+function normalizeHours(v) {
+  if (!v && v !== 0) return "";
+  const s = String(v).replace(/[Hh][Rr][Ss]?|시간/g, "").trim();
+  const n = parseFloat(s);
+  return isNaN(n) ? String(v) : n;
+}
+
+function normalizeResult(v) {
+  if (!v) return "PASS";
+  const s = String(v).trim().toUpperCase();
+  if (["PASS", "수료", "완료", "합격", "이수"].some((w) => s.includes(w))) return "PASS";
+  if (["FAIL", "미수료", "불합격"].some((w) => s.includes(w))) return "FAIL";
+  return s || "PASS";
+}
+
+function normalizeStage(v) {
+  if (!v) return "";
+  const s = String(v).trim();
+  if (s.includes("초기")) return "initial";
+  if (s.includes("보수") || s.includes("보교")) return "recurrent";
+  return s.toLowerCase();
+}
+
+/* ──────────────────────────────────────────────────────────
+   미리보기 렌더
+────────────────────────────────────────────────────────── */
+function renderImportPreview(parsed) {
+  const el = document.getElementById("import-preview");
+  const contentEl = document.getElementById("import-preview-content");
+  if (!el || !contentEl) return;
+
+  const TYPE_LABEL = { legal: "법정", job: "직무", other: "기타" };
+
+  contentEl.innerHTML = `
+    <div class="table-wrap" style="max-height:280px;overflow-y:auto;border:1px solid var(--gray-200);border-radius:var(--radius-md)">
+      <table class="data-table" style="min-width:600px">
+        <thead>
+          <tr>
+            <th>유형</th><th>교육과정명</th><th>교육과목</th>
+            <th>강사</th><th>수료일</th><th>초기/보수</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${parsed.rows.slice(0, 50).map((r) => `
+            <tr>
+              <td style="font-size:var(--text-xs)">${TYPE_LABEL[r.trainingType] ?? r.trainingType}</td>
+              <td style="font-size:var(--text-xs)">${esc(r.courseName)}</td>
+              <td style="font-size:var(--text-xs)">${esc(r.subjectName)}</td>
+              <td style="font-size:var(--text-xs)">${esc(r.instructorName) || "–"}</td>
+              <td style="font-size:var(--text-xs)">${r.completedAt ? fmtDateMs(r.completedAt) : "–"}</td>
+              <td style="font-size:var(--text-xs)">${r.educationStage === "initial" ? "초기" : r.educationStage === "recurrent" ? "보수" : "–"}</td>
+            </tr>`).join("")}
+          ${parsed.rows.length > 50 ? `<tr><td colspan="6" style="text-align:center;color:var(--gray-400);font-size:var(--text-xs)">… 외 ${parsed.rows.length - 50}건</td></tr>` : ""}
+        </tbody>
+      </table>
+    </div>`;
+
+  el.style.display = "block";
+}
+
+function fmtDateMs(ms) {
+  if (!ms) return "–";
+  const d = new Date(Number(ms));
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+
+/* ──────────────────────────────────────────────────────────
+   다운로드 (단순 Excel 출력)
 ────────────────────────────────────────────────────────── */
 async function handleDownload() {
   if (!S.selectedEmployee) { toast.warning("먼저 직원을 선택해 주세요."); return; }
-
-  const template = await getLatestHistoryCardTemplate().catch(() => null);
-  if (!template) {
-    toast.warning("업로드된 양식이 없습니다. 먼저 교육이력카드 양식을 업로드해 주세요.");
-    return;
-  }
-
   try {
-    const result = await exportEmployeeHistoryCard({ employee: S.selectedEmployee, rows: S.rows, template });
-    toast.success(result.mode === "json-fallback"
-      ? "라이브러리를 불러오지 못해 JSON 형식으로 다운로드했습니다."
-      : `${result.fileName} 다운로드가 시작되었습니다.`);
+    const result = await exportEmployeeHistoryCard({ employee: S.selectedEmployee, rows: S.rows });
+    toast.success(`${result.fileName} 다운로드가 시작되었습니다.`);
   } catch (err) {
     console.error("[history-cards] export failed", err);
     toast.error("이력카드 다운로드 중 오류가 발생했습니다.");
@@ -593,6 +941,17 @@ async function handleDownload() {
 /* ──────────────────────────────────────────────────────────
    헬퍼
 ────────────────────────────────────────────────────────── */
+/* ──────────────────────────────────────────────────────────
+   SheetJS 로더
+────────────────────────────────────────────────────────── */
+let _xlsxPromise = null;
+async function loadXlsx() {
+  if (!_xlsxPromise) {
+    _xlsxPromise = import("https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs").catch(() => null);
+  }
+  return _xlsxPromise;
+}
+
 function esc(v) {
   return String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }

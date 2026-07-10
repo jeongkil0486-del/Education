@@ -1495,3 +1495,186 @@ function simplifyError(err) {
   if (err?.code === "auth/invalid-password") return "비밀번호 정책에 맞지 않습니다.";
   return err?.message || "알 수 없는 오류";
 }
+
+/* ══════════════════════════════════════════════════════════
+   기존 교육이력 Excel 가져오기
+   - 클라이언트에서 Excel 파싱 후 rows를 전달
+   - 기존 이력과 매칭 → 빈 필드 보완 또는 신규 추가
+   - 덮어쓰기 여부: mode = "fill"(기본) | "overwrite"
+══════════════════════════════════════════════════════════ */
+exports.importHistoryExcelData = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await ensureHQAdminProfile(request.auth.uid).catch(async () => {
+    // SUPER_ADMIN도 허용
+    await ensureSuperAdmin(request.auth.uid);
+    const snap = await db.ref(`users/${request.auth.uid}`).get();
+    return snap.val() ?? { uid: request.auth.uid };
+  });
+
+  const rows = Array.isArray(request.data?.rows) ? request.data.rows : [];
+  const mode = normalizeText(request.data?.mode) === "overwrite" ? "overwrite" : "fill";
+
+  if (!rows.length) {
+    return { matchedEmployees: 0, updatedCount: 0, createdCount: 0, skippedCount: 0, errors: [] };
+  }
+
+  // 회사 직원 목록 조회
+  const usersSnap = await db.ref("users").get();
+  const allUsers  = Object.entries(usersSnap.val() ?? {}).map(([uid, u]) => ({ uid, ...u }));
+  const empByNo   = new Map(allUsers.filter((u) => u.empNo).map((u) => [String(u.empNo).trim().toLowerCase(), u]));
+  const empByName = new Map(); // 이름 → [uid, ...] (동명이인 처리)
+  for (const u of allUsers) {
+    if (!u.name) continue;
+    const k = String(u.name).trim();
+    if (!empByName.has(k)) empByName.set(k, []);
+    empByName.get(k).push(u);
+  }
+
+  // 기존 manualTrainingHistories 전체 조회
+  const manualSnap = await db.ref("manualTrainingHistories").get();
+  const manualAll  = Object.entries(manualSnap.val() ?? {}).map(([id, r]) => ({ _id: id, ...r }));
+
+  const updates         = {};
+  const matchedEmpUids  = new Set();
+  let updatedCount  = 0;
+  let createdCount  = 0;
+  let skippedCount  = 0;
+  const errors      = [];
+
+  // dedupeKey 세트 (중복 방지)
+  const processedKeys = new Set(manualAll.map((r) => r.dedupeKey).filter(Boolean));
+
+  for (const row of rows) {
+    const empNoRaw     = normalizeText(row.empNo ?? row.employeeEmpNo ?? "");
+    const empNameRaw   = normalizeText(row.employeeName ?? row.name ?? "");
+    const trainingType = normalizeTrainingTypeValue(row.trainingType ?? "job");
+    const courseName   = normalizeText(row.courseName ?? row.subjectName ?? "");
+    const subjectName  = normalizeText(row.subjectName ?? row.courseName ?? "");
+    const completedAt  = normalizeDateMillis(row.completedAt, "수료일");
+
+    if (!courseName && !subjectName) { errors.push(`교육과정명 없음`); continue; }
+    if (!completedAt)                { errors.push(`수료일 없음 (과정: ${courseName})`); continue; }
+
+    // 직원 탐색
+    let employee = null;
+    if (empNoRaw) {
+      employee = empByNo.get(empNoRaw.toLowerCase()) ?? null;
+    }
+    if (!employee && empNameRaw) {
+      const candidates = empByName.get(empNameRaw) ?? [];
+      if (candidates.length === 1) employee = candidates[0];
+      else if (candidates.length > 1) {
+        errors.push(`동명이인: ${empNameRaw} (${candidates.length}명) — 사번으로 특정 필요`);
+        continue;
+      }
+    }
+    if (!employee) { errors.push(`직원 미매칭: ${empNameRaw || empNoRaw || "?"}`); continue; }
+
+    matchedEmpUids.add(employee.uid);
+
+    // 기존 이력 매칭: trainingType + (courseName|subjectName) + completedAt
+    const normalize = (s) => String(s ?? "").toLowerCase().replace(/[\s\(\)\[\]·]/g, "");
+    const matchKey  = `${normalize(trainingType)}|${normalize(courseName || subjectName)}|${completedAt}`;
+
+    const existingRec = manualAll.find((r) => {
+      if (r.uid !== employee.uid) return false;
+      const rType  = normalize(r.trainingType ?? "");
+      const rCourse = normalize(r.courseName ?? r.title ?? r.subjectName ?? "");
+      const rDate  = Number(r.completedAt ?? 0);
+      return rType === normalize(trainingType) &&
+             (rCourse === normalize(courseName) || rCourse === normalize(subjectName)) &&
+             rDate === completedAt;
+    });
+
+    const detailFields = {
+      instructorName: normalizeText(row.instructorName),
+      hours:          row.trainingHours != null ? Number(row.trainingHours) : undefined,
+      startDate:      row.startDate     ? normalizeDateMillis(row.startDate, "시작일")  : undefined,
+      endDate:        row.endDate       ? normalizeDateMillis(row.endDate,   "종료일")  : undefined,
+      result:         normalizeText(row.result)        || "PASS",
+      subType:        normalizeText(row.educationStage || row.subType),
+      educationStage: normalizeText(row.educationStage || row.subType),
+      note:           normalizeText(row.note),
+      source:         "history_excel",
+    };
+
+    if (existingRec) {
+      // 기존 이력 보완
+      const patch = {};
+      for (const [k, v] of Object.entries(detailFields)) {
+        if (v === undefined || v === "" || v === null) continue;
+        const existing = existingRec[k];
+        // fill 모드: 기존 값이 비어있거나 "-"인 경우만 채움
+        if (mode === "fill" && existing && existing !== "-" && existing !== "") continue;
+        patch[k] = v;
+      }
+      if (Object.keys(patch).length > 0) {
+        patch.updatedAt    = Date.now();
+        patch.updatedBy    = request.auth.uid;
+        updates[`manualTrainingHistories/${existingRec._id}`] = { ...existingRec, ...patch };
+        updates[`userManualTrainingHistories/${employee.uid}/${existingRec._id}`] = { ...existingRec, ...patch };
+        updatedCount++;
+      } else {
+        skippedCount++;
+      }
+    } else {
+      // 신규 이력 생성
+      const historyId = db.ref("manualTrainingHistories").push().key;
+      const record = {
+        historyId,
+        uid:           employee.uid,
+        empNo:         employee.empNo ?? "",
+        employeeName:  employee.name  ?? "",
+        branchId:      employee.branchId   ?? "",
+        branchName:    employee.branchName ?? "",
+        companyId:     employee.companyId  ?? actor.companyId ?? null,
+        companyName:   employee.companyName ?? actor.companyName ?? "",
+        trainingType,
+        subjectCode:   normalizeText(row.subjectCode ?? ""),
+        subjectName:   subjectName || courseName,
+        title:         courseName  || subjectName,
+        courseName:    courseName  || subjectName,
+        completedAt,
+        completionStatus: "completed",
+        status:        "completed",
+        result:        detailFields.result || "PASS",
+        instructorName: detailFields.instructorName || "",
+        hours:         detailFields.hours ?? 0,
+        startDate:     detailFields.startDate ?? null,
+        endDate:       detailFields.endDate   ?? null,
+        subType:       detailFields.subType   || "",
+        educationStage: detailFields.educationStage || "",
+        note:          detailFields.note || "",
+        cycleMonths:   0,
+        source:        "history_excel",
+        createdAt:     Date.now(),
+        createdBy:     request.auth.uid,
+        createdByName: actor.name ?? "",
+        updatedAt:     Date.now(),
+        updatedBy:     request.auth.uid,
+        updatedByName: actor.name ?? "",
+      };
+      record.dedupeKey = buildManualHistoryDedupeKey(record);
+
+      // 중복 체크
+      if (processedKeys.has(record.dedupeKey)) { skippedCount++; continue; }
+      processedKeys.add(record.dedupeKey);
+
+      updates[`manualTrainingHistories/${historyId}`] = record;
+      updates[`userManualTrainingHistories/${employee.uid}/${historyId}`] = record;
+      createdCount++;
+    }
+  }
+
+  if (Object.keys(updates).length) {
+    await db.ref().update(updates);
+  }
+
+  return {
+    matchedEmployees: matchedEmpUids.size,
+    updatedCount,
+    createdCount,
+    skippedCount,
+    errors: errors.slice(0, 20),
+  };
+});
