@@ -1144,7 +1144,9 @@ async function parseHistoryUploadFileInline(event) {
       const parsedCurr    = parseDateCells(getRaw(col.curr),     metaCY,  metaCY,  errors, `${metaCY}년`);
       const parsedLast    = xlDateToYMD(getRaw(col.lastDate));
       const allDates      = [...parsedInitial, ...parsedPrev, ...parsedCurr];
-      const skip          = allDates.length === 0 && errors.length === 0;
+      // 최종교육일만 있어도 이력 1건으로 인정 (건너뜀 아님)
+      const hasAnyDate    = allDates.length > 0 || Boolean(parsedLast);
+      const skip          = !hasAnyDate && errors.length === 0;
 
       return {
         _rowNum: hIdx + 1 + i + 2, _skip: skip, _errors: errors,
@@ -1179,7 +1181,7 @@ async function parseHistoryUploadFileInline(event) {
           </tr></thead>
           <tbody>
             ${pendingHistoryRows.map((r) => {
-              const cnt = r.initialDates.length + r.prevYearDates.length + r.currYearDates.length;
+              const cnt = r.initialDates.length + r.prevYearDates.length + r.currYearDates.length + (r.initialDates.length === 0 && r.prevYearDates.length === 0 && r.currYearDates.length === 0 && r.lastDate ? 1 : 0);
               return `<tr style="background:${r._errors.length ? "#fff7ed" : r._skip ? "#f9fafb" : ""}">
                 <td style="color:var(--gray-400);text-align:center">${r._rowNum}</td>
                 <td>${esc(r.name)}</td>
@@ -1232,6 +1234,10 @@ async function submitHistoryUploadInline() {
       ...row.prevYearDates.map((d) => ({ completedAt: d, educationStage: "previous_year", educationType: "recurrent" })),
       ...row.currYearDates.map((d) => ({ completedAt: d, educationStage: "current_year",  educationType: "recurrent" })),
     ];
+    // 초기/전년도/금년도 날짜가 없고 최종교육일만 있으면 latest_only로 이력 1건 생성
+    if (stages.length === 0 && row.lastDate) {
+      stages.push({ completedAt: row.lastDate, educationStage: "latest_only", educationType: "recurrent" });
+    }
     for (const { completedAt, educationStage, educationType } of stages) {
       historyEntries.push({
         empNo: row.empNo, employeeName: row.name,
@@ -1279,14 +1285,22 @@ function formatDateYMD(ms) {
 
 function _rawToYmd(v) {
   if (v === null || v === undefined || v === "") return "";
+  // JS Date 객체 (cellDates:true)
   if (v instanceof Date) return isNaN(v.getTime()) ? "" : formatDateYMD(v.getTime());
+  // Excel serial number (60 ~ 2958465)
   if (typeof v === "number" && v >= _SN_MIN && v <= _SN_MAX) {
     const d = new Date(Math.round((v - 25569) * 86400 * 1000));
     return isNaN(d.getTime()) ? "" : formatDateYMD(d.getTime());
   }
-  const s = String(v).trim().replace(/[./]/g, "-");
-  const d = new Date(s);
-  return isNaN(d.getTime()) ? "" : formatDateYMD(d.getTime());
+  // 문자열 처리 — 먼저 직접 Date() 시도 (ISO timestamp 등 파손 방지)
+  const s = String(v).trim();
+  if (!s) return "";
+  const dDirect = new Date(s);
+  if (!isNaN(dDirect.getTime())) return formatDateYMD(dDirect.getTime());
+  // 구분자 변환 후 재시도 (YYYY.MM.DD / YYYY/MM/DD)
+  const sNorm = s.replace(/[./]/g, "-");
+  const dNorm = new Date(sNorm);
+  return isNaN(dNorm.getTime()) ? "" : formatDateYMD(dNorm.getTime());
 }
 
 function xlDateToYMD(v) { return _rawToYmd(v); }
