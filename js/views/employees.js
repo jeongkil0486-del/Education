@@ -109,11 +109,8 @@ export async function render(container) {
         <div class="section-subtitle">지점과 교육 항목을 선택하여 직원별 교육 현황을 관리합니다.</div>
       </div>
       <div style="display:flex;gap:var(--space-2);flex-wrap:wrap;align-items:center">
-        <button class="btn btn--ghost btn--sm" id="btn-open-history-cards">이력카드</button>
         ${isHQAdmin ? `
-          <button class="btn btn--ghost btn--sm" id="btn-open-add-manual">개인 이력 추가</button>
           <button class="btn btn--secondary btn--sm" id="btn-history-template">양식 다운로드</button>
-          <button class="btn btn--danger btn--sm" id="btn-reset-history" disabled>선택 이력 초기화</button>
           <button class="btn btn--secondary btn--sm" id="btn-cycle-config" disabled>재교육 주기 설정</button>
         ` : ""}
       </div>
@@ -199,6 +196,7 @@ export async function render(container) {
             <div class="card__subtitle" id="ledger-subtitle"></div>
           </div>
           <div style="display:flex;gap:var(--space-2);flex-wrap:wrap;align-items:center">
+            ${isHQAdmin ? `<button class="btn btn--danger btn--sm" id="btn-reset-history" disabled>초기화</button>` : ""}
             <div class="input-group" style="width:200px">
               <svg class="input-group__icon" width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.25"/><path d="M11 11l3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>
               <input class="form-control" id="ledger-search" type="search" placeholder="이름·사번 검색"/>
@@ -222,8 +220,6 @@ export async function render(container) {
   `;
 
   /* 이벤트 바인딩 */
-  document.getElementById("btn-open-history-cards")?.addEventListener("click", () => router.push("history-cards"));
-
   if (isHQAdmin) {
     document.getElementById("upload-card-toggle")?.addEventListener("click", () => {
       const body    = document.getElementById("upload-card-body");
@@ -231,9 +227,6 @@ export async function render(container) {
       const open    = body.style.display === "none";
       body.style.display      = open ? "block" : "none";
       chevron.style.transform = open ? "rotate(180deg)" : "";
-    });
-    document.getElementById("btn-open-add-manual")?.addEventListener("click", () => {
-      toast.warning("조회 후 직원 행을 선택하면 개인 이력을 추가할 수 있습니다.");
     });
     document.getElementById("btn-history-template")?.addEventListener("click", () => {
       const branchId    = document.getElementById("ledger-branch")?.value ?? "";
@@ -446,9 +439,10 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
       const y = toYmd(r.completedAt); return y?.startsWith(String(CY));
     }).map((r) => toYmd(r.completedAt)).filter(Boolean))].sort();
 
-    // 최종교육일
-    const allDates = recs.map((r) => toYmd(r.completedAt)).filter(Boolean).sort();
-    const lastDate = allDates.length ? allDates[allDates.length - 1] : null;
+    // 최종교육일 = 최신 교육연도 + 초기교육 월/일 (초기교육 없으면 실제 최신일)
+    const allDates    = recs.map((r) => toYmd(r.completedAt)).filter(Boolean).sort();
+    const rawLastDate = allDates.length ? allDates[allDates.length - 1] : null;
+    const lastDate    = calculateAdjustedLastDate(initialDate, allDates);
 
     // 비고 및 cycleMonths
     const lastRec = [...recs].sort((a, b) => Number(b.completedAt ?? 0) - Number(a.completedAt ?? 0))[0];
@@ -753,7 +747,7 @@ function updateResetBtn() {
   if (!btn) return;
   const cnt = selectedUids.size;
   btn.disabled = cnt === 0;
-  btn.textContent = cnt > 0 ? `선택 이력 초기화 (${cnt}명)` : "선택 이력 초기화";
+  btn.textContent = cnt > 0 ? `초기화 (${cnt}명)` : "초기화";
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -1432,6 +1426,47 @@ async function submitHistoryUploadInline() {
   } finally {
     if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="margin-right:4px"><path d="M8 10V2m0 0L5 5m3-3l3 3M3 13h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>이력 업로드`; }
   }
+}
+
+/* ──────────────────────────────────────────────────────
+   최종교육일 계산 헬퍼
+   규칙: 최신 교육연도 + 초기교육 월/일
+   초기교육이 없으면 실제 최신 교육일 반환
+   윤년 2월 29일 → 비윤년이면 2월 28일로 보정
+────────────────────────────────────────────────────── */
+function calculateAdjustedLastDate(initialDate, allDates) {
+  // 날짜가 아예 없으면 null
+  if (!allDates || allDates.length === 0) return null;
+
+  // 실제 최신 날짜 (rawLastDate)
+  const rawLast = allDates[allDates.length - 1];
+
+  // 초기교육 날짜가 없으면 실제 최신 날짜 그대로 반환
+  if (!initialDate) return rawLast;
+
+  // 초기교육의 월/일 추출 (UTC 기준, 하루 밀림 방지)
+  const initParts = initialDate.split("-").map(Number);
+  if (initParts.length < 3 || initParts.some(isNaN)) return rawLast;
+  const initMonth = initParts[1]; // 1~12
+  const initDay   = initParts[2]; // 1~31
+
+  // 모든 이력 중 가장 최신 연도 추출
+  const years = allDates.map((d) => Number(d.slice(0, 4))).filter((y) => y > 0);
+  if (!years.length) return rawLast;
+  const latestYear = Math.max(...years);
+
+  // 해당 연도에서 초기교육 월/일이 유효한지 확인 (윤년 보정)
+  const day = clampDayInMonth(latestYear, initMonth, initDay);
+  const mm  = String(initMonth).padStart(2, "0");
+  const dd  = String(day).padStart(2, "0");
+  return `${latestYear}-${mm}-${dd}`;
+}
+
+/** 해당 연도·월에서 day가 초과하면 그 달의 마지막 날로 보정 */
+function clampDayInMonth(year, month, day) {
+  // month: 1~12, Date(year, month, 0) = 해당 월의 마지막 날 (JS: 0-indexed month)
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return Math.min(day, lastDay);
 }
 
 /* ═══════════════════════════════════════════════════════
