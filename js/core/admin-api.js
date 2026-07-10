@@ -14,6 +14,7 @@ const bulkImportManualTrainingHistoriesCallable = httpsCallable(functions, "bulk
 const updateEmployeeManagementProfileCallable  = httpsCallable(functions, "updateEmployeeManagementProfile");
 const resetSelectedManualTrainingHistoriesCallable = httpsCallable(functions, "resetSelectedManualTrainingHistories");
 const saveEducationCycleConfigCallable         = httpsCallable(functions, "saveEducationCycleConfig");
+const replaceEmployeeManualTrainingHistoriesCallable = httpsCallable(functions, "replaceEmployeeManualTrainingHistories");
 
 export async function createEmployeeAccounts(payload) {
   const result = await createEmployeesCallable(payload);
@@ -141,6 +142,14 @@ export async function resetSelectedManualTrainingHistories(payload) {
  */
 export async function saveEducationCycleConfig(payload) {
   const result = await saveEducationCycleConfigCallable(payload);
+  return result.data;
+}
+
+/**
+ * 선택 직원 + 교육 항목의 수동/Excel 이력을 원자적으로 교체 (HQ_ADMIN 전용)
+ */
+export async function replaceEmployeeManualTrainingHistories(payload) {
+  const result = await replaceEmployeeManualTrainingHistoriesCallable(payload);
   return result.data;
 }
 

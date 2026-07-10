@@ -23,6 +23,7 @@ import {
   updateEmployeeManagementProfile,
   resetSelectedManualTrainingHistories,
   saveEducationCycleConfig,
+  replaceEmployeeManualTrainingHistories,
   getEducationCycleConfig,
 } from "../core/admin-api.js";
 import { manualTrainingHistoriesDB, sessionCompletionsDB, educationCycleConfigsDB } from "../core/db.js";
@@ -380,7 +381,7 @@ function filterByTraining(histories, meta) {
     if (!h) return false;
     const ht = normalizeTrainingType(h.trainingType);
     if (ht !== meta.trainingType) return false;
-    if (meta.itemId && h.itemId === meta.itemId) return true;
+    if (meta.itemId && h.itemId) return h.itemId === meta.itemId;
     if (meta.subjectCode && h.subjectCode === meta.subjectCode) return true;
     if (meta.subjectName && (h.subjectName === meta.subjectName || h.title === meta.subjectName || h.courseName === meta.subjectName)) return true;
     return false;
@@ -433,13 +434,13 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
 
     // 전년도
     const prevDates = [...new Set(recs.filter((r) => {
-      if (r.educationStage === "previous_year") return true;
+      if (r.educationStage) return r.educationStage === "previous_year";
       const y = toYmd(r.completedAt); return y?.startsWith(String(PY));
     }).map((r) => toYmd(r.completedAt)).filter(Boolean))].sort();
 
     // 금년도
     const currDates = [...new Set(recs.filter((r) => {
-      if (r.educationStage === "current_year") return true;
+      if (r.educationStage) return r.educationStage === "current_year";
       const y = toYmd(r.completedAt); return y?.startsWith(String(CY));
     }).map((r) => toYmd(r.completedAt)).filter(Boolean))].sort();
 
@@ -737,58 +738,74 @@ async function openResetConfirmModal() {
 }
 
 /* ═══════════════════════════════════════════════════════
-   직원 정보 수정 모달
+   교육이력 수정 모달 (수동/Excel 이력만 편집)
 ═══════════════════════════════════════════════════════ */
-function openEditEmployeeModal(row) {
-  const emp = row._emp ?? {};
-  const toDateInput = (v) => {
-    if (!v) return "";
-    const d = new Date(typeof v === "number" && v > 1e11 ? v : String(v));
-    if (isNaN(d.getTime())) return "";
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-  };
+async function openEditEmployeeModal(row) {
+  if (authStore.role !== ROLES.HQ_ADMIN || !currentLedgerMeta?.trainingMeta) {
+    toast.error("현재 교육 항목의 이력을 수정할 수 없습니다.");
+    return;
+  }
 
-  const rawHire = emp.hireDate ?? emp.joinDate ?? emp.joinedAt ?? emp.employmentDate ?? emp.enteredAt ?? null;
-  const hireDateVal = toDateInput(rawHire);
+  const trainingMeta = currentLedgerMeta.trainingMeta;
+  const trainingLabel = trainingMeta.label ?? trainingMeta.subjectName ?? currentLedgerMeta.trainingVal;
+  let manualRecords = [];
+  try {
+    const all = await manualTrainingHistoriesDB.listAll();
+    manualRecords = all.filter((record) =>
+      record?.uid === row.uid &&
+      ["manual", "manual_excel"].includes(String(record.source ?? "").toLowerCase()) &&
+      filterByTraining([record], trainingMeta).length > 0
+    );
+  } catch (err) {
+    console.error("[employees] load editable histories failed", err);
+    toast.error("수정할 교육이력을 불러오지 못했습니다.");
+    return;
+  }
+
+  const datesFor = (predicate) => [...new Set(manualRecords
+    .filter(predicate)
+    .map((record) => formatDateYMD(record.completedAt))
+    .filter(Boolean))].sort();
+  const initialDates = datesFor((record) => isInitialRec(record));
+  const previousDates = datesFor((record) => record.educationStage
+    ? record.educationStage === "previous_year"
+    : new Date(Number(record.completedAt)).getUTCFullYear() === PY);
+  const currentDates = datesFor((record) => record.educationStage
+    ? record.educationStage === "current_year"
+    : new Date(Number(record.completedAt)).getUTCFullYear() === CY);
 
   modal.open({
-    title: `직원 정보 수정 — ${esc(row.name)}`,
+    title: `교육이력 수정 — ${esc(row.name)}`,
     size: "md",
     body: `
       <div style="display:flex;flex-direction:column;gap:var(--space-4)">
         <div style="background:var(--gray-50);border-radius:var(--radius-md);padding:var(--space-3);font-size:var(--text-sm);color:var(--gray-500)">
-          사번 · 권한 · 비밀번호는 이 화면에서 변경할 수 없습니다.
+          <strong style="color:var(--gray-700)">${esc(trainingLabel)}</strong><br>
+          ${esc(row.name)} · 사번 ${esc(row.empNo)}<br>
+          수동 입력 및 Excel 업로드 이력만 변경되며 회차 완료 이력은 유지됩니다.
         </div>
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label form-label--required">성명</label>
-            <input class="form-control" id="edit-emp-name" value="${esc(emp.name ?? "")}"/>
+            <label class="form-label">초기교육</label>
+            <textarea class="form-control" id="edit-history-initial" rows="2" placeholder="YYYY-MM-DD, YYYY-MM-DD">${esc(initialDates.join(", "))}</textarea>
           </div>
           <div class="form-group">
-            <label class="form-label">입사일</label>
-            <input class="form-control" id="edit-emp-hire" type="date" value="${hireDateVal}"/>
+            <label class="form-label">최종교육일 (자동 계산)</label>
+            <input class="form-control" value="${esc(row.lastDate ?? "–")}" readonly/>
           </div>
         </div>
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label">직급/직책</label>
-            <input class="form-control" id="edit-emp-position" value="${esc(emp.position ?? "")}"/>
+            <label class="form-label">${PY}년</label>
+            <textarea class="form-control" id="edit-history-previous" rows="2" placeholder="YYYY-MM-DD, YYYY-MM-DD">${esc(previousDates.join(", "))}</textarea>
           </div>
           <div class="form-group">
-            <label class="form-label">소속 지점</label>
-            <select class="form-control" id="edit-emp-branch">
-              ${viewState.branches.map((b) =>
-                `<option value="${b.id}" ${b.id === (emp.branchId ?? "") ? "selected" : ""}>${esc(b.name ?? b.code ?? b.id)}</option>`
-              ).join("")}
-            </select>
+            <label class="form-label">${CY}년</label>
+            <textarea class="form-control" id="edit-history-current" rows="2" placeholder="YYYY-MM-DD, YYYY-MM-DD">${esc(currentDates.join(", "))}</textarea>
           </div>
-        </div>
-        <div class="form-group">
-          <label class="form-label">직원 관리 비고</label>
-          <textarea class="form-control" id="edit-emp-note" rows="2">${esc(emp.managementNote ?? "")}</textarea>
         </div>
         <div style="font-size:var(--text-xs);color:var(--gray-400)">
-          수정 불가: 사번(${esc(row.empNo)}), 권한, 비밀번호
+          날짜는 YYYY-MM-DD 형식으로 입력하고 여러 날짜는 쉼표로 구분하세요.
         </div>
       </div>`,
     actions: [
@@ -797,32 +814,50 @@ function openEditEmployeeModal(row) {
         label: "저장",
         variant: "primary",
         onClick: async () => {
-          const name     = document.getElementById("edit-emp-name")?.value?.trim();
-          const hireRaw  = document.getElementById("edit-emp-hire")?.value;
-          const position = document.getElementById("edit-emp-position")?.value?.trim();
-          const branchId = document.getElementById("edit-emp-branch")?.value;
-          const mgNote   = document.getElementById("edit-emp-note")?.value?.trim();
+          const parseDates = (id, expectedYear, label) => {
+            const raw = document.getElementById(id)?.value ?? "";
+            const values = raw.split(",").map((value) => value.trim()).filter(Boolean);
+            const unique = [];
+            for (const value of values) {
+              if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || xlDateToYMD(value) !== value) {
+                throw new Error(`${label} 날짜 형식이 올바르지 않습니다: ${value}`);
+              }
+              if (expectedYear && Number(value.slice(0, 4)) !== expectedYear) {
+                throw new Error(`${label}에는 ${expectedYear}년 날짜만 입력할 수 있습니다.`);
+              }
+              if (!unique.includes(value)) unique.push(value);
+            }
+            return unique.sort();
+          };
 
-          if (!name) { toast.error("성명을 입력해 주세요."); return; }
-
-          const hireDateMs = hireRaw ? new Date(`${hireRaw}T00:00:00`).getTime() : null;
+          let initialDatesInput, previousYearDates, currentYearDates;
+          try {
+            initialDatesInput = parseDates("edit-history-initial", null, "초기교육");
+            previousYearDates = parseDates("edit-history-previous", PY, `${PY}년`);
+            currentYearDates = parseDates("edit-history-current", CY, `${CY}년`);
+          } catch (err) {
+            toast.error(err.message);
+            return;
+          }
 
           modal.setLoading("저장", true);
           try {
-            await updateEmployeeManagementProfile({
-              uid:            row.uid,
-              name,
-              hireDate:       hireDateMs,
-              position,
-              branchId,
-              managementNote: mgNote,
+            await replaceEmployeeManualTrainingHistories({
+              uid: row.uid,
+              trainingType: trainingMeta.trainingType,
+              subjectCode: trainingMeta.subjectCode ?? "",
+              subjectName: trainingMeta.subjectName ?? trainingLabel,
+              itemId: trainingMeta.itemId ?? "",
+              initialDates: initialDatesInput,
+              previousYearDates,
+              currentYearDates,
+              cycleMonths: currentLedgerMeta.cycleMonths ?? 0,
             });
-            toast.success("직원 정보가 수정되었습니다.");
+            toast.success("교육이력이 수정되었습니다.");
             modal.close();
-            await refreshViewState();
             await runLedgerQuery();
           } catch (err) {
-            console.error("[employees] updateEmployee failed", err);
+            console.error("[employees] replace histories failed", err);
             toast.error(err?.message || "수정에 실패했습니다.");
             modal.setLoading("저장", false);
           }
@@ -1128,7 +1163,7 @@ async function parseHistoryUploadFileInline(event) {
     const dataSheet = wb.Sheets[wb.SheetNames.find((n) => n !== "_meta") ?? wb.SheetNames[0]];
     const allRows   = XLSX.utils.sheet_to_json(dataSheet, { header: 1, defval: "" });
 
-    const normCell = (v) => String(v ?? "").trim();
+    const normCell = (v) => String(v ?? "").replace(/\s+/g, "").trim();
     let hIdx = allRows.findIndex((r) => { const c = r.map(normCell); return c.includes("성명") && c.includes("사번"); });
     if (hIdx < 0) hIdx = 4;
     const headers = allRows[hIdx].map(normCell);
@@ -1140,8 +1175,8 @@ async function parseHistoryUploadFileInline(event) {
       position: headers.findIndex((h) => h.includes("직급") || h.includes("직책")),
       initial:  headers.findIndex((h) => h.includes("초기")),
       lastDate: headers.findIndex((h) => h.includes("최종")),
-      prev:     headers.findIndex((h) => h.includes(String(metaPY))),
-      curr:     headers.findIndex((h) => h.includes(String(metaCY))),
+      prev:     headers.findIndex((h) => h === String(metaPY) || h === `${metaPY}년`),
+      curr:     headers.findIndex((h) => h === String(metaCY) || h === `${metaCY}년`),
       note:     headers.indexOf("비고"),
     };
 
