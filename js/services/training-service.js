@@ -950,6 +950,73 @@ export async function getItemDetail(itemId) {
 }
 
 /* ──────────────────────────────────────────────────────────
+   재교육 예정일 / 잔여일 / 상태 계산
+   rows 배열을 받아 각 row에 dueStatus, nextDueDate, daysRemaining,
+   dueStatusLabel 필드를 추가한 새 배열을 반환합니다.
+
+   상태 값:
+     overdue      — 기한 초과
+     soon         — 30일 이내 재교육 필요
+     normal       — 31일 이상 여유
+     unconfigured — 재교육 주기 미설정
+     history      — 수료일 없음 (과거 이력 불완전)
+────────────────────────────────────────────────────────── */
+export function applyDueMetadata(rows, now = Date.now()) {
+  return rows.map((row) => {
+    // 수료일이 없으면 상태 계산 불가
+    if (!row.completedAt) {
+      return {
+        ...row,
+        dueStatus:     "history",
+        dueStatusLabel: DUE_STATUS_LABELS.history ?? "과거 이력",
+        nextDueDate:   null,
+        daysRemaining: null,
+      };
+    }
+
+    const cycleMonths = Math.max(0, Number(row.cycleMonths ?? 0) || 0);
+
+    // 재교육 주기 미설정
+    if (!cycleMonths) {
+      return {
+        ...row,
+        dueStatus:      "unconfigured",
+        dueStatusLabel: DUE_STATUS_LABELS.unconfigured ?? "주기 미설정",
+        nextDueDate:    null,
+        daysRemaining:  null,
+      };
+    }
+
+    // 다음 교육 예정일 = 수료일 + cycleMonths 개월
+    const completedDate = new Date(Number(row.completedAt));
+    const nextDue = new Date(completedDate);
+    nextDue.setMonth(nextDue.getMonth() + cycleMonths);
+    const nextDueDate = nextDue.getTime();
+
+    // 남은 일수 (음수 = 초과)
+    const diffMs = nextDueDate - now;
+    const daysRemaining = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+
+    let dueStatus;
+    if (daysRemaining < 0) {
+      dueStatus = "overdue";
+    } else if (daysRemaining <= 30) {
+      dueStatus = "soon";
+    } else {
+      dueStatus = "normal";
+    }
+
+    return {
+      ...row,
+      dueStatus,
+      dueStatusLabel: DUE_STATUS_LABELS[dueStatus] ?? dueStatus,
+      nextDueDate,
+      daysRemaining,
+    };
+  });
+}
+
+/* ──────────────────────────────────────────────────────────
    직원 교육이력카드 — 회차 수료 기록 포함
    기존 buildEmployeeHistoryRows 는 위에 그대로 유지
    신규: buildEmployeeHistoryRowsV2 — 회차 기반 이력 포함
