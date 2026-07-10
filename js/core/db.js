@@ -525,6 +525,20 @@ export const batchDB = {
 };
 
 /* ══════════════════════════════════════════════════════════
+   Education Cycle Configs
+   /educationCycleConfigs/{companyId}/{educationKey}
+   교육 항목별 재교육 주기 기본 설정 (HQ_ADMIN이 관리대장에서 설정)
+══════════════════════════════════════════════════════════ */
+export const educationCycleConfigsDB = {
+  get:    (companyId, educationKey) => getVal(`educationCycleConfigs/${companyId}/${educationKey}`),
+  set:    (companyId, educationKey, data) =>
+    set(r(`educationCycleConfigs/${companyId}`, educationKey), { ...data, updatedAt: Date.now() }),
+  update: (companyId, educationKey, data) =>
+    update(r(`educationCycleConfigs/${companyId}`, educationKey), { ...data, updatedAt: Date.now() }),
+  listAll: (companyId) => getList(`educationCycleConfigs/${companyId}`),
+};
+
+/* ══════════════════════════════════════════════════════════
    Real-time subscriptions (onValue)
 ══════════════════════════════════════════════════════════ */
 export const realtimeDB = {

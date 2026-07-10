@@ -1,8 +1,11 @@
 /**
  * 직원관리대장 (employees.js)
- *
- * - 지점 + 교육 항목 선택 후 '조회' 버튼으로 직원별 교육현황 집계 표시
- * - Excel 양식 다운로드 / 업로드 기능 유지 (기존 로직 그대로)
+ * - 지점 + 교육 항목 선택 후 조회
+ * - 4개 요약 카드 (전체/30일이내/7일이내/기한초과) + 클릭 필터
+ * - 체크박스 선택 + Excel 이력 초기화
+ * - 직원 정보 수정 (HQ_ADMIN)
+ * - 재교육 주기 설정 (HQ_ADMIN)
+ * - Excel 양식 다운로드 / 업로드
  * - HQ_ADMIN: 전체 기능, SUPER_ADMIN: 조회만
  */
 
@@ -13,28 +16,33 @@ import {
   applyDueMetadata,
   TRAINING_SUBJECT_OPTIONS,
   TRAINING_TYPE_LABELS,
-  getTrainingTypeLabel,
   normalizeTrainingType,
 } from "../services/training-service.js";
-import { bulkImportManualTrainingHistories } from "../core/admin-api.js";
-import { manualTrainingHistoriesDB, sessionCompletionsDB } from "../core/db.js";
+import {
+  bulkImportManualTrainingHistories,
+  updateEmployeeManagementProfile,
+  resetSelectedManualTrainingHistories,
+  saveEducationCycleConfig,
+  getEducationCycleConfig,
+} from "../core/admin-api.js";
+import { manualTrainingHistoriesDB, sessionCompletionsDB, educationCycleConfigsDB } from "../core/db.js";
 import { modal } from "../utils/modal.js";
 import { toast } from "../utils/toast.js";
 import { authStore, ROLES } from "../core/auth.js";
-import { formatDate } from "../utils/date.js";
 
 /* ─── 상수 ─────────────────────────────────────────────── */
-const CY = new Date().getFullYear();   // currentYear
-const PY = CY - 1;                     // previousYear
+const CY = new Date().getFullYear();
+const PY = CY - 1;
 
 /* ─── 모듈 상태 ─────────────────────────────────────────── */
 let viewState = { company: null, branches: [], employees: [], items: [] };
 let pendingHistoryRows   = [];
 let selectedTemplateMeta = null;
-// 조회 결과
-let ledgerRows = [];        // 집계된 관리대장 행
-let ledgerFilter = "all";   // all | has | none
-let ledgerSearch = "";
+let ledgerRows    = [];
+let ledgerFilter  = "all";   // all | soon30 | soon7 | overdue
+let ledgerSearch  = "";
+let selectedUids  = new Set();
+let currentLedgerMeta = null;   // { branchId, branchLabel, trainingVal, trainingMeta, cycleMonths }
 
 /* ═══════════════════════════════════════════════════════
    render
@@ -49,7 +57,6 @@ export async function render(container) {
       loadTrainingReferences(),
       listManagedItems().catch(() => []),
     ]);
-
     viewState = {
       company:   references.company ?? null,
       branches:  [...(references.branches ?? [])].sort((a, b) =>
@@ -64,7 +71,6 @@ export async function render(container) {
     return;
   }
 
-  // 교육 옵션 목록 빌드
   const trainingOptions = buildTrainingOptions(viewState.items);
 
   container.innerHTML = `
@@ -74,12 +80,14 @@ export async function render(container) {
         <div class="section-title">직원관리대장</div>
         <div class="section-subtitle">지점과 교육 항목을 선택하여 직원별 교육 현황을 관리합니다.</div>
       </div>
-      <div style="display:flex;gap:var(--space-2);flex-wrap:wrap">
+      <div style="display:flex;gap:var(--space-2);flex-wrap:wrap;align-items:center">
+        <button class="btn btn--ghost btn--sm" id="btn-open-history-cards">이력카드</button>
         ${isHQAdmin ? `
-          <button class="btn btn--ghost btn--sm" id="btn-open-history-cards">이력카드</button>
           <button class="btn btn--ghost btn--sm" id="btn-open-add-manual">개인 이력 추가</button>
           <button class="btn btn--secondary btn--sm" id="btn-history-template">양식 다운로드</button>
-        ` : `<button class="btn btn--ghost btn--sm" id="btn-open-history-cards">이력카드</button>`}
+          <button class="btn btn--danger btn--sm" id="btn-reset-history" disabled>선택 이력 초기화</button>
+          <button class="btn btn--secondary btn--sm" id="btn-cycle-config" disabled>재교육 주기 설정</button>
+        ` : ""}
       </div>
     </div>
 
@@ -123,7 +131,7 @@ export async function render(container) {
     <!-- 필터 카드 -->
     <div class="card" style="margin-bottom:var(--space-4)">
       <div class="card__body card__body--compact">
-        <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:var(--space-3);align-items:end;flex-wrap:wrap">
+        <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:var(--space-3);align-items:end">
           <div class="form-group" style="margin:0">
             <label class="form-label form-label--required">지점 선택</label>
             <select class="form-control" id="ledger-branch">
@@ -152,10 +160,10 @@ export async function render(container) {
 
     <!-- 조회 결과 -->
     <div id="ledger-result" style="display:none">
-      <!-- 요약 카드 -->
-      <div id="ledger-summary" class="dashboard-grid dashboard-grid--compact" style="margin-bottom:var(--space-4)"></div>
+      <!-- 요약 카드 4개 (클릭 필터) -->
+      <div id="ledger-summary" style="display:grid;grid-template-columns:repeat(4,1fr);gap:var(--space-3);margin-bottom:var(--space-4)"></div>
 
-      <!-- 결과 테이블 필터 -->
+      <!-- 결과 테이블 -->
       <div class="card">
         <div class="card__header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:var(--space-2)">
           <div>
@@ -167,14 +175,6 @@ export async function render(container) {
               <svg class="input-group__icon" width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.25"/><path d="M11 11l3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>
               <input class="form-control" id="ledger-search" type="search" placeholder="이름·사번 검색"/>
             </div>
-            <select class="form-control" id="ledger-status-filter" style="width:140px">
-              <option value="all">전체</option>
-              <option value="none">미이수</option>
-              <option value="overdue">기한 초과</option>
-              <option value="soon">30일 이내</option>
-              <option value="normal">정상</option>
-              <option value="unconfigured">주기 미설정</option>
-            </select>
           </div>
         </div>
         <div class="card__body" style="padding:0;overflow-x:auto">
@@ -197,48 +197,46 @@ export async function render(container) {
   document.getElementById("btn-open-history-cards")?.addEventListener("click", () => router.push("history-cards"));
 
   if (isHQAdmin) {
-    // 업로드 카드 토글
     document.getElementById("upload-card-toggle")?.addEventListener("click", () => {
       const body    = document.getElementById("upload-card-body");
       const chevron = document.getElementById("upload-chevron");
       const open    = body.style.display === "none";
-      body.style.display    = open ? "block" : "none";
+      body.style.display      = open ? "block" : "none";
       chevron.style.transform = open ? "rotate(180deg)" : "";
     });
-
     document.getElementById("btn-open-add-manual")?.addEventListener("click", () => {
       toast.warning("조회 후 직원 행을 선택하면 개인 이력을 추가할 수 있습니다.");
     });
-
     document.getElementById("btn-history-template")?.addEventListener("click", () => {
-      const branchId   = document.getElementById("ledger-branch")?.value ?? "";
+      const branchId    = document.getElementById("ledger-branch")?.value ?? "";
       const trainingVal = document.getElementById("ledger-training")?.value ?? "";
       openTemplateSelectModal(branchId, trainingVal);
     });
-
     document.getElementById("history-upload-file-inline")?.addEventListener("change", parseHistoryUploadFileInline);
     document.getElementById("btn-history-upload-submit")?.addEventListener("click", submitHistoryUploadInline);
+    document.getElementById("btn-reset-history")?.addEventListener("click", openResetConfirmModal);
+    document.getElementById("btn-cycle-config")?.addEventListener("click", openCycleConfigModal);
   }
 
-  // 필터 조회 활성화
   const branchSel   = document.getElementById("ledger-branch");
   const trainingSel = document.getElementById("ledger-training");
   const searchBtn   = document.getElementById("btn-ledger-search");
 
   const checkBtnState = () => {
-    if (searchBtn) searchBtn.disabled = !(branchSel?.value && trainingSel?.value);
+    const ok = !!(branchSel?.value && trainingSel?.value);
+    if (searchBtn) searchBtn.disabled = !ok;
+    if (isHQAdmin) {
+      const cycleBtn = document.getElementById("btn-cycle-config");
+      if (cycleBtn) cycleBtn.disabled = !trainingSel?.value;
+    }
   };
-  branchSel?.addEventListener("change", checkBtnState);
-  trainingSel?.addEventListener("change", checkBtnState);
+  branchSel?.addEventListener("change", () => { selectedUids.clear(); checkBtnState(); });
+  trainingSel?.addEventListener("change", () => { selectedUids.clear(); checkBtnState(); });
 
   searchBtn?.addEventListener("click", runLedgerQuery);
 
   document.getElementById("ledger-search")?.addEventListener("input", (e) => {
     ledgerSearch = e.target.value.trim().toLowerCase();
-    renderLedgerTable();
-  });
-  document.getElementById("ledger-status-filter")?.addEventListener("change", (e) => {
-    ledgerFilter = e.target.value;
     renderLedgerTable();
   });
 }
@@ -248,20 +246,16 @@ export async function render(container) {
 ═══════════════════════════════════════════════════════ */
 function buildTrainingOptions(items) {
   const opts = [];
-  // 고정: 직무교육
   for (const s of TRAINING_SUBJECT_OPTIONS.job ?? []) {
     opts.push({ value: `job|${s.code}`, label: `직무교육 - ${s.name}`, trainingType: "job", subjectCode: s.code, subjectName: s.name });
   }
-  // 고정: 법정교육
   for (const s of TRAINING_SUBJECT_OPTIONS.legal ?? []) {
     opts.push({ value: `legal|${s.code}`, label: `법정교육 - ${s.name}`, trainingType: "legal", subjectCode: s.code, subjectName: s.name });
   }
-  // 동적: 온라인
   for (const item of items.filter((i) => i.trainingType === "online")) {
     const sn = item.subjectName ?? item.title ?? "";
     opts.push({ value: `online|${item.subjectCode || item.id}`, label: `온라인교육 - ${sn}`, trainingType: "online", subjectCode: item.subjectCode || item.id, subjectName: sn, itemId: item.id });
   }
-  // 동적: 기타
   for (const item of items.filter((i) => i.trainingType === "other")) {
     const sn = item.subjectName ?? item.title ?? "";
     opts.push({ value: `other|${item.subjectCode || item.id}`, label: `기타 - ${sn}`, trainingType: "other", subjectCode: item.subjectCode || item.id, subjectName: sn, itemId: item.id });
@@ -271,9 +265,8 @@ function buildTrainingOptions(items) {
 
 function parseTrainingValue(val) {
   if (!val) return null;
-  const [trainingType, subjectCode] = val.split("|");
   const allOpts = buildTrainingOptions(viewState.items);
-  return allOpts.find((o) => o.value === val) ?? { trainingType, subjectCode, subjectName: subjectCode, label: val };
+  return allOpts.find((o) => o.value === val) ?? null;
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -289,40 +282,49 @@ async function runLedgerQuery() {
 
   try {
     const trainingMeta = parseTrainingValue(trainingVal);
-    const branch = viewState.branches.find((b) => b.id === branchId);
+    const branch       = viewState.branches.find((b) => b.id === branchId);
+    const branchLabel  = branch?.name ?? branch?.code ?? branchId;
+    const trainingLabel = trainingMeta?.label ?? trainingVal;
 
-    // 해당 지점 직원만
+    // 재교육 주기 설정 조회
+    let cycleMonths = 0;
+    try {
+      const educationKey = buildEducationKey(trainingMeta);
+      const companyId    = authStore.companyId;
+      const config       = companyId ? await educationCycleConfigsDB.get(companyId, educationKey) : null;
+      cycleMonths = Number(config?.cycleMonths ?? 0) || 0;
+      // trainingItem 자체 cycleMonths도 폴백
+      if (!cycleMonths && trainingMeta?.itemId) {
+        const item = viewState.items.find((i) => i.id === trainingMeta.itemId);
+        cycleMonths = Number(item?.cycleMonths ?? 0) || 0;
+      }
+    } catch (e) { /* cycleMonths 조회 실패 무시 */ }
+
+    currentLedgerMeta = { branchId, branchLabel, trainingVal, trainingMeta, cycleMonths };
+
     const branchEmployees = viewState.employees.filter((e) => matchesBranch(e, branchId));
-
-    // manualTrainingHistories 전체 조회 후 클라이언트 필터
     const [manualAll, sessionAll] = await Promise.all([
       manualTrainingHistoriesDB.listAll().catch(() => []),
       fetchAllSessionCompletions(),
     ]);
 
-    // 해당 교육 항목에 해당하는 이력 필터
     const relevant = filterByTraining([...manualAll, ...sessionAll], trainingMeta);
+    ledgerRows = aggregateLedger(branchEmployees, relevant, trainingMeta, cycleMonths);
 
-    // 직원별 집계
-    ledgerRows = aggregateLedger(branchEmployees, relevant, trainingMeta);
-
-    // 제목 업데이트
-    const branchLabel = branch?.name ?? branch?.code ?? branchId;
-    const trainingLabel = trainingMeta?.label ?? trainingVal;
     document.getElementById("ledger-title").textContent = `${branchLabel} · ${trainingLabel}`;
-    document.getElementById("ledger-subtitle").textContent = `기준연도: ${CY}년`;
+    document.getElementById("ledger-subtitle").textContent = `기준연도: ${CY}년${cycleMonths ? ` · 재교육 주기: ${cycleMonths}개월` : " · 재교육 주기: 미설정"}`;
 
-    // 요약
-    renderLedgerSummary();
-
-    // 결과 표시
+    selectedUids.clear();
     document.getElementById("ledger-empty-guide").style.display = "none";
     document.getElementById("ledger-result").style.display = "block";
     ledgerFilter = "all";
     ledgerSearch = "";
-    document.getElementById("ledger-status-filter").value = "all";
-    document.getElementById("ledger-search").value = "";
+    const srch = document.getElementById("ledger-search");
+    if (srch) srch.value = "";
+
+    renderLedgerSummary();
     renderLedgerTable();
+    updateResetBtn();
   } catch (err) {
     console.error("[employees] ledger query failed", err);
     toast.error("조회 중 오류가 발생했습니다.");
@@ -352,21 +354,27 @@ function filterByTraining(histories, meta) {
     if (!h) return false;
     const ht = normalizeTrainingType(h.trainingType);
     if (ht !== meta.trainingType) return false;
-    // itemId 일치 우선
     if (meta.itemId && h.itemId === meta.itemId) return true;
-    // subjectCode 일치
     if (meta.subjectCode && h.subjectCode === meta.subjectCode) return true;
-    // subjectName 일치
-    if (meta.subjectName && (h.subjectName === meta.subjectName || h.title === meta.subjectName)) return true;
+    if (meta.subjectName && (h.subjectName === meta.subjectName || h.title === meta.subjectName || h.courseName === meta.subjectName)) return true;
     return false;
   });
 }
 
-function aggregateLedger(employees, histories, trainingMeta) {
+function isInitialRec(h) {
+  const es = String(h.educationStage ?? "").toLowerCase();
+  const et = String(h.educationType ?? "").toLowerCase();
+  const ir = String(h.initialRecurrent ?? "").toLowerCase();
+  const tp = String(h.trainingPhase ?? "").toLowerCase();
+  const st = String(h.subType ?? "").toLowerCase();
+  return es === "initial" || et === "initial" || ir === "initial" || tp === "initial"
+    || st === "initial" || st === "초기" || st === "초기교육";
+}
+
+function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths = 0) {
   const byUid = new Map();
   for (const h of histories) {
-    const uid = h.uid;
-    if (!uid) continue;
+    const uid = h.uid; if (!uid) continue;
     if (!byUid.has(uid)) byUid.set(uid, []);
     byUid.get(uid).push(h);
   }
@@ -375,123 +383,147 @@ function aggregateLedger(employees, histories, trainingMeta) {
     const uid  = emp.id ?? emp.uid;
     const recs = byUid.get(uid) ?? [];
 
-    // 날짜 추출 함수
     const toYmd = (v) => {
       if (!v) return null;
-      const d = new Date(typeof v === "number" ? v : String(v));
+      if (v instanceof Date) return isNaN(v.getTime()) ? null : formatDateYMD(v.getTime());
+      const n = Number(v);
+      if (Number.isFinite(n) && n > 1e11) return formatDateYMD(n);
+      if (Number.isFinite(n) && n >= 60 && n <= 2958465) {
+        const d = new Date(Math.round((n - 25569) * 86400 * 1000));
+        return isNaN(d.getTime()) ? null : formatDateYMD(d.getTime());
+      }
+      const d = new Date(String(v));
       return isNaN(d.getTime()) ? null : formatDateYMD(d.getTime());
     };
 
-    // 초기교육: educationStage==="initial" 또는 subType==="initial", 가장 이른 날짜
-    const initialRecs = recs.filter((r) => r.educationStage === "initial" || r.educationType === "initial" || r.subType === "initial");
+    // 입사일: 다중 필드 폴백
+    const rawHire = emp.hireDate ?? emp.joinDate ?? emp.joinedAt ?? emp.employmentDate ?? emp.enteredAt ?? null;
+    const joinDate = toYmd(rawHire) ?? "–";
+
+    // 초기교육: isInitialRec 판별 + 가장 이른 날짜
+    const initialRecs  = recs.filter(isInitialRec);
     const initialDates = initialRecs.map((r) => toYmd(r.completedAt)).filter(Boolean).sort();
-    const initialDate  = initialDates[0] ?? null; // 최초값
+    const initialDate  = initialDates[0] ?? null;
 
     // 전년도
-    const prevRecs  = recs.filter((r) => {
+    const prevDates = [...new Set(recs.filter((r) => {
       if (r.educationStage === "previous_year") return true;
-      const y = toYmd(r.completedAt);
-      return y && y.startsWith(String(PY));
-    });
-    const prevDates = [...new Set(prevRecs.map((r) => toYmd(r.completedAt)).filter(Boolean))].sort();
+      const y = toYmd(r.completedAt); return y?.startsWith(String(PY));
+    }).map((r) => toYmd(r.completedAt)).filter(Boolean))].sort();
 
     // 금년도
-    const currRecs  = recs.filter((r) => {
+    const currDates = [...new Set(recs.filter((r) => {
       if (r.educationStage === "current_year") return true;
-      const y = toYmd(r.completedAt);
-      return y && y.startsWith(String(CY));
-    });
-    const currDates = [...new Set(currRecs.map((r) => toYmd(r.completedAt)).filter(Boolean))].sort();
+      const y = toYmd(r.completedAt); return y?.startsWith(String(CY));
+    }).map((r) => toYmd(r.completedAt)).filter(Boolean))].sort();
 
-    // 최종교육일: 전체 이력 중 가장 최근
-    const allDates  = recs.map((r) => toYmd(r.completedAt)).filter(Boolean).sort();
-    const lastDate  = allDates.length ? allDates[allDates.length - 1] : null;
+    // 최종교육일
+    const allDates = recs.map((r) => toYmd(r.completedAt)).filter(Boolean).sort();
+    const lastDate = allDates.length ? allDates[allDates.length - 1] : null;
 
-    // 비고: 가장 최근 이력의 note
-    const lastRec = recs.sort((a, b) => Number(b.completedAt ?? 0) - Number(a.completedAt ?? 0))[0];
+    // 비고 및 cycleMonths
+    const lastRec = [...recs].sort((a, b) => Number(b.completedAt ?? 0) - Number(a.completedAt ?? 0))[0];
     const note    = lastRec?.note ?? "";
+    // cycleMonths 적용 우선순위: 이력 > item > 전역설정
+    const itemCycle = (() => { if (!trainingMeta?.itemId) return 0; const it = viewState.items.find((i) => i.id === trainingMeta.itemId); return Number(it?.cycleMonths ?? 0) || 0; })();
+    const effectiveCycle = Number(lastRec?.cycleMonths ?? 0) || itemCycle || globalCycleMonths;
 
-    // cycleMonths: 이력에서 가져오거나 0
-    const cycleMonths = Number(lastRec?.cycleMonths ?? 0);
-
-    // applyDueMetadata 적용 (completedAt = lastDate)
+    // applyDueMetadata 적용
     const dueRow = lastDate ? applyDueMetadata([{
       completedAt: new Date(lastDate).getTime(),
-      cycleMonths,
-    }])[0] : { dueStatus: recs.length === 0 ? "none" : "unconfigured", nextDueDate: null, daysRemaining: null, dueStatusLabel: recs.length === 0 ? "미이수" : "주기 미설정" };
+      cycleMonths: effectiveCycle,
+    }])[0] : null;
+
+    // daysRemaining 기반 직접 상태 결정
+    let dueStatus, dueStatusLabel, daysRemaining, nextDueDate;
+    if (!lastDate) {
+      dueStatus = "none"; dueStatusLabel = "미이수"; daysRemaining = null; nextDueDate = null;
+    } else if (!effectiveCycle) {
+      dueStatus = "unconfigured"; dueStatusLabel = "주기 미설정"; daysRemaining = null; nextDueDate = null;
+    } else {
+      daysRemaining = dueRow?.daysRemaining ?? null;
+      nextDueDate   = dueRow?.nextDueDate   ?? null;
+      if (daysRemaining === null)       { dueStatus = "unconfigured"; dueStatusLabel = "주기 미설정"; }
+      else if (daysRemaining < 0)       { dueStatus = "overdue";      dueStatusLabel = "기한 초과"; }
+      else if (daysRemaining <= 7)      { dueStatus = "soon7";        dueStatusLabel = "7일 이내"; }
+      else if (daysRemaining <= 30)     { dueStatus = "soon30";       dueStatusLabel = "30일 이내"; }
+      else                              { dueStatus = "normal";        dueStatusLabel = "정상"; }
+    }
 
     return {
-      uid,
-      name:        emp.name ?? "–",
-      empNo:       emp.empNo ?? "–",
-      joinDate:    toYmd(emp.joinDate ?? emp.hireDate ?? emp.joinedAt ?? emp.employmentDate) ?? "–",
-      position:    emp.position ?? "–",
-      initialDate,
-      lastDate,
-      prevDates,
-      currDates,
-      note,
-      cycleMonths,
-      hasHistory:  recs.length > 0,
-      dueStatus:   dueRow.dueStatus ?? (recs.length === 0 ? "none" : "unconfigured"),
-      nextDueDate: dueRow.nextDueDate ?? null,
-      daysRemaining: dueRow.daysRemaining ?? null,
-      dueStatusLabel: dueRow.dueStatusLabel ?? (recs.length === 0 ? "미이수" : "–"),
+      uid, name: emp.name ?? "–", empNo: emp.empNo ?? "–",
+      joinDate, position: emp.position ?? "–",
+      initialDate, lastDate, prevDates, currDates, note,
+      cycleMonths: effectiveCycle, hasHistory: recs.length > 0,
+      dueStatus, dueStatusLabel, daysRemaining, nextDueDate,
+      // 수정 모달용 원본 필드
+      _emp: emp,
     };
   });
 }
 
-/* ─── 요약 카드 ─────────────────────────────────────────── */
+/* ─── 요약 카드 4개 ────────────────────────────────────── */
 function renderLedgerSummary() {
   const el = document.getElementById("ledger-summary");
   if (!el) return;
-  const total    = ledgerRows.length;
-  const hasH     = ledgerRows.filter((r) => r.hasHistory).length;
-  const none     = total - hasH;
-  const overdue  = ledgerRows.filter((r) => r.dueStatus === "overdue").length;
-  const soon     = ledgerRows.filter((r) => r.dueStatus === "soon").length;
 
-  el.innerHTML = [
-    { label: "전체 직원",  value: total },
-    { label: "이력 보유",  value: hasH },
-    { label: "미이수",     value: none },
-    { label: "기한 초과",  value: overdue },
-    { label: "30일 이내",  value: soon },
-  ].map(({ label, value }) => `
-    <div class="stat-card">
-      <div class="stat-card__label">${esc(label)}</div>
-      <div class="stat-card__value">${value}</div>
+  const total   = ledgerRows.length;
+  const soon30  = ledgerRows.filter((r) => r.daysRemaining !== null && r.daysRemaining >= 0 && r.daysRemaining <= 30).length;
+  const soon7   = ledgerRows.filter((r) => r.daysRemaining !== null && r.daysRemaining >= 0 && r.daysRemaining <= 7).length;
+  const overdue = ledgerRows.filter((r) => r.daysRemaining !== null && r.daysRemaining < 0).length;
+
+  const cards = [
+    { key: "all",     label: "전체 직원",  value: total,   tone: "neutral" },
+    { key: "soon30",  label: "30일 이내",  value: soon30,  tone: "warning" },
+    { key: "soon7",   label: "7일 이내",   value: soon7,   tone: "danger"  },
+    { key: "overdue", label: "기한 초과",  value: overdue, tone: "danger"  },
+  ];
+
+  el.innerHTML = cards.map(({ key, label, value, tone }) => `
+    <div class="stat-card" data-filter-key="${key}" style="cursor:pointer;transition:box-shadow 0.15s;border:2px solid ${ledgerFilter === key ? "var(--brand-400)" : "transparent"};border-radius:var(--radius-lg)">
+      <div class="stat-card__label" style="color:${tone === "danger" ? "var(--color-danger,#dc2626)" : tone === "warning" ? "var(--color-warning,#d97706)" : "var(--gray-500)"}">${esc(label)}</div>
+      <div class="stat-card__value" style="color:${tone === "danger" ? "var(--color-danger,#dc2626)" : tone === "warning" ? "var(--color-warning,#d97706)" : "inherit"}">${value}</div>
     </div>`).join("");
+
+  el.querySelectorAll(".stat-card[data-filter-key]").forEach((card) => {
+    card.addEventListener("click", () => {
+      ledgerFilter = card.dataset.filterKey;
+      renderLedgerSummary();
+      renderLedgerTable();
+    });
+  });
 }
 
 /* ─── 관리대장 표 ────────────────────────────────────────── */
 function renderLedgerTable() {
   const el = document.getElementById("ledger-table");
   if (!el) return;
+  const isHQAdmin = authStore.role === ROLES.HQ_ADMIN;
 
-  // 필터
   let rows = ledgerRows;
+
+  // 검색 필터
   if (ledgerSearch) {
     rows = rows.filter((r) =>
       String(r.name).toLowerCase().includes(ledgerSearch) ||
       String(r.empNo).toLowerCase().includes(ledgerSearch)
     );
   }
+
+  // 상태 필터 (요약 카드 클릭)
   if (ledgerFilter !== "all") {
     rows = rows.filter((r) => {
-      if (ledgerFilter === "none")         return !r.hasHistory;
-      if (ledgerFilter === "overdue")      return r.dueStatus === "overdue";
-      if (ledgerFilter === "soon")         return r.dueStatus === "soon";
-      if (ledgerFilter === "normal")       return r.dueStatus === "normal";
-      if (ledgerFilter === "unconfigured") return r.dueStatus === "unconfigured";
+      if (ledgerFilter === "soon30")  return r.daysRemaining !== null && r.daysRemaining >= 0 && r.daysRemaining <= 30;
+      if (ledgerFilter === "soon7")   return r.daysRemaining !== null && r.daysRemaining >= 0 && r.daysRemaining <= 7;
+      if (ledgerFilter === "overdue") return r.daysRemaining !== null && r.daysRemaining < 0;
       return true;
     });
   }
 
-  // 정렬: 미이수 → 초과 → 임박 → 정상 → 성명
-  const ORDER = { none: 0, overdue: 1, soon: 2, unconfigured: 3, normal: 4 };
+  // 정렬: 미이수 → 기한초과 → 7일이내 → 30일이내 → 정상 → 성명
+  const ORDER = { none: 0, overdue: 1, soon7: 2, soon30: 3, normal: 4, unconfigured: 5 };
   rows = [...rows].sort((a, b) =>
-    (ORDER[a.dueStatus] ?? 5) - (ORDER[b.dueStatus] ?? 5) ||
+    (ORDER[a.dueStatus] ?? 6) - (ORDER[b.dueStatus] ?? 6) ||
     String(a.name).localeCompare(String(b.name), "ko")
   );
 
@@ -500,28 +532,31 @@ function renderLedgerTable() {
     return;
   }
 
+  const visibleUids = new Set(rows.map((r) => r.uid));
+  const allSelected = visibleUids.size > 0 && [...visibleUids].every((uid) => selectedUids.has(uid));
+
   el.innerHTML = `
-    <table class="data-table" style="min-width:1000px">
+    <table class="data-table" style="min-width:1100px">
       <thead>
         <tr>
+          ${isHQAdmin ? `<th style="width:36px"><input type="checkbox" id="chk-all" ${allSelected ? "checked" : ""} title="전체 선택"/></th>` : ""}
           <th>성명</th><th>사번</th><th>입사일</th><th>직급/직책</th>
           <th>초기교육</th><th>최종교육일</th>
           <th>${PY}년</th><th>${CY}년</th>
           <th>다음 예정일</th><th>남은 일수</th><th>상태</th><th>비고</th>
+          ${isHQAdmin ? "<th style='width:60px'>관리</th>" : ""}
         </tr>
       </thead>
       <tbody>
         ${rows.map((r) => {
+          const isChecked = selectedUids.has(r.uid);
           const tone = r.dueStatus === "overdue" ? "danger"
-            : r.dueStatus === "soon"         ? "warning"
-            : r.dueStatus === "normal"       ? "success"
-            : r.dueStatus === "none"         ? "neutral"
-            : "neutral";
+            : (r.dueStatus === "soon7" || r.dueStatus === "soon30") ? "warning"
+            : r.dueStatus === "normal" ? "success" : "neutral";
           const days = r.daysRemaining === null ? "–"
-            : r.daysRemaining < 0 ? `${Math.abs(r.daysRemaining)}일 초과`
-            : `${r.daysRemaining}일`;
-
-          return `<tr data-uid="${esc(r.uid)}" title="더블클릭하면 개인 이력카드로 이동" style="cursor:pointer">
+            : r.daysRemaining < 0 ? `${Math.abs(r.daysRemaining)}일 초과` : `${r.daysRemaining}일`;
+          return `<tr data-uid="${esc(r.uid)}" class="${isChecked ? "row--selected" : ""}" title="더블클릭: 이력카드" style="${isChecked ? "background:var(--brand-50,#eff6ff)" : ""}">
+            ${isHQAdmin ? `<td style="text-align:center"><input type="checkbox" class="chk-row" data-uid="${esc(r.uid)}" ${isChecked ? "checked" : ""}></td>` : ""}
             <td style="font-weight:var(--weight-medium)">${esc(r.name)}</td>
             <td style="font-family:monospace;font-size:var(--text-xs)">${esc(r.empNo)}</td>
             <td style="font-size:var(--text-xs)">${esc(r.joinDate)}</td>
@@ -534,44 +569,350 @@ function renderLedgerTable() {
             <td style="font-size:var(--text-xs)">${esc(days)}</td>
             <td><span class="chip chip--${tone}" style="font-size:var(--text-xs)">${esc(r.dueStatusLabel)}</span></td>
             <td style="font-size:var(--text-xs)">${esc(r.note || "–")}</td>
+            ${isHQAdmin ? `<td><button class="btn btn--ghost btn--sm btn-edit-emp" data-uid="${esc(r.uid)}" style="padding:2px 6px;font-size:var(--text-xs)">수정</button></td>` : ""}
           </tr>`;
         }).join("")}
       </tbody>
     </table>`;
 
-  // 단일 클릭 = 하이라이트, 더블클릭 = 이력카드 이동
-  // dblclick은 click 이벤트 2회 발화를 수반하므로 타이머로 구분
-  el.querySelectorAll("tbody tr[data-uid]").forEach((row) => {
-    let clickTimer = null;
-
-    row.addEventListener("click", () => {
-      // 이전 단일클릭 타이머 취소 (더블클릭이면 이 블록은 실행 안 됨)
-      clearTimeout(clickTimer);
-      clickTimer = setTimeout(() => {
-        // 단일 클릭: 행 선택 하이라이트
-        el.querySelectorAll("tbody tr").forEach((r) => r.style.background = "");
-        row.style.background = "var(--brand-50, #eff6ff)";
-      }, 220); // 더블클릭 인식 시간(보통 200ms)보다 약간 길게
+  // 전체 선택 체크박스
+  if (isHQAdmin) {
+    document.getElementById("chk-all")?.addEventListener("change", (e) => {
+      e.stopPropagation();
+      if (e.target.checked) { visibleUids.forEach((uid) => selectedUids.add(uid)); }
+      else                  { visibleUids.forEach((uid) => selectedUids.delete(uid)); }
+      updateResetBtn();
+      renderLedgerTable();
     });
 
-    row.addEventListener("dblclick", () => {
-      clearTimeout(clickTimer); // 단일클릭 타이머 취소
-      // 더블클릭: 개인 교육이력카드로 이동
-      // SUPER_ADMIN은 history-cards가 읽기 전용으로 열림 (권한 처리는 history-cards.js에서 담당)
+    // 개별 체크박스
+    el.querySelectorAll(".chk-row").forEach((chk) => {
+      chk.addEventListener("change", (e) => {
+        e.stopPropagation();
+        if (e.target.checked) selectedUids.add(e.target.dataset.uid);
+        else                  selectedUids.delete(e.target.dataset.uid);
+        updateResetBtn();
+        renderLedgerTable();
+      });
+      chk.addEventListener("click", (e) => e.stopPropagation());
+    });
+
+    // 수정 버튼
+    el.querySelectorAll(".btn-edit-emp").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const row = ledgerRows.find((r) => r.uid === btn.dataset.uid);
+        if (row) openEditEmployeeModal(row);
+      });
+    });
+  }
+
+  // 단일 클릭 = 하이라이트, 더블클릭 = 이력카드
+  el.querySelectorAll("tbody tr[data-uid]").forEach((row) => {
+    let clickTimer = null;
+    row.addEventListener("click", (e) => {
+      if (e.target.type === "checkbox" || e.target.closest("button")) return;
+      clearTimeout(clickTimer);
+      clickTimer = setTimeout(() => {
+        el.querySelectorAll("tbody tr").forEach((r) => { if (!selectedUids.has(r.dataset.uid)) r.style.background = ""; });
+        if (!selectedUids.has(row.dataset.uid)) row.style.background = "var(--gray-50)";
+      }, 220);
+    });
+    row.addEventListener("dblclick", (e) => {
+      if (e.target.type === "checkbox" || e.target.closest("button")) return;
+      clearTimeout(clickTimer);
       router.push("history-cards", { uid: row.dataset.uid });
     });
   });
+}
+
+function updateResetBtn() {
+  const btn = document.getElementById("btn-reset-history");
+  if (!btn) return;
+  const cnt = selectedUids.size;
+  btn.disabled = cnt === 0;
+  btn.textContent = cnt > 0 ? `선택 이력 초기화 (${cnt}명)` : "선택 이력 초기화";
+}
+
+/* ═══════════════════════════════════════════════════════
+   이력 초기화 모달
+═══════════════════════════════════════════════════════ */
+async function openResetConfirmModal() {
+  if (!currentLedgerMeta || selectedUids.size === 0) { toast.warning("지점·교육 조회 후 직원을 선택하세요."); return; }
+  const { branchLabel, trainingMeta } = currentLedgerMeta;
+  const uids = [...selectedUids];
+
+  // 삭제 예정 이력 수 계산 (manualTrainingHistories에서 해당 uid + 교육 + source=manual_excel)
+  let deleteCnt = 0;
+  try {
+    const allManual = await manualTrainingHistoriesDB.listAll();
+    deleteCnt = allManual.filter((h) =>
+      uids.includes(h.uid) &&
+      h.source === "manual_excel" &&
+      filterByTraining([h], trainingMeta).length > 0
+    ).length;
+  } catch (e) { /* 조회 실패 무시 */ }
+
+  modal.open({
+    title: "선택 직원 교육이력 초기화",
+    size: "sm",
+    body: `
+      <div style="display:flex;flex-direction:column;gap:var(--space-4)">
+        <div style="font-size:var(--text-sm);line-height:1.7">
+          <div><b>지점:</b> ${esc(branchLabel)}</div>
+          <div><b>교육:</b> ${esc(trainingMeta?.label ?? "")}</div>
+          <div><b>선택 직원:</b> ${uids.length}명</div>
+          <div><b>삭제 예정 Excel 이력:</b> ${deleteCnt}건</div>
+        </div>
+        <div style="background:#fff1f2;border:1px solid #fecaca;border-radius:var(--radius-md);padding:var(--space-3);font-size:var(--text-sm);color:#dc2626">
+          ⚠️ 선택한 직원의 해당 교육 항목 Excel 업로드 이력만 삭제됩니다.<br/>
+          직원 계정과 다른 교육이력은 삭제되지 않습니다.<br/>
+          삭제 후 복구할 수 없습니다.
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label">확인을 위해 <b>초기화</b>를 입력하세요</label>
+          <input class="form-control" id="reset-confirm-input" placeholder="초기화" autocomplete="off"/>
+        </div>
+      </div>`,
+    actions: [
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      {
+        label: "선택 이력 초기화",
+        variant: "danger",
+        onClick: async () => {
+          const val = document.getElementById("reset-confirm-input")?.value?.trim();
+          if (val !== "초기화") { toast.warning("'초기화'를 정확히 입력해 주세요."); return; }
+          modal.setLoading("선택 이력 초기화", true);
+          try {
+            const result = await resetSelectedManualTrainingHistories({
+              companyId:   authStore.companyId,
+              branchId:    currentLedgerMeta.branchId,
+              itemId:      trainingMeta?.itemId ?? "",
+              trainingType: trainingMeta?.trainingType ?? "",
+              subjectCode:  trainingMeta?.subjectCode ?? "",
+              subjectName:  trainingMeta?.subjectName ?? "",
+              employeeUids: uids,
+            });
+            toast.success(`초기화 완료: ${result.deletedHistoryCount ?? 0}건 삭제`);
+            modal.close();
+            selectedUids.clear();
+            updateResetBtn();
+            await runLedgerQuery();
+          } catch (err) {
+            console.error("[employees] reset failed", err);
+            toast.error(err?.message || "초기화에 실패했습니다.");
+            modal.setLoading("선택 이력 초기화", false);
+          }
+        },
+      },
+    ],
+  });
+
+  // 입력값에 따라 버튼 활성화
+  setTimeout(() => {
+    document.getElementById("reset-confirm-input")?.addEventListener("input", (e) => {
+      const actionBtns = document.querySelectorAll(".modal__action");
+      // 확인 버튼(danger)은 마지막 버튼
+    });
+  }, 100);
+}
+
+/* ═══════════════════════════════════════════════════════
+   직원 정보 수정 모달
+═══════════════════════════════════════════════════════ */
+function openEditEmployeeModal(row) {
+  const emp = row._emp ?? {};
+  const toDateInput = (v) => {
+    if (!v) return "";
+    const d = new Date(typeof v === "number" && v > 1e11 ? v : String(v));
+    if (isNaN(d.getTime())) return "";
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  };
+
+  const rawHire = emp.hireDate ?? emp.joinDate ?? emp.joinedAt ?? emp.employmentDate ?? emp.enteredAt ?? null;
+  const hireDateVal = toDateInput(rawHire);
+
+  modal.open({
+    title: `직원 정보 수정 — ${esc(row.name)}`,
+    size: "md",
+    body: `
+      <div style="display:flex;flex-direction:column;gap:var(--space-4)">
+        <div style="background:var(--gray-50);border-radius:var(--radius-md);padding:var(--space-3);font-size:var(--text-sm);color:var(--gray-500)">
+          사번 · 권한 · 비밀번호는 이 화면에서 변경할 수 없습니다.
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label form-label--required">성명</label>
+            <input class="form-control" id="edit-emp-name" value="${esc(emp.name ?? "")}"/>
+          </div>
+          <div class="form-group">
+            <label class="form-label">입사일</label>
+            <input class="form-control" id="edit-emp-hire" type="date" value="${hireDateVal}"/>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">직급/직책</label>
+            <input class="form-control" id="edit-emp-position" value="${esc(emp.position ?? "")}"/>
+          </div>
+          <div class="form-group">
+            <label class="form-label">소속 지점</label>
+            <select class="form-control" id="edit-emp-branch">
+              ${viewState.branches.map((b) =>
+                `<option value="${b.id}" ${b.id === (emp.branchId ?? "") ? "selected" : ""}>${esc(b.name ?? b.code ?? b.id)}</option>`
+              ).join("")}
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">직원 관리 비고</label>
+          <textarea class="form-control" id="edit-emp-note" rows="2">${esc(emp.managementNote ?? "")}</textarea>
+        </div>
+        <div style="font-size:var(--text-xs);color:var(--gray-400)">
+          수정 불가: 사번(${esc(row.empNo)}), 권한, 비밀번호
+        </div>
+      </div>`,
+    actions: [
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      {
+        label: "저장",
+        variant: "primary",
+        onClick: async () => {
+          const name     = document.getElementById("edit-emp-name")?.value?.trim();
+          const hireRaw  = document.getElementById("edit-emp-hire")?.value;
+          const position = document.getElementById("edit-emp-position")?.value?.trim();
+          const branchId = document.getElementById("edit-emp-branch")?.value;
+          const mgNote   = document.getElementById("edit-emp-note")?.value?.trim();
+
+          if (!name) { toast.error("성명을 입력해 주세요."); return; }
+
+          const hireDateMs = hireRaw ? new Date(`${hireRaw}T00:00:00`).getTime() : null;
+
+          modal.setLoading("저장", true);
+          try {
+            await updateEmployeeManagementProfile({
+              uid:            row.uid,
+              name,
+              hireDate:       hireDateMs,
+              position,
+              branchId,
+              managementNote: mgNote,
+            });
+            toast.success("직원 정보가 수정되었습니다.");
+            modal.close();
+            await runLedgerQuery();
+          } catch (err) {
+            console.error("[employees] updateEmployee failed", err);
+            toast.error(err?.message || "수정에 실패했습니다.");
+            modal.setLoading("저장", false);
+          }
+        },
+      },
+    ],
+  });
+}
+
+/* ═══════════════════════════════════════════════════════
+   재교육 주기 설정 모달
+═══════════════════════════════════════════════════════ */
+async function openCycleConfigModal() {
+  const trainingVal = document.getElementById("ledger-training")?.value ?? "";
+  const trainingMeta = parseTrainingValue(trainingVal);
+  if (!trainingMeta) { toast.warning("교육을 먼저 선택하세요."); return; }
+
+  const educationKey = buildEducationKey(trainingMeta);
+  const companyId    = authStore.companyId;
+  let currentCycle   = 0;
+  try {
+    const config = companyId ? await educationCycleConfigsDB.get(companyId, educationKey) : null;
+    currentCycle = Number(config?.cycleMonths ?? 0) || 0;
+    if (!currentCycle && trainingMeta.itemId) {
+      const item = viewState.items.find((i) => i.id === trainingMeta.itemId);
+      currentCycle = Number(item?.cycleMonths ?? 0) || 0;
+    }
+  } catch (e) { /* 무시 */ }
+
+  modal.open({
+    title: "재교육 주기 설정",
+    size: "sm",
+    body: `
+      <div style="display:flex;flex-direction:column;gap:var(--space-4)">
+        <div style="font-size:var(--text-sm);line-height:1.7">
+          <div><b>교육:</b> ${esc(trainingMeta.label)}</div>
+          <div><b>현재 주기:</b> ${currentCycle ? `${currentCycle}개월` : "미설정"}</div>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label form-label--required">새 재교육 주기</label>
+          <div style="display:flex;gap:var(--space-2);flex-wrap:wrap;margin-bottom:var(--space-2)">
+            ${[1,3,6,12,24].map((m) =>
+              `<button type="button" class="btn btn--secondary btn--sm cycle-preset" data-val="${m}">${m}개월</button>`
+            ).join("")}
+            <button type="button" class="btn btn--ghost btn--sm cycle-preset" data-val="0">주기 없음</button>
+          </div>
+          <input class="form-control" id="cycle-months-input" type="number" min="0" max="120" step="1"
+            placeholder="직접 입력 (0 = 주기 없음)" value="${currentCycle}"/>
+          <div class="form-hint">0~120 사이 정수 · 0은 주기 없음</div>
+        </div>
+      </div>`,
+    actions: [
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      {
+        label: "저장",
+        variant: "primary",
+        onClick: async () => {
+          const raw = document.getElementById("cycle-months-input")?.value?.trim();
+          const val = raw === "" ? 0 : Number(raw);
+          if (!Number.isInteger(val) || val < 0 || val > 120) {
+            toast.error("0~120 사이 정수를 입력하세요.");
+            return;
+          }
+          modal.setLoading("저장", true);
+          try {
+            await saveEducationCycleConfig({
+              companyId,
+              itemId:       trainingMeta.itemId ?? "",
+              trainingType: trainingMeta.trainingType,
+              subjectCode:  trainingMeta.subjectCode ?? "",
+              subjectName:  trainingMeta.subjectName ?? "",
+              cycleMonths:  val,
+            });
+            toast.success(`재교육 주기가 ${val ? `${val}개월` : "주기 없음"}으로 설정되었습니다.`);
+            modal.close();
+            await runLedgerQuery();
+          } catch (err) {
+            console.error("[employees] saveEducationCycleConfig failed", err);
+            toast.error(err?.message || "저장에 실패했습니다.");
+            modal.setLoading("저장", false);
+          }
+        },
+      },
+    ],
+  });
+
+  // 프리셋 버튼 클릭
+  setTimeout(() => {
+    document.querySelectorAll(".cycle-preset").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const inp = document.getElementById("cycle-months-input");
+        if (inp) inp.value = btn.dataset.val;
+      });
+    });
+  }, 50);
+}
+
+function buildEducationKey(meta) {
+  if (!meta) return "unknown";
+  if (meta.itemId)     return `item_${meta.itemId}`;
+  if (meta.subjectCode) return `${meta.trainingType}_${meta.subjectCode}`;
+  return `${meta.trainingType}_${String(meta.subjectName ?? "").replace(/\s+/g, "_")}`;
 }
 
 /* ═══════════════════════════════════════════════════════
    교육 항목 선택 모달 → 양식 다운로드
 ═══════════════════════════════════════════════════════ */
 async function openTemplateSelectModal(preselectedBranchId = "", preselectedTrainingVal = "") {
-  let registeredItems = viewState.items;
-  const onlineItems = registeredItems.filter((i) => i.trainingType === "online");
-  const otherItems  = registeredItems.filter((i) => i.trainingType === "other");
-
-  // 현재 필터에서 교육유형·세부분류 사전 설정
+  const onlineItems = viewState.items.filter((i) => i.trainingType === "online");
+  const otherItems  = viewState.items.filter((i) => i.trainingType === "other");
   const preTraining = parseTrainingValue(preselectedTrainingVal);
 
   modal.open({
@@ -586,57 +927,40 @@ async function openTemplateSelectModal(preselectedBranchId = "", preselectedTrai
           <label class="form-label form-label--required">교육유형</label>
           <select class="form-control" id="tpl-training-type">
             <option value="">선택하세요</option>
-            <option value="job" ${preTraining?.trainingType === "job" ? "selected" : ""}>직무교육</option>
-            <option value="legal" ${preTraining?.trainingType === "legal" ? "selected" : ""}>법정교육</option>
-            <option value="online" ${preTraining?.trainingType === "online" ? "selected" : ""}>온라인교육</option>
-            <option value="other" ${preTraining?.trainingType === "other" ? "selected" : ""}>기타</option>
+            <option value="job" ${preTraining?.trainingType==="job"?"selected":""}>직무교육</option>
+            <option value="legal" ${preTraining?.trainingType==="legal"?"selected":""}>법정교육</option>
+            <option value="online" ${preTraining?.trainingType==="online"?"selected":""}>온라인교육</option>
+            <option value="other" ${preTraining?.trainingType==="other"?"selected":""}>기타</option>
           </select>
         </div>
-        <div class="form-group" id="tpl-job-subjects" style="display:${preTraining?.trainingType === "job" ? "block" : "none"}">
+        <div class="form-group" id="tpl-job-subjects" style="display:${preTraining?.trainingType==="job"?"block":"none"}">
           <label class="form-label form-label--required">교육 세부분류</label>
           <select class="form-control" id="tpl-job-subject">
             <option value="">선택하세요</option>
-            ${(TRAINING_SUBJECT_OPTIONS.job ?? []).map((s) =>
-              `<option value="${s.code}" data-name="${esc(s.name)}" ${preTraining?.subjectCode === s.code ? "selected" : ""}>${esc(s.name)}</option>`
-            ).join("")}
+            ${(TRAINING_SUBJECT_OPTIONS.job ?? []).map((s) => `<option value="${s.code}" data-name="${esc(s.name)}" ${preTraining?.subjectCode===s.code?"selected":""}>${esc(s.name)}</option>`).join("")}
           </select>
         </div>
-        <div class="form-group" id="tpl-legal-subjects" style="display:${preTraining?.trainingType === "legal" ? "block" : "none"}">
+        <div class="form-group" id="tpl-legal-subjects" style="display:${preTraining?.trainingType==="legal"?"block":"none"}">
           <label class="form-label form-label--required">교육 세부분류</label>
           <select class="form-control" id="tpl-legal-subject">
             <option value="">선택하세요</option>
-            ${(TRAINING_SUBJECT_OPTIONS.legal ?? []).map((s) =>
-              `<option value="${s.code}" data-name="${esc(s.name)}" ${preTraining?.subjectCode === s.code ? "selected" : ""}>${esc(s.name)}</option>`
-            ).join("")}
+            ${(TRAINING_SUBJECT_OPTIONS.legal ?? []).map((s) => `<option value="${s.code}" data-name="${esc(s.name)}" ${preTraining?.subjectCode===s.code?"selected":""}>${esc(s.name)}</option>`).join("")}
           </select>
         </div>
-        <div class="form-group" id="tpl-online-subjects" style="display:${preTraining?.trainingType === "online" ? "block" : "none"}">
+        <div class="form-group" id="tpl-online-subjects" style="display:${preTraining?.trainingType==="online"?"block":"none"}">
           <label class="form-label form-label--required">교육 세부분류</label>
-          ${onlineItems.length ? `
-          <select class="form-control" id="tpl-online-subject-select">
-            <option value="">기존 항목 선택 또는 직접 입력</option>
-            ${onlineItems.map((i) => `<option value="${esc(i.subjectCode||i.id)}" data-name="${esc(i.subjectName||i.title)}" ${preTraining?.subjectCode === (i.subjectCode||i.id) ? "selected" : ""}>${esc(i.subjectName||i.title)}</option>`).join("")}
-          </select>
-          <div style="margin-top:4px;font-size:var(--text-xs);color:var(--gray-400)">또는 직접 입력:</div>` : ""}
+          ${onlineItems.length?`<select class="form-control" id="tpl-online-subject-select"><option value="">기존 항목 선택 또는 직접 입력</option>${onlineItems.map((i)=>`<option value="${esc(i.subjectCode||i.id)}" data-name="${esc(i.subjectName||i.title)}">${esc(i.subjectName||i.title)}</option>`).join("")}</select>`:""}
           <input class="form-control" id="tpl-online-subject-input" placeholder="교육 항목명 직접 입력" style="margin-top:4px"/>
         </div>
-        <div class="form-group" id="tpl-other-subjects" style="display:${preTraining?.trainingType === "other" ? "block" : "none"}">
+        <div class="form-group" id="tpl-other-subjects" style="display:${preTraining?.trainingType==="other"?"block":"none"}">
           <label class="form-label form-label--required">교육 세부분류</label>
-          ${otherItems.length ? `
-          <select class="form-control" id="tpl-other-subject-select">
-            <option value="">기존 항목 선택 또는 직접 입력</option>
-            ${otherItems.map((i) => `<option value="${esc(i.subjectCode||i.id)}" data-name="${esc(i.subjectName||i.title)}" ${preTraining?.subjectCode === (i.subjectCode||i.id) ? "selected" : ""}>${esc(i.subjectName||i.title)}</option>`).join("")}
-          </select>
-          <div style="margin-top:4px;font-size:var(--text-xs);color:var(--gray-400)">또는 직접 입력:</div>` : ""}
+          ${otherItems.length?`<select class="form-control" id="tpl-other-subject-select"><option value="">기존 항목 선택 또는 직접 입력</option>${otherItems.map((i)=>`<option value="${esc(i.subjectCode||i.id)}" data-name="${esc(i.subjectName||i.title)}">${esc(i.subjectName||i.title)}</option>`).join("")}</select>`:""}
           <input class="form-control" id="tpl-other-subject-input" placeholder="교육 항목명 직접 입력" style="margin-top:4px"/>
         </div>
       </div>`,
     actions: [
       { label: "취소", variant: "secondary", onClick: () => modal.close() },
-      {
-        label: "선택 항목 양식 다운로드",
-        variant: "primary",
-        onClick: async () => {
+      { label: "선택 항목 양식 다운로드", variant: "primary", onClick: async () => {
           const trainingType = document.getElementById("tpl-training-type")?.value;
           if (!trainingType) { toast.warning("교육유형을 선택해 주세요."); return; }
           let subjectCode = "", subjectName = "";
@@ -663,33 +987,23 @@ async function openTemplateSelectModal(preselectedBranchId = "", preselectedTrai
           }
           modal.setLoading("선택 항목 양식 다운로드", true);
           try {
-            // 현재 지점 필터 반영
             const activeBranchId = preselectedBranchId || document.getElementById("ledger-branch")?.value || "";
             await downloadTypedTemplate({ trainingType, subjectCode, subjectName, overrideBranchId: activeBranchId });
             modal.close();
-          } catch (err) {
-            console.error("[employees] template download error", err);
-            toast.error("양식을 만들지 못했습니다.");
-            modal.setLoading("선택 항목 양식 다운로드", false);
-          }
-        },
-      },
+          } catch (err) { console.error(err); toast.error("양식을 만들지 못했습니다."); modal.setLoading("선택 항목 양식 다운로드", false); }
+      }},
     ],
   });
 
   document.getElementById("tpl-training-type")?.addEventListener("change", (e) => {
     const type = e.target.value;
-    ["job", "legal", "online", "other"].forEach((t) => {
+    ["job","legal","online","other"].forEach((t) => {
       const el = document.getElementById(`tpl-${t}-subjects`);
       if (el) el.style.display = type === t ? "block" : "none";
     });
   });
-  document.getElementById("tpl-online-subject-select")?.addEventListener("change", (e) => {
-    if (e.target.value) document.getElementById("tpl-online-subject-input").value = "";
-  });
-  document.getElementById("tpl-other-subject-select")?.addEventListener("change", (e) => {
-    if (e.target.value) document.getElementById("tpl-other-subject-input").value = "";
-  });
+  document.getElementById("tpl-online-subject-select")?.addEventListener("change", (e) => { if (e.target.value) document.getElementById("tpl-online-subject-input").value = ""; });
+  document.getElementById("tpl-other-subject-select")?.addEventListener("change", (e) => { if (e.target.value) document.getElementById("tpl-other-subject-input").value = ""; });
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -700,37 +1014,29 @@ async function downloadTypedTemplate({ trainingType, subjectCode, subjectName, o
   const typeLabel = TRAINING_TYPE_LABELS[trainingType] ?? trainingType;
   const wb = XLSX.utils.book_new();
 
-  // _meta 시트
   const metaWs = XLSX.utils.aoa_to_sheet([
-    ["trainingType",    trainingType],
-    ["subjectCode",     subjectCode],
-    ["subjectName",     subjectName],
-    ["typeLabel",       typeLabel],
-    ["currentYear",     CY],
-    ["previousYear",    PY],
-    ["templateVersion", 1],
-    ["generatedAt",     Date.now()],
+    ["trainingType", trainingType], ["subjectCode", subjectCode], ["subjectName", subjectName],
+    ["typeLabel", typeLabel], ["currentYear", CY], ["previousYear", PY],
+    ["templateVersion", 1], ["generatedAt", Date.now()],
   ]);
   XLSX.utils.book_append_sheet(wb, metaWs, "_meta");
 
-  // 지점 필터 적용
   const branchId = overrideBranchId || document.getElementById("ledger-branch")?.value || "";
   const branch   = viewState.branches.find((b) => b.id === branchId) ?? null;
   const targets  = viewState.employees.filter((e) => branch ? matchesBranch(e, branchId) : true);
 
   const parseJoinDate = (emp) => {
-    const raw = emp.joinDate ?? emp.hireDate ?? emp.joinedAt ?? emp.employmentDate ?? null;
+    const raw = emp.hireDate ?? emp.joinDate ?? emp.joinedAt ?? emp.employmentDate ?? emp.enteredAt ?? null;
     if (!raw) return null;
     const n = Number(raw);
     if (Number.isFinite(n) && n > 1e11) return new Date(n);
-    const d = new Date(String(raw));
-    return isNaN(d.getTime()) ? null : d;
+    const d = new Date(String(raw)); return isNaN(d.getTime()) ? null : d;
   };
 
   const infoRows = [
     [`[${typeLabel} — ${subjectName}] 개인 교육이력 등록 양식`],
     [`기준연도: ${CY}년 (전년도: ${PY}년 / 금년도: ${CY}년)`],
-    ["※ 성명·사번은 수정하지 마세요. 날짜는 YYYY-MM-DD 형식으로 입력하세요. 복수 날짜는 쉼표 구분: 2026-01-15, 2026-07-20"],
+    ["※ 성명·사번은 수정하지 마세요. 날짜는 YYYY-MM-DD 형식으로 입력하세요. 복수 날짜는 쉼표 구분"],
     [],
     ["성명", "사번", "입사일", "직급/직책", "초기교육", "최종교육일", `${PY}년`, `${CY}년`, "비고"],
   ];
@@ -744,10 +1050,7 @@ async function downloadTypedTemplate({ trainingType, subjectCode, subjectName, o
   ]);
 
   const ws = XLSX.utils.aoa_to_sheet([...infoRows, ...dataRows], { cellDates: true, dateNF: "yyyy-mm-dd" });
-  ws["!cols"] = [
-    { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 14 },
-    { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 20 },
-  ];
+  ws["!cols"] = [{ wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 20 }];
 
   const colName = (idx) => { let n = ""; let i = idx; do { n = String.fromCharCode(65 + (i % 26)) + n; i = Math.floor(i / 26) - 1; } while (i >= 0); return n; };
   const DATA_START = 6; const DATA_END = DATA_START + dataRows.length - 1;
@@ -757,8 +1060,7 @@ async function downloadTypedTemplate({ trainingType, subjectCode, subjectName, o
       if (!ws[addr]) ws[addr] = { t: "z", v: undefined, z: "yyyy-mm-dd" };
       else ws[addr].z = "yyyy-mm-dd";
     }
-    const ea = `${colName(1)}${r}`;
-    if (ws[ea]) ws[ea].t = "s";
+    const ea = `${colName(1)}${r}`; if (ws[ea]) ws[ea].t = "s";
   }
 
   XLSX.utils.book_append_sheet(wb, ws, "개인교육이력");
@@ -770,7 +1072,7 @@ async function downloadTypedTemplate({ trainingType, subjectCode, subjectName, o
    인라인 Excel 업로드
 ═══════════════════════════════════════════════════════ */
 async function parseHistoryUploadFileInline(event) {
-  const file      = event.target.files?.[0];
+  const file       = event.target.files?.[0];
   const filenameEl = document.getElementById("history-upload-filename");
   const previewEl  = document.getElementById("history-upload-preview-inline");
   const submitBtn  = document.getElementById("btn-history-upload-submit");
@@ -787,18 +1089,16 @@ async function parseHistoryUploadFileInline(event) {
     const XLSX = await loadXlsx();
     const wb   = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
 
-    // _meta
     const metaSheet = wb.Sheets["_meta"];
     if (!metaSheet) { previewEl.innerHTML = metaError("지원하지 않는 양식입니다. 교육 항목을 선택하여 새 양식을 다운로드해 주세요."); return; }
     const metaMap = {};
     XLSX.utils.sheet_to_json(metaSheet, { header: 1, defval: "" }).forEach(([k, v]) => { if (k) metaMap[k] = v; });
     const { trainingType, subjectCode, subjectName, typeLabel, currentYear, previousYear } = metaMap;
-    if (!trainingType || !currentYear) { previewEl.innerHTML = metaError("양식 메타데이터가 손상되었습니다. 새 양식을 다운로드해 주세요."); return; }
+    if (!trainingType || !currentYear) { previewEl.innerHTML = metaError("양식 메타데이터가 손상되었습니다."); return; }
 
     const metaCY = Number(currentYear), metaPY = Number(previousYear);
     selectedTemplateMeta = { trainingType, subjectCode, subjectName, typeLabel, currentYear: metaCY, previousYear: metaPY };
 
-    // 데이터 시트
     const dataSheet = wb.Sheets[wb.SheetNames.find((n) => n !== "_meta") ?? wb.SheetNames[0]];
     const allRows   = XLSX.utils.sheet_to_json(dataSheet, { header: 1, defval: "" });
 
@@ -819,10 +1119,7 @@ async function parseHistoryUploadFileInline(event) {
       note:     headers.indexOf("비고"),
     };
 
-    const dataRaw = allRows.slice(hIdx + 1).filter((r) => {
-      const n = normCell(r[col.name]); const e = normCell(r[col.empNo]); return n !== "" || e !== "";
-    });
-
+    const dataRaw = allRows.slice(hIdx + 1).filter((r) => { const n = normCell(r[col.name]); const e = normCell(r[col.empNo]); return n !== "" || e !== ""; });
     const safeEmpNo = (v) => (v === null || v === undefined) ? "" : String(v).trim();
     const empByNo   = new Map(viewState.employees.map((e) => [safeEmpNo(e.empNo), e]));
 
@@ -846,9 +1143,8 @@ async function parseHistoryUploadFileInline(event) {
       const parsedPrev    = parseDateCells(getRaw(col.prev),     metaPY,  metaPY,  errors, `${metaPY}년`);
       const parsedCurr    = parseDateCells(getRaw(col.curr),     metaCY,  metaCY,  errors, `${metaCY}년`);
       const parsedLast    = xlDateToYMD(getRaw(col.lastDate));
-
-      const allDates = [...parsedInitial, ...parsedPrev, ...parsedCurr];
-      const skip     = allDates.length === 0 && errors.length === 0;
+      const allDates      = [...parsedInitial, ...parsedPrev, ...parsedCurr];
+      const skip          = allDates.length === 0 && errors.length === 0;
 
       return {
         _rowNum: hIdx + 1 + i + 2, _skip: skip, _errors: errors,
@@ -896,12 +1192,7 @@ async function parseHistoryUploadFileInline(event) {
                 <td style="font-size:var(--text-xs)">${esc(r.currYearDates.join(", ") || "–")}</td>
                 <td style="font-size:var(--text-xs)">${esc(r.note || "–")}</td>
                 <td style="text-align:center;font-size:var(--text-xs)">${r._skip ? "–" : cnt}</td>
-                <td>${r._skip
-                  ? `<span style="color:var(--gray-400);font-size:var(--text-xs)">건너뜀</span>`
-                  : r._errors.length
-                    ? `<span style="color:#c2410c;font-size:var(--text-xs)">${esc(r._errors.join(" / "))}</span>`
-                    : `<span style="color:#15803d;font-size:var(--text-xs)">✓ 정상</span>`
-                }</td>
+                <td>${r._skip ? `<span style="color:var(--gray-400);font-size:var(--text-xs)">건너뜀</span>` : r._errors.length ? `<span style="color:#c2410c;font-size:var(--text-xs)">${esc(r._errors.join(" / "))}</span>` : `<span style="color:#15803d;font-size:var(--text-xs)">✓ 정상</span>`}</td>
               </tr>`;
             }).join("")}
           </tbody>
@@ -921,14 +1212,23 @@ async function submitHistoryUploadInline() {
   const resultEl  = document.getElementById("history-upload-result");
   if (!selectedTemplateMeta) { toast.warning("먼저 교육 항목 양식의 Excel 파일을 선택해 주세요."); return; }
 
-  const { trainingType, subjectCode, subjectName } = selectedTemplateMeta;
+  const { trainingType, subjectCode, subjectName, currentYear: metaCY2 } = selectedTemplateMeta;
   const validRows = pendingHistoryRows.filter((r) => !r._skip && !r._errors.length);
   if (!validRows.length) { toast.warning("업로드할 수 있는 정상 행이 없습니다."); return; }
+
+  // 해당 교육의 기본 주기 포함
+  const trainingMeta = parseTrainingValue(`${trainingType}|${subjectCode}`);
+  const educationKey = buildEducationKey(trainingMeta ?? { trainingType, subjectCode, subjectName });
+  let defaultCycle   = 0;
+  try {
+    const cfg = authStore.companyId ? await educationCycleConfigsDB.get(authStore.companyId, educationKey) : null;
+    defaultCycle = Number(cfg?.cycleMonths ?? 0) || 0;
+  } catch (e) { /* 무시 */ }
 
   const historyEntries = [];
   for (const row of validRows) {
     const stages = [
-      ...row.initialDates.map((d)  => ({ completedAt: d, educationStage: "initial",      educationType: "initial" })),
+      ...row.initialDates.map((d) => ({ completedAt: d, educationStage: "initial",       educationType: "initial" })),
       ...row.prevYearDates.map((d) => ({ completedAt: d, educationStage: "previous_year", educationType: "recurrent" })),
       ...row.currYearDates.map((d) => ({ completedAt: d, educationStage: "current_year",  educationType: "recurrent" })),
     ];
@@ -938,7 +1238,8 @@ async function submitHistoryUploadInline() {
         trainingType, subjectCode, subjectName,
         title: subjectName, courseName: subjectName,
         completedAt, educationStage, educationType,
-        source: "manual_excel", note: row.note ?? "", cycleMonths: 0,
+        source: "manual_excel", note: row.note ?? "",
+        cycleMonths: defaultCycle,
       });
     }
   }
@@ -952,7 +1253,6 @@ async function submitHistoryUploadInline() {
     const msg = `✅ 등록 ${result.succeededCount ?? 0}건 · 중복 ${result.skippedCount ?? 0}건 · 실패 ${result.failedCount ?? 0}건`;
     if (resultEl) resultEl.innerHTML = `<span style="color:var(--color-success,#16a34a)">${esc(msg)}</span>`;
     toast.success(msg);
-    // 초기화
     pendingHistoryRows = []; selectedTemplateMeta = null;
     const fi = document.getElementById("history-upload-file-inline"); if (fi) fi.value = "";
     const fn = document.getElementById("history-upload-filename"); if (fn) fn.textContent = "선택된 파일 없음";
@@ -963,10 +1263,7 @@ async function submitHistoryUploadInline() {
     if (resultEl) resultEl.innerHTML = `<span style="color:var(--color-danger,#dc2626)">${esc(err?.message || "업로드에 실패했습니다.")}</span>`;
     toast.error(err?.message || "업로드에 실패했습니다.");
   } finally {
-    if (submitBtn) {
-      submitBtn.disabled = false;
-      submitBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="margin-right:4px"><path d="M8 10V2m0 0L5 5m3-3l3 3M3 13h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>이력 업로드`;
-    }
+    if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="margin-right:4px"><path d="M8 10V2m0 0L5 5m3-3l3 3M3 13h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>이력 업로드`; }
   }
 }
 
@@ -976,7 +1273,7 @@ async function submitHistoryUploadInline() {
 const _SN_MIN = 60, _SN_MAX = 2958465;
 
 function formatDateYMD(ms) {
-  const d = new Date(ms);
+  const d = new Date(typeof ms === "number" ? ms : Number(ms));
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
 }
 
@@ -993,7 +1290,6 @@ function _rawToYmd(v) {
 }
 
 function xlDateToYMD(v) { return _rawToYmd(v); }
-
 function parseDateCell(v) { return _rawToYmd(v); }
 
 function parseDateCells(value, minYear, maxYear, errors, label) {
@@ -1007,8 +1303,7 @@ function parseDateCells(value, minYear, maxYear, errors, label) {
     }
     return [ymd];
   }
-  const s = String(value).trim();
-  if (!s) return [];
+  const s = String(value).trim(); if (!s) return [];
   const results = [];
   for (const part of s.split(/[,，、]/)) {
     const trimmed = part.trim(); if (!trimmed) continue;
@@ -1027,15 +1322,6 @@ function parseDateCells(value, minYear, maxYear, errors, label) {
    헬퍼
 ═══════════════════════════════════════════════════════ */
 async function loadXlsx() { return import("https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs"); }
-
-function matchesBranch(employee, branchId) {
-  return String(employee.branchId ?? "") === String(branchId);
-}
-
-function metaError(msg) {
-  return `<div style="color:var(--color-danger,#dc2626);padding:var(--space-4);font-size:var(--text-sm);border:1px solid #fecaca;border-radius:var(--radius-md);background:#fff1f2">${esc(msg)}</div>`;
-}
-
-function esc(v) {
-  return String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
+function matchesBranch(emp, branchId) { return String(emp.branchId ?? "") === String(branchId); }
+function metaError(msg) { return `<div style="color:var(--color-danger,#dc2626);padding:var(--space-4);font-size:var(--text-sm);border:1px solid #fecaca;border-radius:var(--radius-md);background:#fff1f2">${esc(msg)}</div>`; }
+function esc(v) { return String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }

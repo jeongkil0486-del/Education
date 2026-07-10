@@ -1052,3 +1052,196 @@ function simplifyError(err) {
   if (err?.code === "auth/invalid-password") return "비밀번호 정책에 맞지 않습니다.";
   return err?.message || "알 수 없는 오류";
 }
+
+/* ══════════════════════════════════════════════════════════
+   직원관리대장 신규 Cloud Functions
+══════════════════════════════════════════════════════════ */
+
+/**
+ * 직원 기본정보 수정 (HQ_ADMIN 전용)
+ * 수정 가능: name, hireDate, position, branchId, managementNote
+ * 수정 불가: empNo, role, password, Auth email, companyId
+ */
+exports.updateEmployeeManagementProfile = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await ensureHQAdminProfile(request.auth.uid);
+
+  const uid           = normalizeText(request.data?.uid);
+  const name          = normalizeText(request.data?.name);
+  const hireDate      = request.data?.hireDate ?? null;
+  const position      = normalizeText(request.data?.position ?? "");
+  const branchId      = normalizeText(request.data?.branchId ?? "");
+  const managementNote = normalizeText(request.data?.managementNote ?? "");
+
+  if (!uid)  throw new HttpsError("invalid-argument", "직원 UID가 필요합니다.");
+  if (!name) throw new HttpsError("invalid-argument", "성명을 입력해 주세요.");
+
+  const empSnap = await db.ref(`users/${uid}`).get();
+  if (!empSnap.exists() || empSnap.val()?.role !== "employee") {
+    throw new HttpsError("not-found", "직원 정보를 찾을 수 없습니다.");
+  }
+  const emp = empSnap.val();
+  assertSameCompany(actor, emp);
+
+  // 선택 지점이 같은 회사 소속인지 확인
+  if (branchId) {
+    const branchSnap = await db.ref(`branches/${branchId}`).get();
+    if (!branchSnap.exists()) throw new HttpsError("invalid-argument", "존재하지 않는 지점입니다.");
+    const branch = branchSnap.val();
+    if (actor.companyId && branch.companyId && actor.companyId !== branch.companyId) {
+      throw new HttpsError("permission-denied", "다른 회사 지점으로 변경할 수 없습니다.");
+    }
+  }
+
+  // hireDate 정규화: 밀리초 timestamp 또는 null
+  let hireDateMs = null;
+  if (hireDate !== null && hireDate !== undefined && hireDate !== "") {
+    const n = Number(hireDate);
+    if (Number.isFinite(n) && n > 0) hireDateMs = n;
+    else if (typeof hireDate === "string" && hireDate.trim()) {
+      const d = Date.parse(hireDate.trim());
+      if (!Number.isNaN(d)) hireDateMs = d;
+    }
+  }
+
+  const updates = {
+    name,
+    position,
+    managementNote,
+    updatedAt: Date.now(),
+    updatedBy: request.auth.uid,
+  };
+  if (hireDateMs !== null) updates.hireDate = hireDateMs;
+  if (branchId) {
+    const branchSnap = await db.ref(`branches/${branchId}`).get();
+    const branch = branchSnap.val() ?? {};
+    updates.branchId   = branchId;
+    updates.branchCode = branch.code ?? emp.branchCode ?? "";
+    updates.branchName = branch.name ?? emp.branchName ?? "";
+  }
+
+  // Auth displayName 업데이트
+  try { await auth.updateUser(uid, { displayName: name }); } catch (e) { /* 무시 */ }
+  await db.ref(`users/${uid}`).update(updates);
+
+  return { uid, message: "직원 정보가 수정되었습니다." };
+});
+
+/**
+ * 선택 직원의 Excel 업로드 이력 초기화 (HQ_ADMIN 전용)
+ * source==="manual_excel" + 해당 교육항목 이력만 삭제
+ */
+exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await ensureHQAdminProfile(request.auth.uid);
+
+  const companyId    = normalizeText(request.data?.companyId ?? "");
+  const branchId     = normalizeText(request.data?.branchId  ?? "");
+  const itemId       = normalizeText(request.data?.itemId    ?? "");
+  const trainingType = normalizeText(request.data?.trainingType ?? "");
+  const subjectCode  = normalizeText(request.data?.subjectCode ?? "");
+  const subjectName  = normalizeText(request.data?.subjectName ?? "");
+  const employeeUids = Array.isArray(request.data?.employeeUids) ? request.data.employeeUids : [];
+
+  if (!employeeUids.length) throw new HttpsError("invalid-argument", "삭제할 직원을 선택해 주세요.");
+  if (employeeUids.length > 200) throw new HttpsError("invalid-argument", "한 번에 최대 200명까지 처리할 수 있습니다.");
+  if (companyId && actor.companyId && companyId !== actor.companyId) {
+    throw new HttpsError("permission-denied", "다른 회사의 이력은 초기화할 수 없습니다.");
+  }
+
+  // 직원 UID가 해당 회사 소속인지 확인 + manualTrainingHistories 조회
+  const [usersSnap, manualSnap] = await Promise.all([
+    db.ref("users").get(),
+    db.ref("manualTrainingHistories").get(),
+  ]);
+  const users  = usersSnap.val()  ?? {};
+  const manual = manualSnap.val() ?? {};
+
+  const uidSet = new Set(employeeUids);
+
+  // 대상 이력 필터
+  const updates = {};
+  let deletedCount = 0;
+
+  for (const [historyId, h] of Object.entries(manual)) {
+    if (!h || !uidSet.has(h.uid)) continue;
+    if (h.source !== "manual_excel")           continue;
+    if (actor.companyId && h.companyId && h.companyId !== actor.companyId) continue;
+
+    // 교육 항목 매칭
+    const htType = normalizeText(h.trainingType).toLowerCase();
+    const targetType = normalizeText(trainingType).toLowerCase();
+    if (htType !== targetType && targetType) continue;
+
+    const matched =
+      (itemId      && h.itemId      === itemId)      ||
+      (subjectCode && h.subjectCode === subjectCode)  ||
+      (subjectName && (h.subjectName === subjectName || h.title === subjectName || h.courseName === subjectName));
+    if (!matched && (itemId || subjectCode || subjectName)) continue;
+
+    updates[`manualTrainingHistories/${historyId}`] = null;
+    updates[`userManualTrainingHistories/${h.uid}/${historyId}`] = null;
+    deletedCount++;
+  }
+
+  if (Object.keys(updates).length) await db.ref().update(updates);
+
+  return {
+    success: true,
+    selectedEmployeeCount: employeeUids.length,
+    deletedHistoryCount: deletedCount,
+  };
+});
+
+/**
+ * 교육 항목별 재교육 주기 저장 (HQ_ADMIN 전용)
+ * 저장 경로: /educationCycleConfigs/{companyId}/{educationKey}
+ */
+exports.saveEducationCycleConfig = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await ensureHQAdminProfile(request.auth.uid);
+
+  const companyId   = normalizeText(request.data?.companyId   ?? actor.companyId ?? "");
+  const itemId      = normalizeText(request.data?.itemId      ?? "");
+  const trainingType = normalizeText(request.data?.trainingType ?? "");
+  const subjectCode = normalizeText(request.data?.subjectCode ?? "");
+  const subjectName = normalizeText(request.data?.subjectName ?? "");
+  const cycleMonths = Number(request.data?.cycleMonths ?? 0);
+
+  if (!companyId) throw new HttpsError("invalid-argument", "companyId가 필요합니다.");
+  if (actor.companyId && companyId !== actor.companyId) {
+    throw new HttpsError("permission-denied", "다른 회사의 설정은 변경할 수 없습니다.");
+  }
+  if (!Number.isInteger(cycleMonths) || cycleMonths < 0 || cycleMonths > 120) {
+    throw new HttpsError("invalid-argument", "재교육 주기는 0~120 사이 정수여야 합니다.");
+  }
+
+  // educationKey 생성
+  let educationKey;
+  if (itemId)       educationKey = `item_${itemId}`;
+  else if (subjectCode) educationKey = `${trainingType}_${subjectCode}`;
+  else              educationKey = `${trainingType}_${subjectName.replace(/\s+/g, "_")}`;
+
+  const record = {
+    companyId,
+    itemId:       itemId || null,
+    trainingType,
+    subjectCode:  subjectCode || null,
+    subjectName:  subjectName || null,
+    cycleMonths,
+    updatedBy:    request.auth.uid,
+    updatedAt:    Date.now(),
+  };
+
+  await db.ref(`educationCycleConfigs/${companyId}/${educationKey}`).set(record);
+
+  // 해당 trainingItem에도 cycleMonths 반영 (itemId 있을 때)
+  if (itemId) {
+    const itemSnap = await db.ref(`trainingItems/${itemId}`).get();
+    if (itemSnap.exists()) {
+      await db.ref(`trainingItems/${itemId}`).update({ cycleMonths, updatedAt: Date.now() });
+    }
+  }
+
+  return { success: true, educationKey, cycleMonths, message: "재교육 주기가 저장되었습니다." };
+});
