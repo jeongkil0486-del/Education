@@ -50,6 +50,7 @@ import {
   unassignFromSession,
   getSessionDetail,
   getItemDetail,
+  buildEmployeeHistoryRowsV2,
 } from "../services/training-service.js";
 import { render as renderHistoryCards } from "./history-cards.js";
 import {
@@ -159,14 +160,15 @@ async function loadAll() {
     S.sessionsByItem       = {};
 
     const details = await Promise.all(items.map((item) => getItemDetail(item.id).catch(() => ({ sessions: [] }))));
-    const branchIds = new Set();
     items.forEach((item, index) => {
-      (item.branchIds ?? []).forEach((id) => branchIds.add(id));
-      const sessions = details[index]?.sessions ?? [];
-      S.sessionsByItem[item.id] = sessions;
-      sessions.forEach((session) => (session.branchIds ?? []).forEach((id) => branchIds.add(id)));
+      S.sessionsByItem[item.id] = details[index]?.sessions ?? [];
     });
-    S.allowedBranchIds = [...branchIds];
+
+    // loadTrainingReferences()가 최신 assignedBranches 기준으로 이미 필터링한
+    // 담당 지점 목록을 강사 교육이력 조회 범위의 단일 기준으로 사용한다.
+    S.allowedBranchIds = (references.branches ?? [])
+      .map((branch) => String(branch.id ?? branch.branchId ?? "").trim())
+      .filter(Boolean);
 
     renderItemStats();
     renderItemsTable();
@@ -193,7 +195,7 @@ function switchTab(tab) {
     const root = document.getElementById("instructor-history-root");
     if (root) {
       if (!S.allowedBranchIds.length) {
-        root.innerHTML = `<div class="empty-state" style="padding:var(--space-16)"><div class="empty-state__title">조회 가능한 지점이 없습니다.</div><div>담당 교육 회차에 직원을 배정하면 해당 지점 직원의 교육이력카드를 조회할 수 있습니다.</div></div>`;
+        root.innerHTML = `<div class="empty-state" style="padding:var(--space-16)"><div class="empty-state__title">조회 가능한 지점이 없습니다.</div><div>담당 지점이 지정되지 않았습니다. 슈퍼관리자에게 담당 지점 설정을 요청하세요.</div></div>`;
       } else {
         renderHistoryCards(root, { allowedBranchIds: S.allowedBranchIds });
       }
@@ -812,6 +814,25 @@ async function openSessionDetailModal(sessionId, itemId) {
     const detail = await getSessionDetail(sessionId);
     if (!detail) { toast.error("회차 정보를 찾을 수 없습니다."); modal.close(); return; }
 
+    if (isSessionWithinDays(detail.session, 30) && detail.assignments.length) {
+      const priorityChecks = await Promise.all(detail.assignments.map(async (assignment) => {
+        try {
+          const { rows } = await buildEmployeeHistoryRowsV2(assignment.uid);
+          const hasPriorSameItem = rows.some((row) =>
+            String(row.itemId ?? "") === String(detail.session.itemId ?? "") &&
+            String(row.sessionId ?? "") !== String(sessionId) &&
+            row.completionStatus === "completed"
+          );
+          return hasPriorSameItem ? assignment.uid : null;
+        } catch {
+          return null;
+        }
+      }));
+      detail.priorityUids = priorityChecks.filter(Boolean);
+    } else {
+      detail.priorityUids = [];
+    }
+
     S.sessionDetail = { sessionId, detail };
     renderSessionDetailBody(detail, itemId);
   } catch (err) {
@@ -826,6 +847,16 @@ function renderSessionDetailBody(detail, itemId) {
   const assignedUids = new Set(assignments.map((a) => a.uid));
   const completedUids = new Set(completions.map((c) => c.uid));
   const employees    = references?.employees ?? [];
+  const priorityMode = isSessionWithinDays(session, 30);
+  const priorityUids = new Set(detail.priorityUids ?? []);
+  const sortedAssignments = [...assignments].sort((a, b) => {
+    if (!priorityMode) return String(a.name ?? "").localeCompare(String(b.name ?? ""), "ko");
+    const aPriority = priorityUids.has(a.uid) && !completedUids.has(a.uid) ? 1 : 0;
+    const bPriority = priorityUids.has(b.uid) && !completedUids.has(b.uid) ? 1 : 0;
+    const aPending = completedUids.has(a.uid) ? 0 : 1;
+    const bPending = completedUids.has(b.uid) ? 0 : 1;
+    return bPriority - aPriority || bPending - aPending || String(a.name ?? "").localeCompare(String(b.name ?? ""), "ko");
+  });
 
   const period = (session.startDate && session.endDate)
     ? `${formatDate(session.startDate)} ~ ${formatDate(session.endDate)}`
@@ -855,15 +886,17 @@ function renderSessionDetailBody(detail, itemId) {
           : `<table class="data-table" style="font-size:var(--text-xs)">
               <thead><tr><th>이름</th><th>사번</th><th>지점</th><th>수료 상태</th><th style="width:80px"></th></tr></thead>
               <tbody>
-                ${assignments.map((a) => `
+                ${sortedAssignments.map((a) => `
                   <tr>
-                    <td>${esc(a.name)}</td>
+                    <td>${esc(a.name)} ${priorityMode && priorityUids.has(a.uid) && !completedUids.has(a.uid) ? `<span class="chip chip--danger" style="margin-left:4px">재교육 임박</span>` : ""}</td>
                     <td style="font-family:monospace">${esc(a.empNo)}</td>
                     <td>${esc(a.branchName)}</td>
                     <td>${completedUids.has(a.uid)
                       ? `<span class="chip chip--success">수료</span>`
                       : `<span class="chip chip--neutral">대기</span>`}</td>
-                    <td class="cell--actions">
+                    <td class="cell--actions" style="white-space:nowrap">
+                      <button class="btn btn--ghost btn--sm btn-employee-history"
+                        data-uid="${a.uid}" title="교육이력 보기" aria-label="${esc(a.name)} 교육이력 보기">＋</button>
                       <button class="btn btn--ghost btn--sm btn-unassign-session"
                         data-uid="${a.uid}" style="color:var(--color-danger)">해제</button>
                     </td>
@@ -938,6 +971,13 @@ function renderSessionDetailBody(detail, itemId) {
     }
   });
 
+  /* 직원별 교육이력 보기 */
+  document.querySelectorAll(".btn-employee-history").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await openEmployeeHistoryOverlay(btn.dataset.uid, session);
+    });
+  });
+
   /* 배정 해제 */
   document.querySelectorAll(".btn-unassign-session").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -953,6 +993,74 @@ function renderSessionDetailBody(detail, itemId) {
       }
     });
   });
+}
+
+function isSessionWithinDays(session, days) {
+  const now = Date.now();
+  const limit = now + days * 24 * 60 * 60 * 1000;
+  return [session?.startDate, session?.deadline]
+    .map(Number)
+    .filter(Number.isFinite)
+    .some((date) => date >= now && date <= limit);
+}
+
+async function openEmployeeHistoryOverlay(uid, session) {
+  const old = document.getElementById("employee-history-overlay");
+  if (old) old.remove();
+
+  const overlay = document.createElement("div");
+  overlay.id = "employee-history-overlay";
+  overlay.style.cssText = "position:fixed;inset:0;z-index:10000;background:rgba(15,23,42,.48);display:flex;align-items:center;justify-content:center;padding:24px";
+  overlay.innerHTML = `
+    <div role="dialog" aria-modal="true" style="background:var(--surface,#fff);width:min(1120px,96vw);max-height:90vh;overflow:auto;border-radius:var(--radius-xl,16px);box-shadow:0 24px 60px rgba(0,0,0,.25)">
+      <div style="position:sticky;top:0;z-index:2;background:var(--surface,#fff);display:flex;align-items:center;justify-content:space-between;padding:var(--space-4);border-bottom:1px solid var(--gray-200)">
+        <div><strong>직원 교육이력</strong><div style="font-size:var(--text-xs);color:var(--gray-500);margin-top:2px">현재 회차: ${esc(session?.title ?? "–")}</div></div>
+        <button class="btn btn--ghost btn--sm" id="employee-history-close">✕</button>
+      </div>
+      <div id="employee-history-content" style="padding:var(--space-5)">
+        <div style="display:flex;justify-content:center;padding:var(--space-10)"><div class="splash__spinner" style="border-color:var(--gray-200);border-top-color:var(--brand-400)"></div></div>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  const close = () => overlay.remove();
+  overlay.querySelector("#employee-history-close")?.addEventListener("click", close);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+
+  try {
+    const { employee, rows } = await buildEmployeeHistoryRowsV2(uid);
+    const content = overlay.querySelector("#employee-history-content");
+    const sameItemRows = rows.filter((row) => String(row.itemId ?? "") === String(session?.itemId ?? ""));
+    const lastSameCompletion = sameItemRows
+      .filter((row) => row.completedAt)
+      .sort((a, b) => Number(b.completedAt) - Number(a.completedAt))[0];
+    const priority = isSessionWithinDays(session, 30) && !sameItemRows.some((row) => String(row.sessionId ?? "") === String(session?.id ?? "") && row.completionStatus === "completed");
+
+    content.innerHTML = `
+      <div style="display:flex;gap:var(--space-3);align-items:flex-start;justify-content:space-between;flex-wrap:wrap;margin-bottom:var(--space-4)">
+        <div>
+          <div style="font-size:var(--text-lg);font-weight:var(--weight-semibold)">${esc(employee?.name ?? "–")} <span style="font-size:var(--text-sm);font-weight:normal;color:var(--gray-500)">(${esc(employee?.empNo ?? "–")})</span></div>
+          <div style="font-size:var(--text-sm);color:var(--gray-500);margin-top:4px">${esc(employee?.branchName ?? "–")} · ${esc(employee?.position ?? "–")}</div>
+        </div>
+        ${priority ? `<span class="chip chip--danger">재교육 확인 우선</span>` : ""}
+      </div>
+      <div class="dashboard-grid dashboard-grid--compact" style="margin-bottom:var(--space-4)">
+        <div class="stat-card"><div class="stat-card__label">전체 교육</div><div class="stat-card__value">${rows.length}</div></div>
+        <div class="stat-card"><div class="stat-card__label">수료</div><div class="stat-card__value">${rows.filter((r) => r.completionStatus === "completed").length}</div></div>
+        <div class="stat-card"><div class="stat-card__label">동일 교육 최근 수료</div><div class="stat-card__value" style="font-size:var(--text-base)">${lastSameCompletion?.completedAt ? formatDate(lastSameCompletion.completedAt) : "–"}</div></div>
+      </div>
+      ${rows.length ? `<div class="table-wrap"><table class="data-table" style="font-size:var(--text-xs)">
+        <thead><tr><th>교육과정명</th><th>유형</th><th>교육기간</th><th>수료일</th><th>결과</th><th>비고</th></tr></thead>
+        <tbody>${rows.map((row) => {
+          const period = row.startDate && row.endDate ? `${formatDate(row.startDate)} ~ ${formatDate(row.endDate)}` : (row.startDate ? formatDate(row.startDate) : "–");
+          return `<tr><td>${esc(row.title ?? "–")}</td><td>${esc(row.typeLabel ?? row.trainingType ?? "–")}</td><td style="white-space:nowrap">${period}</td><td style="white-space:nowrap">${row.completedAt ? formatDate(row.completedAt) : "–"}</td><td>${row.completionStatus === "completed" ? "PASS" : "–"}</td><td>${esc(row.note || "–")}</td></tr>`;
+        }).join("")}</tbody>
+      </table></div>` : `<div class="empty-state" style="padding:var(--space-10)"><div class="empty-state__title">교육 이력이 없습니다.</div></div>`}`;
+  } catch (err) {
+    console.error("[instructor-trainings] employee history failed", err);
+    const content = overlay.querySelector("#employee-history-content");
+    if (content) content.innerHTML = `<div class="empty-state" style="padding:var(--space-10)"><div class="empty-state__title">교육 이력을 불러오지 못했습니다.</div></div>`;
+  }
 }
 
 /* ──────────────────────────────────────────────────────────
