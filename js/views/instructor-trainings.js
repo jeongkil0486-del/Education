@@ -1,10 +1,26 @@
-import { modal } from "../utils/modal.js";
-import { toast } from "../utils/toast.js";
+/**
+ * instructor-trainings.js — 강사 교육 관리 화면 (Step 2)
+ *
+ * 탭 구조
+ *   [교육 항목]  — 신규: trainingItems / trainingSessions 기반
+ *   [기존 교육]  — 레거시: trainings 기반 (기존 데이터 유지)
+ *
+ * 신규 흐름
+ *   1. 교육 항목 등록/관리
+ *   2. 항목 행 클릭 → 해당 항목의 회차 목록 인라인 전개
+ *   3. 회차 추가 → 교육일자, 수료기한, 지점
+ *   4. 회차 상세 → 배정 직원 관리
+ *   5. 회차 완료 → 직원 교육이력카드 PASS 생성
+ */
+
+import { modal }     from "../utils/modal.js";
+import { toast }     from "../utils/toast.js";
 import { formatDate } from "../utils/date.js";
-import { router } from "../core/router.js";
+import { router }    from "../core/router.js";
 import { authStore } from "../core/auth.js";
 import { settingsDB } from "../core/db.js";
 import {
+  /* 기존 trainings 관련 */
   TRAINING_STATUS_LABELS,
   TRAINING_TYPES,
   TRAINING_TYPE_LABELS,
@@ -16,6 +32,24 @@ import {
   listInstructorTrainings,
   loadTrainingReferences,
   saveTraining,
+  /* 신규 Item / Session 관련 */
+  ITEM_SUB_TYPE_LABELS,
+  SESSION_STATUS_LABELS,
+  buildSessionStatusChip,
+  createTrainingItem,
+  updateTrainingItem,
+  deleteTrainingItem,
+  listInstructorItems,
+  enrichItemRecord,
+  createTrainingSession,
+  updateTrainingSession,
+  closeSession,
+  completeSession,
+  deleteSession,
+  assignEmployeesToSession,
+  unassignFromSession,
+  getSessionDetail,
+  getItemDetail,
 } from "../services/training-service.js";
 import {
   bucketIncludesTraining,
@@ -23,107 +57,935 @@ import {
   normalizeNotificationSettings,
 } from "../services/notification-settings-service.js";
 
+/* ──────────────────────────────────────────────────────────
+   State
+────────────────────────────────────────────────────────── */
+let activeTab       = "items";   // "items" | "legacy"
 let activeStatFilter = null;
-let state = {
-  references: null,
-  trainings: [],
+let expandedItemId  = null;      // 현재 회차 패널이 열린 항목 ID
+
+let S = {
+  /* 공통 */
+  references:          null,
   notificationSettings: null,
+  /* 신규 */
+  items:               [],       // enrichItemRecord 처리된 교육 항목 배열
+  sessionsByItem:      {},       // { [itemId]: session[] }
+  sessionDetail:       null,     // 현재 열린 회차 상세 { sessionId, detail }
+  /* 레거시 */
+  trainings:           [],
 };
 
+/* ──────────────────────────────────────────────────────────
+   진입점
+────────────────────────────────────────────────────────── */
 export async function render(container) {
   container.innerHTML = `
     <div class="section-header">
       <div>
         <div class="section-title">교육 관리</div>
-        <div class="section-subtitle">내가 등록했거나 담당 중인 교육을 관리합니다.</div>
+        <div class="section-subtitle">교육 항목을 등록하고 회차별로 운영합니다.</div>
       </div>
-      <button class="btn btn--primary" id="btn-create-training">
-        <svg class="btn__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
-          <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-        </svg>
-        교육 등록
-      </button>
+      <div style="display:flex;gap:var(--space-2)" id="header-actions">
+        <button class="btn btn--primary" id="btn-new-item">
+          <svg class="btn__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          교육 항목 추가
+        </button>
+      </div>
     </div>
 
-    <div class="dashboard-grid dashboard-grid--compact" id="training-stats" style="margin-bottom:var(--space-5)"></div>
+    <!-- 탭 -->
+    <div style="display:flex;gap:0;border-bottom:2px solid var(--gray-200);margin-bottom:var(--space-5)">
+      <button class="tab-btn active" id="tab-items"  style="padding:var(--space-3) var(--space-5);font-size:var(--text-sm)">교육 항목</button>
+      <button class="tab-btn"        id="tab-legacy" style="padding:var(--space-3) var(--space-5);font-size:var(--text-sm)">기존 교육</button>
+    </div>
 
-    <div class="card" style="margin-bottom:var(--space-5)">
-      <div class="card__body card__body--compact">
-        <div class="filter-bar" style="margin-bottom:var(--space-3)">
-          <div class="filter-bar__search input-group" style="flex:1;min-width:220px">
+    <!-- 신규: 교육 항목 탭 -->
+    <div id="pane-items">
+      <div class="dashboard-grid dashboard-grid--compact" id="item-stats" style="margin-bottom:var(--space-5)"></div>
+      <div class="card" style="margin-bottom:var(--space-4)">
+        <div class="card__body card__body--compact">
+          <div class="input-group">
             <svg class="input-group__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
               <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.25"/>
               <path d="M11 11l3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
             </svg>
-            <input class="form-control" id="search-trainings" type="search" placeholder="교육명으로 검색" />
+            <input class="form-control" id="search-items" type="search" placeholder="교육 항목명으로 검색" />
           </div>
         </div>
-        <div style="display:flex;gap:var(--space-3);flex-wrap:wrap">
-          <select class="form-control" id="filter-status" style="flex:1;min-width:120px">
-            <option value="">전체 상태</option>
-            ${Object.entries(TRAINING_STATUS_LABELS).map(([key, value]) => `<option value="${key}">${value}</option>`).join("")}
-          </select>
-          <select class="form-control" id="filter-type" style="flex:1;min-width:120px">
-            <option value="">전체 유형</option>
-            ${TRAINING_TYPES.map((type) => `<option value="${type}">${TRAINING_TYPE_LABELS[type]}</option>`).join("")}
-          </select>
-          <select class="form-control" id="filter-branch" style="flex:1;min-width:140px">
-            <option value="">전체 지점</option>
-          </select>
+      </div>
+      <div id="items-body">
+        <div style="display:flex;align-items:center;justify-content:center;padding:var(--space-16)">
+          <div class="splash__spinner" style="border-color:var(--gray-200);border-top-color:var(--brand-400)"></div>
         </div>
       </div>
     </div>
 
-    <div class="table-wrap" id="trainings-table-wrap">
-      <div style="display:flex;align-items:center;justify-content:center;padding:var(--space-12)">
-        <div class="splash__spinner" style="border-color:var(--gray-200);border-top-color:var(--brand-400)"></div>
+    <!-- 레거시: 기존 교육 탭 -->
+    <div id="pane-legacy" style="display:none">
+      <div class="dashboard-grid dashboard-grid--compact" id="training-stats" style="margin-bottom:var(--space-5)"></div>
+      <div class="card" style="margin-bottom:var(--space-5)">
+        <div class="card__body card__body--compact">
+          <div class="filter-bar" style="margin-bottom:var(--space-3)">
+            <div class="filter-bar__search input-group" style="flex:1;min-width:220px">
+              <svg class="input-group__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.25"/>
+                <path d="M11 11l3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+              </svg>
+              <input class="form-control" id="search-trainings" type="search" placeholder="교육명으로 검색" />
+            </div>
+          </div>
+          <div style="display:flex;gap:var(--space-3);flex-wrap:wrap">
+            <select class="form-control" id="filter-status" style="flex:1;min-width:120px">
+              <option value="">전체 상태</option>
+              ${Object.entries(TRAINING_STATUS_LABELS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}
+            </select>
+            <select class="form-control" id="filter-type" style="flex:1;min-width:120px">
+              <option value="">전체 유형</option>
+              ${TRAINING_TYPES.map((t) => `<option value="${t}">${TRAINING_TYPE_LABELS[t]}</option>`).join("")}
+            </select>
+            <select class="form-control" id="filter-branch" style="flex:1;min-width:140px">
+              <option value="">전체 지점</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div style="margin-bottom:var(--space-4)">
+        <button class="btn btn--secondary btn--sm" id="btn-create-legacy">+ 기존 방식으로 교육 등록</button>
+      </div>
+      <div class="table-wrap" id="trainings-table-wrap">
+        <div style="display:flex;align-items:center;justify-content:center;padding:var(--space-12)">
+          <div class="splash__spinner" style="border-color:var(--gray-200);border-top-color:var(--brand-400)"></div>
+        </div>
       </div>
     </div>
   `;
 
-  document.getElementById("btn-create-training")?.addEventListener("click", () => openTrainingModal());
-  document.getElementById("search-trainings")?.addEventListener("input", () => renderTrainingTable());
-  document.getElementById("filter-status")?.addEventListener("change", () => renderTrainingTable());
-  document.getElementById("filter-type")?.addEventListener("change", () => renderTrainingTable());
-  document.getElementById("filter-branch")?.addEventListener("change", () => renderTrainingTable());
+  /* 탭 이벤트 */
+  document.getElementById("tab-items")?.addEventListener("click",  () => switchTab("items"));
+  document.getElementById("tab-legacy")?.addEventListener("click", () => switchTab("legacy"));
 
-  await loadViewData();
+  /* 신규 항목 이벤트 */
+  document.getElementById("btn-new-item")?.addEventListener("click",   () => openItemModal());
+  document.getElementById("search-items")?.addEventListener("input",   () => renderItemsTable());
+
+  /* 레거시 이벤트 */
+  document.getElementById("btn-create-legacy")?.addEventListener("click", () => openTrainingModal());
+  document.getElementById("search-trainings")?.addEventListener("input",  () => renderTrainingTable());
+  document.getElementById("filter-status")?.addEventListener("change",    () => renderTrainingTable());
+  document.getElementById("filter-type")?.addEventListener("change",      () => renderTrainingTable());
+  document.getElementById("filter-branch")?.addEventListener("change",    () => renderTrainingTable());
+
+  await loadAll();
 }
 
-async function loadViewData() {
+/* ──────────────────────────────────────────────────────────
+   데이터 로드
+────────────────────────────────────────────────────────── */
+async function loadAll() {
   try {
-    const [references, trainings, notifications] = await Promise.all([
+    const [references, items, trainings, notifications] = await Promise.all([
       loadTrainingReferences(),
+      listInstructorItems(),
       listInstructorTrainings(),
       settingsDB.getNotifications().catch(() => null),
     ]);
 
-    state = {
-      references,
-      trainings,
-      notificationSettings: normalizeNotificationSettings(notifications ?? {}),
-    };
-    if (!getVisibleDeadlineBuckets(state.notificationSettings).some((bucket) => bucket.key === activeStatFilter)) {
+    S.references           = references;
+    S.items                = items;
+    S.trainings            = trainings;
+    S.notificationSettings = normalizeNotificationSettings(notifications ?? {});
+    S.sessionsByItem       = {};  // 회차는 항목 클릭 시 lazy load
+
+    if (!getVisibleDeadlineBuckets(S.notificationSettings).some((b) => b.key === activeStatFilter)) {
       activeStatFilter = null;
     }
 
     renderBranchFilter();
+    renderItemStats();
+    renderItemsTable();
     renderTrainingStats();
     renderTrainingTable();
-  } catch (error) {
-    console.error("[instructor-trainings] load failed", error);
-    toast.error("교육 데이터를 불러오지 못했습니다.");
+  } catch (err) {
+    console.error("[instructor-trainings] loadAll failed", err);
+    toast.error("데이터를 불러오지 못했습니다.");
   }
 }
+
+/* ──────────────────────────────────────────────────────────
+   탭 전환
+────────────────────────────────────────────────────────── */
+function switchTab(tab) {
+  activeTab = tab;
+  document.getElementById("pane-items").style.display  = tab === "items"  ? "" : "none";
+  document.getElementById("pane-legacy").style.display = tab === "legacy" ? "" : "none";
+  document.getElementById("tab-items").classList.toggle("active",  tab === "items");
+  document.getElementById("tab-legacy").classList.toggle("active", tab === "legacy");
+
+  const headerBtn = document.getElementById("btn-new-item");
+  if (headerBtn) headerBtn.style.display = tab === "items" ? "" : "none";
+}
+
+/* ══════════════════════════════════════════════════════════
+   ★ 신규: 교육 항목 탭
+══════════════════════════════════════════════════════════ */
+
+function renderItemStats() {
+  const wrap = document.getElementById("item-stats");
+  if (!wrap) return;
+
+  const items    = S.items;
+  const total    = items.length;
+  const active   = items.filter((i) => {
+    const sessions = S.sessionsByItem[i.id] ?? [];
+    return sessions.some((s) => s.computedStatus === "in_progress");
+  }).length;
+  const completed = items.filter((i) => {
+    const sessions = S.sessionsByItem[i.id] ?? [];
+    return sessions.some((s) => s.computedStatus === "completed");
+  }).length;
+
+  wrap.innerHTML = [
+    { label: "교육 항목 수",   value: total,     tone: "" },
+    { label: "진행중 회차",    value: active,    tone: "success" },
+    { label: "완료된 회차",    value: completed, tone: "" },
+  ].map(({ label, value, tone }) => `
+    <div class="stat-card">
+      <div class="stat-card__label">${label}</div>
+      <div class="stat-card__value ${tone ? `stat-card__value--${tone}` : ""}">${value}</div>
+    </div>`).join("");
+}
+
+/* 항목 테이블 렌더링 */
+function renderItemsTable() {
+  const body   = document.getElementById("items-body");
+  if (!body) return;
+
+  const search = (document.getElementById("search-items")?.value ?? "").trim().toLowerCase();
+  const items  = S.items.filter((i) =>
+    !search || String(i.title ?? "").toLowerCase().includes(search)
+  );
+
+  if (!items.length) {
+    body.innerHTML = `
+      <div class="empty-state" style="padding:var(--space-16)">
+        <div class="empty-state__title">등록된 교육 항목이 없습니다.</div>
+        <div style="margin-top:var(--space-3)">
+          <button class="btn btn--primary btn--sm" id="btn-empty-new-item">교육 항목 추가</button>
+        </div>
+      </div>`;
+    body.querySelector("#btn-empty-new-item")?.addEventListener("click", () => openItemModal());
+    return;
+  }
+
+  body.innerHTML = `
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>교육 항목명</th>
+            <th>교육유형</th>
+            <th>초기/보수</th>
+            <th>기본 교육시간</th>
+            <th>비고</th>
+            <th style="width:140px"></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${items.map((item) => itemRow(item)).join("")}
+        </tbody>
+      </table>
+    </div>`;
+
+  /* 행 클릭 → 회차 패널 토글 */
+  body.querySelectorAll("tr[data-item-id]").forEach((row) => {
+    row.addEventListener("click", (e) => {
+      if (e.target.closest(".cell--actions")) return;
+      toggleSessionPanel(row.dataset.itemId);
+    });
+  });
+
+  body.querySelectorAll(".btn-item-edit").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const item = S.items.find((i) => i.id === btn.dataset.id);
+      if (item) openItemModal(item);
+    });
+  });
+  body.querySelectorAll(".btn-item-delete").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      confirmDeleteItem(btn.dataset.id);
+    });
+  });
+  body.querySelectorAll(".btn-add-session").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const item = S.items.find((i) => i.id === btn.dataset.id);
+      if (item) openSessionModal(item);
+    });
+  });
+
+  /* 이미 열려있던 패널 복원 */
+  if (expandedItemId && S.items.find((i) => i.id === expandedItemId)) {
+    renderSessionPanel(expandedItemId);
+  }
+}
+
+function itemRow(item) {
+  const isExpanded = expandedItemId === item.id;
+  return `
+    <tr data-item-id="${item.id}" style="cursor:pointer;${isExpanded ? "background:var(--brand-50,#eff6ff)" : ""}">
+      <td>
+        <div style="display:flex;align-items:center;gap:var(--space-2)">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="color:var(--gray-400);flex-shrink:0;transition:transform .2s;${isExpanded ? "transform:rotate(90deg)" : ""}">
+            <path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <span style="font-weight:var(--weight-semibold)">${esc(item.title)}</span>
+        </div>
+      </td>
+      <td>${esc(item.typeLabel)}</td>
+      <td>${esc(item.subTypeLabel || "–")}</td>
+      <td>${item.defaultHours ? `${item.defaultHours}시간` : "–"}</td>
+      <td style="color:var(--gray-400);font-size:var(--text-xs)">${esc(item.note || "–")}</td>
+      <td class="cell--actions">
+        <div style="display:flex;gap:4px;justify-content:flex-end">
+          <button class="btn btn--ghost btn--sm btn-add-session"  data-id="${item.id}" title="회차 추가">회차 추가</button>
+          <button class="btn btn--ghost btn--sm btn-item-edit"    data-id="${item.id}" title="수정">수정</button>
+          <button class="btn btn--ghost btn--sm btn-item-delete"  data-id="${item.id}" title="삭제" style="color:var(--color-danger)">삭제</button>
+        </div>
+      </td>
+    </tr>
+    <tr id="session-panel-${item.id}" style="${isExpanded ? "" : "display:none"}">
+      <td colspan="6" style="padding:0;background:var(--gray-50)">
+        <div id="session-panel-body-${item.id}" style="padding:var(--space-4)">
+          <div style="color:var(--gray-400);font-size:var(--text-sm);padding:var(--space-4)">불러오는 중…</div>
+        </div>
+      </td>
+    </tr>`;
+}
+
+/* ──────────────────────────────────────────────────────────
+   회차 패널 (항목 행 아래 인라인 전개)
+────────────────────────────────────────────────────────── */
+async function toggleSessionPanel(itemId) {
+  if (expandedItemId === itemId) {
+    /* 닫기 */
+    expandedItemId = null;
+    renderItemsTable();
+    return;
+  }
+  expandedItemId = itemId;
+  renderItemsTable();           // 열기 (패널 행은 "불러오는 중…" 상태)
+  await loadAndRenderSessions(itemId);
+}
+
+async function loadAndRenderSessions(itemId) {
+  try {
+    const detail = await getItemDetail(itemId);
+    S.sessionsByItem[itemId] = detail?.sessions ?? [];
+    renderSessionPanel(itemId);
+    renderItemStats();
+  } catch (err) {
+    console.error("[instructor-trainings] loadSessions failed", err);
+    const panelBody = document.getElementById(`session-panel-body-${itemId}`);
+    if (panelBody) panelBody.innerHTML = `<div style="color:var(--color-danger);font-size:var(--text-sm)">회차 데이터를 불러오지 못했습니다.</div>`;
+  }
+}
+
+function renderSessionPanel(itemId) {
+  const panelBody = document.getElementById(`session-panel-body-${itemId}`);
+  if (!panelBody) return;
+
+  const sessions = S.sessionsByItem[itemId] ?? [];
+  const item     = S.items.find((i) => i.id === itemId);
+
+  panelBody.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--space-3)">
+      <div style="font-size:var(--text-sm);font-weight:var(--weight-semibold);color:var(--gray-700)">
+        회차 목록 <span style="font-weight:normal;color:var(--gray-400)">(${sessions.length}건)</span>
+      </div>
+      <button class="btn btn--primary btn--sm btn-add-session-inner" data-id="${itemId}">+ 회차 추가</button>
+    </div>
+    ${sessions.length === 0
+      ? `<div style="padding:var(--space-6);text-align:center;color:var(--gray-400);font-size:var(--text-sm)">등록된 회차가 없습니다. 회차를 추가해 주세요.</div>`
+      : `<table class="data-table" style="font-size:var(--text-xs)">
+          <thead>
+            <tr>
+              <th>교육기간</th>
+              <th>수료기한</th>
+              <th>지점</th>
+              <th>상태</th>
+              <th style="width:190px"></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${sessions.map((s) => sessionRow(s, item)).join("")}
+          </tbody>
+        </table>`
+    }`;
+
+  panelBody.querySelector(".btn-add-session-inner")?.addEventListener("click", () => {
+    if (item) openSessionModal(item);
+  });
+
+  panelBody.querySelectorAll(".btn-session-detail").forEach((btn) => {
+    btn.addEventListener("click", () => openSessionDetailModal(btn.dataset.sid, btn.dataset.iid));
+  });
+  panelBody.querySelectorAll(".btn-session-edit").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const s = (S.sessionsByItem[itemId] ?? []).find((x) => x.id === btn.dataset.sid);
+      const i = S.items.find((x) => x.id === itemId);
+      if (s && i) openSessionModal(i, s);
+    });
+  });
+  panelBody.querySelectorAll(".btn-session-complete").forEach((btn) => {
+    btn.addEventListener("click", () => confirmCompleteSession(btn.dataset.sid, itemId));
+  });
+  panelBody.querySelectorAll(".btn-session-close").forEach((btn) => {
+    btn.addEventListener("click", () => confirmCloseSession(btn.dataset.sid, itemId));
+  });
+  panelBody.querySelectorAll(".btn-session-delete").forEach((btn) => {
+    btn.addEventListener("click", () => confirmDeleteSession(btn.dataset.sid, itemId));
+  });
+}
+
+function sessionRow(s, item) {
+  const period   = (s.startDate && s.endDate)
+    ? `${formatDate(s.startDate)} ~ ${formatDate(s.endDate)}`
+    : "–";
+  const branches = s.branchNames?.length ? s.branchNames.join(", ") : "전체 지점";
+  const isDone   = s.computedStatus === "completed";
+  const isClosed = s.computedStatus === "closed";
+
+  return `
+    <tr>
+      <td style="white-space:nowrap">${period}</td>
+      <td style="white-space:nowrap">${formatDate(s.deadline)}</td>
+      <td>${esc(branches)}</td>
+      <td>${buildSessionStatusChip(s.computedStatus)}</td>
+      <td class="cell--actions">
+        <div style="display:flex;gap:4px;justify-content:flex-end">
+          <button class="btn btn--ghost btn--sm btn-session-detail"
+            data-sid="${s.id}" data-iid="${item?.id ?? ""}" title="배정 관리">배정</button>
+          ${!isDone && !isClosed
+            ? `<button class="btn btn--ghost btn--sm btn-session-complete"
+                data-sid="${s.id}" style="color:var(--color-success,#16a34a)" title="완료 처리">완료</button>`
+            : ""}
+          ${!isClosed && !isDone
+            ? `<button class="btn btn--ghost btn--sm btn-session-close"
+                data-sid="${s.id}" title="종료 처리">종료</button>`
+            : ""}
+          <button class="btn btn--ghost btn--sm btn-session-edit"
+            data-sid="${s.id}" title="수정">수정</button>
+          <button class="btn btn--ghost btn--sm btn-session-delete"
+            data-sid="${s.id}" style="color:var(--color-danger)" title="삭제">삭제</button>
+        </div>
+      </td>
+    </tr>`;
+}
+
+/* ──────────────────────────────────────────────────────────
+   교육 항목 모달 (등록/수정)
+────────────────────────────────────────────────────────── */
+function openItemModal(item = null) {
+  const label = item ? "수정" : "등록";
+  const refs  = S.references;
+
+  modal.open({
+    title: item ? "교육 항목 수정" : "교육 항목 등록",
+    size: "lg",
+    body: `
+      <div style="display:flex;flex-direction:column;gap:var(--space-5)">
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label form-label--required">교육 항목명</label>
+            <input class="form-control" id="it-title" type="text"
+              value="${escAttr(item?.title ?? "")}" placeholder="예: 신입직원 직무교육" />
+          </div>
+          <div class="form-group">
+            <label class="form-label form-label--required">교육유형</label>
+            <select class="form-control" id="it-type">
+              ${TRAINING_TYPES.map((t) => `
+                <option value="${t}" ${item?.trainingType === t ? "selected" : ""}>${TRAINING_TYPE_LABELS[t]}</option>
+              `).join("")}
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">초기/보수</label>
+            <select class="form-control" id="it-subtype">
+              <option value="">구분 없음</option>
+              <option value="initial"   ${item?.subType === "initial"   ? "selected" : ""}>초기</option>
+              <option value="recurring" ${item?.subType === "recurring" ? "selected" : ""}>보수</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">기본 교육시간 (시간)</label>
+            <input class="form-control" id="it-hours" type="number" min="0" step="0.5"
+              value="${item?.defaultHours ?? ""}" placeholder="예: 8" />
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">담당 강사</label>
+          <input class="form-control" type="text" value="${escAttr(authStore.name)}" disabled />
+          <div class="form-hint">현재 로그인 계정이 담당 강사로 저장됩니다.</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">비고</label>
+          <textarea class="form-control" id="it-note" rows="2"
+            placeholder="교육 항목에 대한 메모">${esc(item?.note ?? "")}</textarea>
+        </div>
+      </div>`,
+    actions: [
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      {
+        label,
+        variant: "primary",
+        onClick: async () => {
+          const title    = document.getElementById("it-title")?.value?.trim();
+          const trainType = document.getElementById("it-type")?.value;
+          const subType  = document.getElementById("it-subtype")?.value;
+          const hours    = parseFloat(document.getElementById("it-hours")?.value ?? "") || 0;
+          const note     = document.getElementById("it-note")?.value?.trim() ?? "";
+
+          if (!title) { toast.error("교육 항목명을 입력해 주세요."); return; }
+          if (!trainType) { toast.error("교육유형을 선택해 주세요."); return; }
+
+          modal.setLoading(label, true);
+          try {
+            const values = {
+              title, trainingType: trainType, subType, defaultHours: hours, note,
+              instructorId: authStore.uid, instructorName: authStore.name,
+              companyId: S.references?.company?.id, companyName: S.references?.company?.name,
+            };
+            if (item) {
+              await updateTrainingItem(item.id, values);
+              toast.success("교육 항목을 수정했습니다.");
+            } else {
+              await createTrainingItem(values);
+              toast.success("교육 항목을 등록했습니다.");
+            }
+            modal.close();
+            await loadAll();
+          } catch (err) {
+            console.error("[instructor-trainings] item save failed", err);
+            toast.error("저장 중 오류가 발생했습니다.");
+            modal.setLoading(label, false);
+          }
+        },
+      },
+    ],
+  });
+}
+
+/* ──────────────────────────────────────────────────────────
+   회차 모달 (등록/수정)
+────────────────────────────────────────────────────────── */
+function openSessionModal(item, session = null) {
+  const label    = session ? "수정" : "추가";
+  const refs     = S.references;
+  const branchIds = session?.branchIds ?? [];
+
+  modal.open({
+    title: session ? "회차 수정" : `회차 추가 — ${esc(item.title)}`,
+    size: "lg",
+    body: `
+      <div style="display:flex;flex-direction:column;gap:var(--space-5)">
+        <div class="form-row form-row--3">
+          <div class="form-group">
+            <label class="form-label form-label--required">교육 시작일</label>
+            <input class="form-control" id="ss-start" type="date" value="${toDateInput(session?.startDate)}" />
+          </div>
+          <div class="form-group">
+            <label class="form-label form-label--required">교육 종료일</label>
+            <input class="form-control" id="ss-end" type="date" value="${toDateInput(session?.endDate)}" />
+          </div>
+          <div class="form-group">
+            <label class="form-label form-label--required">수료기한</label>
+            <input class="form-control" id="ss-deadline" type="date" value="${toDateInput(session?.deadline)}" />
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">대상 지점</label>
+          <div class="selection-grid">
+            ${(refs?.branches ?? []).map((b) => `
+              <label class="selection-chip">
+                <input type="checkbox" class="branch-selector" value="${b.id}"
+                  ${branchIds.includes(b.id) ? "checked" : ""} />
+                <span>${esc(b.name ?? b.code ?? b.id)}</span>
+              </label>`).join("")}
+          </div>
+          <div class="form-hint">선택하지 않으면 전체 지점 회차로 저장됩니다.</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">비고</label>
+          <input class="form-control" id="ss-note" type="text"
+            value="${escAttr(session?.note ?? "")}" placeholder="회차별 메모" />
+        </div>
+      </div>`,
+    actions: [
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      {
+        label,
+        variant: "primary",
+        onClick: async () => {
+          const startDate = readDate("ss-start");
+          const endDate   = readDate("ss-end");
+          const deadline  = readDate("ss-deadline");
+          const branchIds = Array.from(document.querySelectorAll(".branch-selector:checked")).map((c) => c.value);
+          const note      = document.getElementById("ss-note")?.value?.trim() ?? "";
+
+          if (!startDate || !endDate || !deadline) { toast.error("교육기간과 수료기한을 모두 입력해 주세요."); return; }
+          if (endDate < startDate) { toast.error("종료일은 시작일 이후여야 합니다."); return; }
+          if (deadline < endDate)  { toast.error("수료기한은 종료일과 같거나 이후여야 합니다."); return; }
+
+          const branchNames = branchIds.map((bid) =>
+            (refs?.branches ?? []).find((b) => b.id === bid)?.name ?? bid
+          );
+
+          modal.setLoading(label, true);
+          try {
+            if (session) {
+              await updateTrainingSession(session.id, { startDate, endDate, deadline, branchIds, branchNames, note });
+              toast.success("회차를 수정했습니다.");
+            } else {
+              await createTrainingSession(item, {
+                startDate, endDate, deadline, branchIds, branchNames, note,
+                companyId: S.references?.company?.id,
+                companyName: S.references?.company?.name,
+              });
+              toast.success("회차를 추가했습니다.");
+            }
+            modal.close();
+            /* 해당 항목 패널만 리로드 */
+            await loadAndRenderSessions(item.id);
+          } catch (err) {
+            console.error("[instructor-trainings] session save failed", err);
+            toast.error("저장 중 오류가 발생했습니다.");
+            modal.setLoading(label, false);
+          }
+        },
+      },
+    ],
+  });
+}
+
+/* ──────────────────────────────────────────────────────────
+   회차 배정 모달 (배정 관리)
+────────────────────────────────────────────────────────── */
+async function openSessionDetailModal(sessionId, itemId) {
+  /* 로딩 표시 */
+  modal.open({
+    title: "배정 관리",
+    size: "lg",
+    body: `<div style="display:flex;justify-content:center;padding:var(--space-10)">
+      <div class="splash__spinner" style="border-color:var(--gray-200);border-top-color:var(--brand-400)"></div>
+    </div>`,
+    actions: [{ label: "닫기", variant: "secondary", onClick: () => modal.close() }],
+  });
+
+  try {
+    const detail = await getSessionDetail(sessionId);
+    if (!detail) { toast.error("회차 정보를 찾을 수 없습니다."); modal.close(); return; }
+
+    S.sessionDetail = { sessionId, detail };
+    renderSessionDetailBody(detail, itemId);
+  } catch (err) {
+    console.error("[instructor-trainings] session detail failed", err);
+    toast.error("회차 정보를 불러오지 못했습니다.");
+    modal.close();
+  }
+}
+
+function renderSessionDetailBody(detail, itemId) {
+  const { session, assignments, completions, references } = detail;
+  const assignedUids = new Set(assignments.map((a) => a.uid));
+  const completedUids = new Set(completions.map((c) => c.uid));
+  const employees    = references?.employees ?? [];
+
+  const period = (session.startDate && session.endDate)
+    ? `${formatDate(session.startDate)} ~ ${formatDate(session.endDate)}`
+    : "–";
+
+  /* 배정 가능한 직원 목록 */
+  const candidates = employees.filter((e) => {
+    const uid = e.id ?? e.uid;
+    return !assignedUids.has(uid);
+  });
+
+  const body = `
+    <div style="display:flex;flex-direction:column;gap:var(--space-5)">
+      <div style="display:flex;gap:var(--space-4);flex-wrap:wrap;font-size:var(--text-sm);color:var(--gray-600)">
+        <span>교육기간: <strong>${period}</strong></span>
+        <span>수료기한: <strong>${formatDate(session.deadline)}</strong></span>
+        <span>상태: ${buildSessionStatusChip(session.computedStatus)}</span>
+      </div>
+
+      <!-- 배정 현황 -->
+      <div>
+        <div style="font-weight:var(--weight-semibold);font-size:var(--text-sm);margin-bottom:var(--space-2)">
+          배정 현황 (${assignments.length}명)
+        </div>
+        ${assignments.length === 0
+          ? `<div style="color:var(--gray-400);font-size:var(--text-sm)">배정된 직원이 없습니다.</div>`
+          : `<table class="data-table" style="font-size:var(--text-xs)">
+              <thead><tr><th>이름</th><th>사번</th><th>지점</th><th>수료 상태</th><th style="width:80px"></th></tr></thead>
+              <tbody>
+                ${assignments.map((a) => `
+                  <tr>
+                    <td>${esc(a.name)}</td>
+                    <td style="font-family:monospace">${esc(a.empNo)}</td>
+                    <td>${esc(a.branchName)}</td>
+                    <td>${completedUids.has(a.uid)
+                      ? `<span class="chip chip--success">수료</span>`
+                      : `<span class="chip chip--neutral">대기</span>`}</td>
+                    <td class="cell--actions">
+                      <button class="btn btn--ghost btn--sm btn-unassign-session"
+                        data-uid="${a.uid}" style="color:var(--color-danger)">해제</button>
+                    </td>
+                  </tr>`).join("")}
+              </tbody>
+            </table>`
+        }
+      </div>
+
+      <!-- 직원 배정 -->
+      <div>
+        <div style="font-weight:var(--weight-semibold);font-size:var(--text-sm);margin-bottom:var(--space-2)">직원 배정</div>
+        <div style="display:flex;gap:var(--space-2);margin-bottom:var(--space-2)">
+          <div class="input-group" style="flex:1">
+            <svg class="input-group__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.25"/>
+              <path d="M11 11l3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+            </svg>
+            <input class="form-control" id="detail-search" type="search" placeholder="이름, 사번으로 검색" />
+          </div>
+          <button class="btn btn--primary btn--sm" id="btn-do-assign">선택 배정</button>
+        </div>
+        <div class="picker-list" id="candidate-picker" style="max-height:200px">
+          ${candidates.length === 0
+            ? `<div style="padding:var(--space-4);color:var(--gray-400);font-size:var(--text-sm)">배정 가능한 직원이 없습니다.</div>`
+            : candidates.map((e) => {
+                const uid = e.id ?? e.uid;
+                return `
+                  <label class="picker-item">
+                    <input type="checkbox" class="candidate-cb" value="${uid}" />
+                    <div class="picker-item__body">
+                      <div class="picker-item__title">${esc(e.name ?? "–")}</div>
+                      <div class="picker-item__meta">${esc(e.empNo ?? "–")} · ${esc(e.branchName ?? "–")}</div>
+                    </div>
+                  </label>`;
+              }).join("")}
+        </div>
+      </div>
+    </div>`;
+
+  /* 모달 body 교체 */
+  const modalBody = document.querySelector(".modal__body");
+  if (modalBody) modalBody.innerHTML = body;
+
+  /* 검색 필터 */
+  document.getElementById("detail-search")?.addEventListener("input", (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    document.querySelectorAll(".candidate-cb").forEach((cb) => {
+      const item = cb.closest(".picker-item");
+      const text = item?.textContent?.toLowerCase() ?? "";
+      item.style.display = q && !text.includes(q) ? "none" : "";
+    });
+  });
+
+  /* 배정 실행 */
+  document.getElementById("btn-do-assign")?.addEventListener("click", async () => {
+    const ids = Array.from(document.querySelectorAll(".candidate-cb:checked")).map((c) => c.value);
+    if (!ids.length) { toast.warning("배정할 직원을 선택해 주세요."); return; }
+    try {
+      await assignEmployeesToSession(
+        { ...session, id: sessionId },
+        ids,
+        S.sessionDetail?.detail?.references
+      );
+      toast.success(`${ids.length}명을 배정했습니다.`);
+      const newDetail = await getSessionDetail(sessionId);
+      S.sessionDetail = { sessionId, detail: newDetail };
+      renderSessionDetailBody(newDetail, itemId);
+    } catch (err) {
+      console.error("[instructor-trainings] assign session failed", err);
+      toast.error("배정 중 오류가 발생했습니다.");
+    }
+  });
+
+  /* 배정 해제 */
+  document.querySelectorAll(".btn-unassign-session").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await unassignFromSession(sessionId, btn.dataset.uid);
+        toast.success("배정을 해제했습니다.");
+        const newDetail = await getSessionDetail(sessionId);
+        S.sessionDetail = { sessionId, detail: newDetail };
+        renderSessionDetailBody(newDetail, itemId);
+      } catch (err) {
+        console.error("[instructor-trainings] unassign session failed", err);
+        toast.error("배정 해제 중 오류가 발생했습니다.");
+      }
+    });
+  });
+}
+
+/* ──────────────────────────────────────────────────────────
+   회차 완료 확인
+────────────────────────────────────────────────────────── */
+function confirmCompleteSession(sessionId, itemId) {
+  modal.open({
+    title: "회차 완료 처리",
+    size: "sm",
+    body: `
+      <p style="font-size:var(--text-sm);color:var(--gray-600)">
+        이 회차를 완료 처리하시겠습니까?<br/>
+        배정된 직원의 교육 이력카드에 자동으로 <strong>PASS</strong> 수료 기록이 생성됩니다.
+      </p>`,
+    actions: [
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      {
+        label: "완료",
+        variant: "primary",
+        onClick: async () => {
+          modal.setLoading("완료", true);
+          try {
+            await completeSession(sessionId);
+            toast.success("회차를 완료 처리했습니다. 직원 이력카드에 수료 기록이 생성되었습니다.");
+            modal.close();
+            await loadAndRenderSessions(itemId);
+          } catch (err) {
+            if (err?.message === "NO_ASSIGNMENTS") {
+              toast.error("배정된 직원이 없습니다. 먼저 직원을 배정해 주세요.");
+            } else {
+              console.error("[instructor-trainings] completeSession failed", err);
+              toast.error("완료 처리 중 오류가 발생했습니다.");
+            }
+            modal.setLoading("완료", false);
+          }
+        },
+      },
+    ],
+  });
+}
+
+/* ──────────────────────────────────────────────────────────
+   회차 종료 확인
+────────────────────────────────────────────────────────── */
+function confirmCloseSession(sessionId, itemId) {
+  modal.open({
+    title: "회차 종료",
+    size: "sm",
+    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)">이 회차를 종료 처리하시겠습니까?<br/>수료 기록은 생성되지 않습니다.</p>`,
+    actions: [
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      {
+        label: "종료",
+        variant: "primary",
+        onClick: async () => {
+          modal.setLoading("종료", true);
+          try {
+            await closeSession(sessionId);
+            toast.success("회차를 종료했습니다.");
+            modal.close();
+            await loadAndRenderSessions(itemId);
+          } catch (err) {
+            console.error("[instructor-trainings] closeSession failed", err);
+            toast.error("오류가 발생했습니다.");
+            modal.setLoading("종료", false);
+          }
+        },
+      },
+    ],
+  });
+}
+
+/* ──────────────────────────────────────────────────────────
+   회차 삭제 확인
+────────────────────────────────────────────────────────── */
+function confirmDeleteSession(sessionId, itemId) {
+  modal.open({
+    title: "회차 삭제",
+    size: "sm",
+    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)">이 회차를 삭제하시겠습니까?<br/>배정 및 수료 데이터도 함께 삭제됩니다.</p>`,
+    actions: [
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      {
+        label: "삭제",
+        variant: "danger",
+        onClick: async () => {
+          modal.setLoading("삭제", true);
+          try {
+            await deleteSession(sessionId);
+            toast.success("회차를 삭제했습니다.");
+            modal.close();
+            await loadAndRenderSessions(itemId);
+          } catch (err) {
+            console.error("[instructor-trainings] deleteSession failed", err);
+            toast.error("삭제 중 오류가 발생했습니다.");
+            modal.setLoading("삭제", false);
+          }
+        },
+      },
+    ],
+  });
+}
+
+/* ──────────────────────────────────────────────────────────
+   항목 삭제 확인
+────────────────────────────────────────────────────────── */
+function confirmDeleteItem(itemId) {
+  const item = S.items.find((i) => i.id === itemId);
+  if (!item) return;
+
+  modal.open({
+    title: "교육 항목 삭제",
+    size: "sm",
+    body: `
+      <p style="font-size:var(--text-sm);color:var(--gray-600)">
+        <strong>${esc(item.title)}</strong> 항목을 삭제하시겠습니까?<br/>
+        연결된 모든 회차와 배정/수료 데이터도 함께 삭제됩니다.
+      </p>`,
+    actions: [
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      {
+        label: "삭제",
+        variant: "danger",
+        onClick: async () => {
+          modal.setLoading("삭제", true);
+          try {
+            await deleteTrainingItem(itemId);
+            toast.success("교육 항목을 삭제했습니다.");
+            if (expandedItemId === itemId) expandedItemId = null;
+            modal.close();
+            await loadAll();
+          } catch (err) {
+            console.error("[instructor-trainings] deleteItem failed", err);
+            toast.error("삭제 중 오류가 발생했습니다.");
+            modal.setLoading("삭제", false);
+          }
+        },
+      },
+    ],
+  });
+}
+
+/* ══════════════════════════════════════════════════════════
+   레거시: 기존 trainings 탭 (기존 코드 완전 보존)
+══════════════════════════════════════════════════════════ */
 
 function renderBranchFilter() {
   const select = document.getElementById("filter-branch");
   if (!select) return;
-
-  const branches = state.references?.branches ?? [];
+  const branches = S.references?.branches ?? [];
   select.innerHTML = `
     <option value="">전체 지점</option>
-    ${branches.map((branch) => `<option value="${branch.id}">${esc(branch.name ?? branch.code ?? branch.id)}</option>`).join("")}
+    ${branches.map((b) => `<option value="${b.id}">${esc(b.name ?? b.code ?? b.id)}</option>`).join("")}
   `;
 }
 
@@ -131,27 +993,22 @@ function renderTrainingStats() {
   const wrap = document.getElementById("training-stats");
   if (!wrap) return;
 
-  const visibleBuckets = getVisibleDeadlineBuckets(state.notificationSettings);
+  const visibleBuckets = getVisibleDeadlineBuckets(S.notificationSettings);
   wrap.innerHTML = visibleBuckets.map((bucket) => {
-    const count = state.trainings.filter((training) => bucketIncludesTraining(bucket, training)).length;
-    const sub = bucket.type === "completed" ? "완료 처리된 교육"
-              : bucket.type === "overdue"   ? "수료기한이 지난 교육"
-              : `오늘부터 ${bucket.days}일 이내 마감`;
+    const count = S.trainings.filter((t) => bucketIncludesTraining(bucket, t)).length;
+    const sub  = bucket.type === "completed" ? "완료 처리된 교육"
+               : bucket.type === "overdue"   ? "수료기한이 지난 교육"
+               : `오늘부터 ${bucket.days}일 이내 마감`;
     const tone = bucket.type === "completed" ? "success"
                : bucket.type === "overdue"   ? "danger"
                : "warning";
-
     return `
-      <div
-        class="stat-card stat-card--clickable ${activeStatFilter === bucket.key ? "stat-card--active" : ""}"
-        data-filter-key="${bucket.key}"
-        style="cursor:pointer"
-      >
+      <div class="stat-card stat-card--clickable ${activeStatFilter === bucket.key ? "stat-card--active" : ""}"
+        data-filter-key="${bucket.key}" style="cursor:pointer">
         <div class="stat-card__label">${esc(bucket.label)}</div>
         <div class="stat-card__value ${tone ? `stat-card__value--${tone}` : ""}">${count}</div>
         <div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:2px">${sub}</div>
-      </div>
-    `;
+      </div>`;
   }).join("");
 
   wrap.querySelectorAll(".stat-card--clickable").forEach((card) => {
@@ -168,14 +1025,12 @@ function renderTrainingTable() {
   const wrap = document.getElementById("trainings-table-wrap");
   if (!wrap) return;
 
-  const filtered = getFiltered();
+  const filtered = getLegacyFiltered();
   if (!filtered.length) {
     wrap.innerHTML = `
       <div class="empty-state" style="padding:var(--space-16)">
         <div class="empty-state__title">조건에 맞는 교육이 없습니다.</div>
-        <div>교육 등록 버튼으로 새 교육을 추가해 주세요.</div>
-      </div>
-    `;
+      </div>`;
     return;
   }
 
@@ -183,96 +1038,61 @@ function renderTrainingTable() {
     <table class="data-table">
       <thead>
         <tr>
-          <th>교육명</th>
-          <th>교육유형</th>
-          <th>회사/지점</th>
-          <th>교육기간</th>
-          <th>수료기한</th>
-          <th>상태</th>
-          <th>생성일</th>
+          <th>교육명</th><th>교육유형</th><th>회사/지점</th>
+          <th>교육기간</th><th>수료기한</th><th>상태</th><th>생성일</th>
           <th style="width:160px"></th>
         </tr>
       </thead>
       <tbody>
-        ${filtered.map((training) => trainingRow(training)).join("")}
+        ${filtered.map((t) => legacyTrainingRow(t)).join("")}
       </tbody>
-    </table>
-  `;
+    </table>`;
 
   wrap.querySelectorAll("tr[data-id]").forEach((row) => {
-    row.addEventListener("click", (event) => {
-      if (event.target.closest(".cell--actions")) return;
+    row.addEventListener("click", (e) => {
+      if (e.target.closest(".cell--actions")) return;
       router.push("training-detail", { id: row.dataset.id });
     });
   });
-
-  wrap.querySelectorAll(".btn-training-edit").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      const training = state.trainings.find((item) => item.id === button.dataset.id);
-      if (training) openTrainingModal(training);
+  wrap.querySelectorAll(".btn-training-edit").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const t = S.trainings.find((x) => x.id === btn.dataset.id);
+      if (t) openTrainingModal(t);
     });
   });
-
-  wrap.querySelectorAll(".btn-training-complete").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      confirmComplete(button.dataset.id);
-    });
+  wrap.querySelectorAll(".btn-training-complete").forEach((btn) => {
+    btn.addEventListener("click", (e) => { e.stopPropagation(); confirmComplete(btn.dataset.id); });
   });
-
-  wrap.querySelectorAll(".btn-training-close").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      confirmClose(button.dataset.id);
-    });
+  wrap.querySelectorAll(".btn-training-close").forEach((btn) => {
+    btn.addEventListener("click", (e) => { e.stopPropagation(); confirmClose(btn.dataset.id); });
   });
-
-  wrap.querySelectorAll(".btn-training-delete").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      confirmDelete(button.dataset.id);
-    });
+  wrap.querySelectorAll(".btn-training-delete").forEach((btn) => {
+    btn.addEventListener("click", (e) => { e.stopPropagation(); confirmDelete(btn.dataset.id); });
   });
 }
 
-function trainingRow(training) {
+function legacyTrainingRow(training) {
   const branchSummary = training.branchNames?.length ? training.branchNames.join(", ") : "전체 지점";
-  const isOwner      = training.createdBy === authStore.uid;
-  const isInstructor = training.instructorId === authStore.uid;
-  const canAct       = isOwner || isInstructor;  // 본인 등록 또는 담당 강사
-  const actions = [];
+  const isOwner       = training.createdBy === authStore.uid;
+  const isInstructor  = training.instructorId === authStore.uid;
+  const canAct        = isOwner || isInstructor;
+  const isCompleted   = training.computedStatus === "completed";
+  const isClosed      = training.computedStatus === "closed";
+  const actions       = [];
 
-  const isCompleted = training.computedStatus === "completed";
-  const isClosed    = training.computedStatus === "closed";
-
-  if (isOwner) {
-    actions.push(`<button class="btn btn--ghost btn--sm btn-training-edit" data-id="${training.id}" title="수정">수정</button>`);
-  }
-  if (canAct && !isCompleted) {
-    actions.push(`<button class="btn btn--ghost btn--sm btn-training-complete" data-id="${training.id}" title="완료 처리" style="color:var(--color-success,#16a34a)">완료</button>`);
-  }
-  if (!isClosed && !isCompleted && canAct) {
-    actions.push(`<button class="btn btn--ghost btn--sm btn-training-close" data-id="${training.id}" title="종료 처리">종료</button>`);
-  }
-  if (isOwner) {
-    actions.push(`<button class="btn btn--ghost btn--sm btn-training-delete" data-id="${training.id}" title="삭제" style="color:var(--color-danger)">삭제</button>`);
-  }
-
-  const ownerBadge = training.createdBy !== authStore.uid
-    ? `<span class="chip chip--neutral" style="font-size:var(--text-2xs)">담당</span> `
-    : "";
+  if (isOwner) actions.push(`<button class="btn btn--ghost btn--sm btn-training-edit" data-id="${training.id}">수정</button>`);
+  if (canAct && !isCompleted) actions.push(`<button class="btn btn--ghost btn--sm btn-training-complete" data-id="${training.id}" style="color:var(--color-success,#16a34a)">완료</button>`);
+  if (!isClosed && !isCompleted && canAct) actions.push(`<button class="btn btn--ghost btn--sm btn-training-close" data-id="${training.id}">종료</button>`);
+  if (isOwner) actions.push(`<button class="btn btn--ghost btn--sm btn-training-delete" data-id="${training.id}" style="color:var(--color-danger)">삭제</button>`);
 
   return `
     <tr data-id="${training.id}" style="cursor:pointer">
-      <td>
-        <div style="font-weight:var(--weight-semibold);color:var(--gray-800)">${ownerBadge}${esc(training.title)}</div>
-        ${training.description ? `<div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:4px">${esc(training.description)}</div>` : ""}
-      </td>
+      <td><div style="font-weight:var(--weight-semibold)">${esc(training.title)}</div></td>
       <td>${esc(training.typeLabel)}</td>
       <td>
-        <div>${esc(training.companyName || "-")}</div>
-        <div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:4px">${esc(branchSummary)}</div>
+        <div>${esc(training.companyName || "–")}</div>
+        <div style="font-size:var(--text-xs);color:var(--gray-400)">${esc(branchSummary)}</div>
       </td>
       <td style="white-space:nowrap">${formatDate(training.startDate)} ~ ${formatDate(training.endDate)}</td>
       <td style="white-space:nowrap">${formatDate(training.deadline)}</td>
@@ -283,75 +1103,71 @@ function trainingRow(training) {
           ${actions.join("") || `<span style="font-size:var(--text-xs);color:var(--gray-400)">조회 전용</span>`}
         </div>
       </td>
-    </tr>
-  `;
+    </tr>`;
 }
 
-function getFiltered() {
+function getLegacyFiltered() {
   const search = (document.getElementById("search-trainings")?.value ?? "").trim().toLowerCase();
   const status = document.getElementById("filter-status")?.value ?? "";
-  const type = document.getElementById("filter-type")?.value ?? "";
+  const type   = document.getElementById("filter-type")?.value ?? "";
   const branch = document.getElementById("filter-branch")?.value ?? "";
-  const activeBucket = state.notificationSettings?.deadlineBuckets?.find((bucket) => bucket.key === activeStatFilter) ?? null;
+  const activeBucket = S.notificationSettings?.deadlineBuckets?.find((b) => b.key === activeStatFilter) ?? null;
 
-  return state.trainings.filter((training) => {
-    if (activeBucket && !bucketIncludesTraining(activeBucket, training)) return false;
-    if (search && ![training.title, training.description].some((value) => String(value ?? "").toLowerCase().includes(search))) return false;
-    if (status && training.computedStatus !== status) return false;
-    if (type && training.trainingType !== type) return false;
-    if (branch && !training.branchIds?.includes(branch)) return false;
+  return S.trainings.filter((t) => {
+    if (activeBucket && !bucketIncludesTraining(activeBucket, t)) return false;
+    if (search && ![t.title, t.description].some((v) => String(v ?? "").toLowerCase().includes(search))) return false;
+    if (status && t.computedStatus !== status) return false;
+    if (type   && t.trainingType   !== type)   return false;
+    if (branch && !t.branchIds?.includes(branch)) return false;
     return true;
   });
 }
 
+/* 레거시 교육 등록/수정 모달 */
 function openTrainingModal(training = null) {
-  const actionLabel = training ? "수정" : "등록";
-  const refs = state.references;
+  const label   = training ? "수정" : "등록";
+  const refs    = S.references;
   const branchIds = training?.branchIds ?? [];
 
   modal.open({
-    title: training ? "교육 수정" : "교육 등록",
+    title: training ? "교육 수정" : "교육 등록 (기존 방식)",
     size: "lg",
     body: `
       <div style="display:flex;flex-direction:column;gap:var(--space-5)">
         <div class="form-row">
           <div class="form-group">
             <label class="form-label form-label--required">교육명</label>
-            <input class="form-control" id="t-title" type="text" value="${escAttr(training?.title ?? "")}" placeholder="예: 2026 서비스교육" />
+            <input class="form-control" id="t-title" type="text"
+              value="${escAttr(training?.title ?? "")}" placeholder="예: 2026 서비스교육" />
           </div>
           <div class="form-group">
             <label class="form-label form-label--required">교육유형</label>
             <select class="form-control" id="t-type">
-              ${TRAINING_TYPES.map((type) => `<option value="${type}" ${training?.trainingType === type ? "selected" : ""}>${TRAINING_TYPE_LABELS[type]}</option>`).join("")}
+              ${TRAINING_TYPES.map((t) => `<option value="${t}" ${training?.trainingType === t ? "selected" : ""}>${TRAINING_TYPE_LABELS[t]}</option>`).join("")}
             </select>
           </div>
         </div>
-
         <div class="form-row">
           <div class="form-group">
             <label class="form-label">회사</label>
-            <input class="form-control" type="text" value="${escAttr(refs?.company?.name || "-")}" disabled />
+            <input class="form-control" type="text" value="${escAttr(refs?.company?.name || "–")}" disabled />
           </div>
           <div class="form-group">
             <label class="form-label">담당 강사</label>
             <input class="form-control" type="text" value="${escAttr(authStore.name)}" disabled />
-            <div class="form-hint">교육 등록 시 현재 계정이 담당 강사로 저장됩니다.</div>
           </div>
         </div>
-
         <div class="form-group">
           <label class="form-label form-label--required">지점</label>
           <div class="selection-grid">
-            ${(refs?.branches ?? []).map((branch) => `
+            ${(refs?.branches ?? []).map((b) => `
               <label class="selection-chip">
-                <input type="checkbox" class="branch-selector" value="${branch.id}" ${branchIds.includes(branch.id) ? "checked" : ""} />
-                <span>${esc(branch.name ?? branch.code ?? branch.id)}</span>
-              </label>
-            `).join("")}
+                <input type="checkbox" class="branch-selector" value="${b.id}"
+                  ${branchIds.includes(b.id) ? "checked" : ""} />
+                <span>${esc(b.name ?? b.code ?? b.id)}</span>
+              </label>`).join("")}
           </div>
-          <div class="form-hint">선택하지 않으면 전체 지점 교육으로 저장됩니다.</div>
         </div>
-
         <div class="form-row form-row--3">
           <div class="form-group">
             <label class="form-label form-label--required">교육 시작일</label>
@@ -366,62 +1182,36 @@ function openTrainingModal(training = null) {
             <input class="form-control" id="t-deadline" type="date" value="${toDateInput(training?.deadline)}" />
           </div>
         </div>
-      </div>
-    `,
+      </div>`,
     actions: [
       { label: "취소", variant: "secondary", onClick: () => modal.close() },
-      { label: actionLabel, variant: "primary", onClick: () => submitForm(training?.id ?? null, actionLabel) },
+      { label, variant: "primary", onClick: () => submitLegacyForm(training?.id ?? null, label) },
     ],
   });
 }
 
-async function submitForm(trainingId, actionLabel) {
-  const refs = state.references;
-  const current = trainingId ? state.trainings.find((item) => item.id === trainingId) : null;
-
-  const title = document.getElementById("t-title")?.value?.trim();
-  const trainingType = document.getElementById("t-type")?.value;
-  const branchIds = Array.from(document.querySelectorAll(".branch-selector:checked")).map((checkbox) => checkbox.value);
+async function submitLegacyForm(trainingId, label) {
+  const refs    = S.references;
+  const current = trainingId ? S.trainings.find((t) => t.id === trainingId) : null;
+  const title   = document.getElementById("t-title")?.value?.trim();
+  const trainType = document.getElementById("t-type")?.value;
+  const branchIds = Array.from(document.querySelectorAll(".branch-selector:checked")).map((c) => c.value);
   const startDate = readDate("t-start");
-  const endDate = readDate("t-end");
-  const deadline = readDate("t-deadline");
+  const endDate   = readDate("t-end");
+  const deadline  = readDate("t-deadline");
 
-  if (!title) {
-    toast.error("교육명을 입력해 주세요.");
-    return;
-  }
-  if (!startDate || !endDate || !deadline) {
-    toast.error("교육 시작일, 종료일, 수료기한을 모두 입력해 주세요.");
-    return;
-  }
-  if (endDate < startDate) {
-    toast.error("교육 종료일은 시작일 이후여야 합니다.");
-    return;
-  }
-  if (deadline < endDate) {
-    toast.error("수료기한은 교육 종료일과 같거나 이후여야 합니다.");
-    return;
-  }
+  if (!title)                              { toast.error("교육명을 입력해 주세요."); return; }
+  if (!startDate || !endDate || !deadline) { toast.error("날짜를 모두 입력해 주세요."); return; }
+  if (endDate < startDate)                 { toast.error("종료일은 시작일 이후여야 합니다."); return; }
+  if (deadline < endDate)                  { toast.error("수료기한은 종료일과 같거나 이후여야 합니다."); return; }
 
-  modal.setLoading(actionLabel, true);
-
+  modal.setLoading(label, true);
   try {
     const payload = buildTrainingPayload(
-      {
-        title,
-        trainingType,
-        description: "",
-        instructorId: authStore.uid,
-        instructorName: authStore.name,
-        branchIds,
-        startDate,
-        endDate,
-        deadline,
-      },
-      refs,
-      current
+      { title, trainingType: trainType, description: "", instructorId: authStore.uid,
+        instructorName: authStore.name, branchIds, startDate, endDate, deadline },
+      refs, current
     );
-
     if (!trainingId) {
       payload.createdBy = authStore.uid;
       payload.createdByName = authStore.name;
@@ -429,147 +1219,105 @@ async function submitForm(trainingId, actionLabel) {
       payload.instructorName = authStore.name;
     }
     payload.updatedAt = Date.now();
-
     await saveTraining(payload, trainingId);
     toast.success(trainingId ? "교육을 수정했습니다." : "교육을 등록했습니다.");
     modal.close();
-    await loadViewData();
-  } catch (error) {
-    console.error("[instructor-trainings] save failed", error);
-    toast.error("교육 저장 중 오류가 발생했습니다.");
-    modal.setLoading(actionLabel, false);
+    await loadAll();
+  } catch (err) {
+    console.error("[instructor-trainings] legacy save failed", err);
+    toast.error("저장 중 오류가 발생했습니다.");
+    modal.setLoading(label, false);
   }
 }
 
 function confirmComplete(trainingId) {
-  const training = state.trainings.find((item) => item.id === trainingId);
-  if (!training) return;
-
+  const t = S.trainings.find((x) => x.id === trainingId);
+  if (!t) return;
   modal.open({
-    title: "교육 완료 처리",
-    size: "sm",
-    body: `
-      <p style="font-size:var(--text-sm);color:var(--gray-600)">
-        <strong>${esc(training.title)}</strong> 교육을 완료 처리하시겠습니까?<br/>
-        배정된 직원의 교육 이력카드에 자동으로 수료 기록이 생성됩니다.
-      </p>
-    `,
+    title: "교육 완료 처리", size: "sm",
+    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)">
+      <strong>${esc(t.title)}</strong> 교육을 완료 처리하시겠습니까?<br/>
+      배정된 직원의 교육 이력카드에 자동으로 수료 기록이 생성됩니다.</p>`,
     actions: [
       { label: "취소", variant: "secondary", onClick: () => modal.close() },
-      {
-        label: "완료",
-        variant: "primary",
-        onClick: async () => {
-          modal.setLoading("완료", true);
-          try {
-            await completeTraining(trainingId);
-            toast.success("교육을 완료 처리했습니다. 직원 이력카드에 수료 기록이 생성되었습니다.");
-            modal.close();
-            await loadViewData();
-          } catch (err) {
-            if (err?.message === "NO_ASSIGNMENTS") {
-              toast.error("배정된 직원이 없습니다. 직원을 먼저 배정해 주세요.");
-            } else {
-              console.error("[instructor-trainings] complete failed", err);
-              toast.error("완료 처리 중 오류가 발생했습니다.");
-            }
-            modal.setLoading("완료", false);
-          }
-        },
-      },
+      { label: "완료", variant: "primary", onClick: async () => {
+        modal.setLoading("완료", true);
+        try {
+          await completeTraining(trainingId);
+          toast.success("교육을 완료 처리했습니다.");
+          modal.close(); await loadAll();
+        } catch (err) {
+          if (err?.message === "NO_ASSIGNMENTS") toast.error("배정된 직원이 없습니다.");
+          else toast.error("완료 처리 중 오류가 발생했습니다.");
+          modal.setLoading("완료", false);
+        }
+      }},
     ],
   });
 }
 
 function confirmClose(trainingId) {
-  const training = state.trainings.find((item) => item.id === trainingId);
-  if (!training) return;
-
+  const t = S.trainings.find((x) => x.id === trainingId);
+  if (!t) return;
   modal.open({
-    title: "교육 종료 처리",
-    size: "sm",
-    body: `
-      <p style="font-size:var(--text-sm);color:var(--gray-600)">
-        <strong>${esc(training.title)}</strong> 교육을 종료 처리하시겠습니까?<br/>
-        종료 후 상태는 <strong>종료</strong>로 표시됩니다.
-      </p>
-    `,
+    title: "교육 종료 처리", size: "sm",
+    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)">
+      <strong>${esc(t.title)}</strong> 교육을 종료 처리하시겠습니까?</p>`,
     actions: [
       { label: "취소", variant: "secondary", onClick: () => modal.close() },
-      {
-        label: "종료",
-        variant: "primary",
-        onClick: async () => {
-          modal.setLoading("종료", true);
-          try {
-            await closeTraining(trainingId);
-            toast.success("교육을 종료 처리했습니다.");
-            modal.close();
-            await loadViewData();
-          } catch (err) {
-            console.error("[instructor-trainings] close failed", err);
-            toast.error("교육 종료 처리 중 오류가 발생했습니다.");
-            modal.setLoading("종료", false);
-          }
-        },
-      },
+      { label: "종료", variant: "primary", onClick: async () => {
+        modal.setLoading("종료", true);
+        try {
+          await closeTraining(trainingId);
+          toast.success("교육을 종료했습니다.");
+          modal.close(); await loadAll();
+        } catch (err) {
+          toast.error("오류가 발생했습니다.");
+          modal.setLoading("종료", false);
+        }
+      }},
     ],
   });
 }
 
 function confirmDelete(trainingId) {
-  const training = state.trainings.find((item) => item.id === trainingId);
-  if (!training) return;
-
+  const t = S.trainings.find((x) => x.id === trainingId);
+  if (!t) return;
   modal.open({
-    title: "교육 삭제",
-    size: "sm",
-    body: `
-      <p style="font-size:var(--text-sm);color:var(--gray-600)">
-        <strong>${esc(training.title)}</strong> 교육을 삭제하시겠습니까?<br/>
-        교육 정보와 배정/수료 데이터가 함께 삭제됩니다.
-      </p>
-    `,
+    title: "교육 삭제", size: "sm",
+    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)">
+      <strong>${esc(t.title)}</strong> 교육을 삭제하시겠습니까?<br/>
+      배정/수료 데이터도 함께 삭제됩니다.</p>`,
     actions: [
       { label: "취소", variant: "secondary", onClick: () => modal.close() },
-      {
-        label: "삭제",
-        variant: "danger",
-        onClick: async () => {
-          modal.setLoading("삭제", true);
-          try {
-            await deleteTraining(trainingId);
-            toast.success("교육을 삭제했습니다.");
-            modal.close();
-            await loadViewData();
-          } catch (err) {
-            console.error("[instructor-trainings] delete failed", err);
-            toast.error("교육 삭제 중 오류가 발생했습니다.");
-            modal.setLoading("삭제", false);
-          }
-        },
-      },
+      { label: "삭제", variant: "danger", onClick: async () => {
+        modal.setLoading("삭제", true);
+        try {
+          await deleteTraining(trainingId);
+          toast.success("삭제했습니다.");
+          modal.close(); await loadAll();
+        } catch (err) {
+          toast.error("삭제 중 오류가 발생했습니다.");
+          modal.setLoading("삭제", false);
+        }
+      }},
     ],
   });
 }
 
+/* ──────────────────────────────────────────────────────────
+   공통 헬퍼
+────────────────────────────────────────────────────────── */
 function readDate(id) {
-  const value = document.getElementById(id)?.value;
-  return value ? new Date(`${value}T00:00:00`).getTime() : null;
+  const v = document.getElementById(id)?.value;
+  return v ? new Date(`${v}T00:00:00`).getTime() : null;
 }
-
 function toDateInput(ts) {
   return ts ? new Date(ts).toISOString().slice(0, 10) : "";
 }
-
-function esc(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+function esc(v) {
+  return String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
-
-function escAttr(value) {
-  return esc(value).replace(/'/g, "&#39;");
+function escAttr(v) {
+  return esc(v).replace(/'/g, "&#39;");
 }
