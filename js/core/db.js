@@ -3,12 +3,12 @@
  * 모든 Firebase CRUD는 여기서만 처리.
  * 저장 경로와 조회 경로를 이 파일에서 일원화.
  *
- * 경로 규칙:
+ * 경로 규칙 (기존):
  *   /users/{uid}
  *   /companies/{id}
  *   /branches/{id}          ← companyId 필드로 연결
  *   /departments/{id}
- *   /trainings/{id}
+ *   /trainings/{id}                           ← 기존 교육 (계속 유지)
  *   /trainingAssignments/{trainingId}/{uid}
  *   /userAssignments/{uid}/{trainingId}
  *   /trainingCompletions/{trainingId}/{uid}
@@ -18,7 +18,20 @@
  *   /announcements/{id}
  *   /lessonPlans/{uid}/{trainingId}
  *   /cueCards/{uid}/{trainingId}
- *   /settings/notifications    ← 알림 설정 (HQ Admin이 씀)
+ *   /settings/notifications
+ *
+ * 신규 경로 (교육 항목/회차 구조):
+ *   /trainingItems/{itemId}                   ← 교육 항목(템플릿)
+ *   /trainingSessions/{sessionId}             ← 교육 회차(실시)
+ *   /sessionAssignments/{sessionId}/{uid}     ← 회차별 배정
+ *   /userSessionAssignments/{uid}/{sessionId} ← 유저별 회차 배정
+ *   /sessionCompletions/{sessionId}/{uid}     ← 회차별 수료
+ *   /userSessionCompletions/{uid}/{sessionId} ← 유저별 회차 수료
+ *
+ * 설계 원칙:
+ *   - 기존 /trainings 경로는 그대로 유지 (기존 기능 영향 없음)
+ *   - 신규 구조는 별도 경로로 완전 분리
+ *   - 회차(session)가 완료됐을 때만 직원 교육이력에 PASS 기록 생성
  */
 
 import {
@@ -64,12 +77,9 @@ export const usersDB = {
   create:  (uid, data) => set(r("users", uid), { ...data, createdAt: Date.now() }),
   update:  (uid, data) => update(r("users", uid), data),
   delete:  (uid)       => remove(r("users", uid)),
-  /** companyId로 필터링 */
   list:    (companyId) => getList("users", "companyId", companyId),
   listByRole: (role)   => getList("users", "role", role),
-  /** 전체 조회 (슈퍼관리자용) */
   listAll: ()          => getList("users"),
-  /** 빠른 카운트 */
   count:   ()          => countAll("users"),
 };
 
@@ -86,16 +96,14 @@ export const companiesDB = {
 };
 
 /* ══════════════════════════════════════════════════════════
-   Branches  /branches/{id}   (companyId 필드로 회사 연결)
+   Branches  /branches/{id}
 ══════════════════════════════════════════════════════════ */
 export const branchesDB = {
   get:     (id)        => getVal(`branches/${id}`),
   create:  (data)      => push(r("branches"), { ...data, createdAt: Date.now() }),
   update:  (id, data)  => update(r("branches", id), data),
   delete:  (id)        => remove(r("branches", id)),
-  /** 특정 회사 지점만 조회 */
   list:    (companyId) => getList("branches", "companyId", companyId),
-  /** 전체 조회 (슈퍼관리자용) */
   listAll: ()          => getList("branches"),
   count:   ()          => countAll("branches"),
 };
@@ -113,7 +121,7 @@ export const departmentsDB = {
 };
 
 /* ══════════════════════════════════════════════════════════
-   Trainings  /trainings/{id}
+   Trainings  /trainings/{id}   ← 기존 구조 완전 유지
 ══════════════════════════════════════════════════════════ */
 export const trainingsDB = {
   get:     (id)        => getVal(`trainings/${id}`),
@@ -126,6 +134,12 @@ export const trainingsDB = {
     ...data,
     status: "closed",
     closedAt: Date.now(),
+    updatedAt: Date.now(),
+  }),
+  complete: (id, data = {}) => update(r("trainings", id), {
+    ...data,
+    status: "completed",
+    completedAt: Date.now(),
     updatedAt: Date.now(),
   }),
   delete:  (id)        => remove(r("trainings", id)),
@@ -150,9 +164,9 @@ export const trainingsDB = {
 };
 
 /* ══════════════════════════════════════════════════════════
-   Training Assignments
-   저장: /trainingAssignments/{trainingId}/{uid}
-   유저별: /userAssignments/{uid}/{trainingId}
+   Training Assignments (기존)
+   /trainingAssignments/{trainingId}/{uid}
+   /userAssignments/{uid}/{trainingId}
 ══════════════════════════════════════════════════════════ */
 export const assignmentsDB = {
   forTraining: (trainingId) => getList(`trainingAssignments/${trainingId}`),
@@ -216,9 +230,9 @@ export const assignmentsDB = {
 };
 
 /* ══════════════════════════════════════════════════════════
-   Training Completions
-   저장: /trainingCompletions/{trainingId}/{uid}
-          /userCompletions/{uid}/{trainingId}
+   Training Completions (기존)
+   /trainingCompletions/{trainingId}/{uid}
+   /userCompletions/{uid}/{trainingId}
 ══════════════════════════════════════════════════════════ */
 export const completionsDB = {
   get: (trainingId, uid) => getVal(`trainingCompletions/${trainingId}/${uid}`),
@@ -241,6 +255,189 @@ export const completionsDB = {
 
   forTraining: (trainingId) => getList(`trainingCompletions/${trainingId}`),
   forUser:     (uid)        => getList(`userCompletions/${uid}`),
+};
+
+/* ══════════════════════════════════════════════════════════
+   ★ 신규: Training Items  /trainingItems/{itemId}
+   교육 항목(템플릿) — 교육명·유형·강사·기본 설정을 관리
+   companyId 로 회사별 분리
+══════════════════════════════════════════════════════════ */
+export const trainingItemsDB = {
+  get:    (id)         => getVal(`trainingItems/${id}`),
+
+  create: (data) => {
+    const now = Date.now();
+    return push(r("trainingItems"), {
+      ...data,
+      createdAt: data.createdAt ?? now,
+      updatedAt: now,
+    });
+  },
+
+  update: (id, data) => update(r("trainingItems", id), {
+    ...data,
+    updatedAt: Date.now(),
+  }),
+
+  delete: (id) => remove(r("trainingItems", id)),
+
+  /** 회사별 목록 */
+  list:    (companyId) => getList("trainingItems", "companyId", companyId),
+  /** 전체 목록 (슈퍼관리자용) */
+  listAll: ()          => getList("trainingItems"),
+
+  /** 특정 강사가 담당하는 항목 목록 */
+  listByInstructor: (instructorId) =>
+    getList("trainingItems", "instructorId", instructorId),
+};
+
+/* ══════════════════════════════════════════════════════════
+   ★ 신규: Training Sessions  /trainingSessions/{sessionId}
+   교육 회차(실시) — 항목 하나에 여러 회차
+   itemId 로 항목과 연결, companyId 로 회사별 분리
+══════════════════════════════════════════════════════════ */
+export const trainingSessionsDB = {
+  get:    (id)         => getVal(`trainingSessions/${id}`),
+
+  create: (data) => {
+    const now = Date.now();
+    return push(r("trainingSessions"), {
+      ...data,
+      createdAt: data.createdAt ?? now,
+      updatedAt: now,
+    });
+  },
+
+  update: (id, data) => update(r("trainingSessions", id), {
+    ...data,
+    updatedAt: Date.now(),
+  }),
+
+  /** 회차 종료 처리 */
+  close: (id, data = {}) => update(r("trainingSessions", id), {
+    ...data,
+    status: "closed",
+    closedAt: Date.now(),
+    updatedAt: Date.now(),
+  }),
+
+  /** 회차 완료 처리 — 이 시점에 직원 이력카드 PASS 생성 */
+  complete: (id, data = {}) => update(r("trainingSessions", id), {
+    ...data,
+    status: "completed",
+    completedAt: Date.now(),
+    updatedAt: Date.now(),
+  }),
+
+  delete: (id) => remove(r("trainingSessions", id)),
+
+  /** 특정 교육 항목의 전체 회차 */
+  listByItem:    (itemId)    => getList("trainingSessions", "itemId", itemId),
+  /** 회사별 전체 회차 */
+  list:          (companyId) => getList("trainingSessions", "companyId", companyId),
+  /** 전체 조회 (슈퍼관리자용) */
+  listAll:       ()          => getList("trainingSessions"),
+
+  /** 회차 + 연결된 항목/배정/수료 일괄 삭제 */
+  deleteCascade: async (sessionId) => {
+    const [assignments, completions] = await Promise.all([
+      getList(`sessionAssignments/${sessionId}`),
+      getList(`sessionCompletions/${sessionId}`),
+    ]);
+    const updates = { [`trainingSessions/${sessionId}`]: null };
+    assignments.forEach(({ uid }) => {
+      updates[`sessionAssignments/${sessionId}/${uid}`] = null;
+      updates[`userSessionAssignments/${uid}/${sessionId}`] = null;
+    });
+    completions.forEach(({ uid }) => {
+      updates[`sessionCompletions/${sessionId}/${uid}`] = null;
+      updates[`userSessionCompletions/${uid}/${sessionId}`] = null;
+    });
+    return update(ref(db), updates);
+  },
+};
+
+/* ══════════════════════════════════════════════════════════
+   ★ 신규: Session Assignments
+   /sessionAssignments/{sessionId}/{uid}
+   /userSessionAssignments/{uid}/{sessionId}
+══════════════════════════════════════════════════════════ */
+export const sessionAssignmentsDB = {
+  forSession: (sessionId) => getList(`sessionAssignments/${sessionId}`),
+  forUser:    (uid)       => getList(`userSessionAssignments/${uid}`),
+
+  assignUsers: async (sessionId, users, extraData = {}) => {
+    const updates = {};
+    const assignedAt = extraData.assignedAt ?? Date.now();
+    users.forEach((user) => {
+      const uid = user.uid ?? user.id;
+      if (!uid) return;
+      const record = {
+        uid,
+        sessionId,
+        assignedAt,
+        assignedBy:   extraData.assignedBy ?? "",
+        status:       "pending",
+        sessionTitle: extraData.sessionTitle ?? "",
+        itemId:       extraData.itemId ?? "",
+        deadline:     extraData.deadline ?? null,
+        employeeName: user.name ?? "",
+        empNo:        user.empNo ?? "",
+        branchId:     user.branchId ?? "",
+        branchName:   user.branchName ?? "",
+        companyId:    user.companyId ?? "",
+        companyName:  user.companyName ?? "",
+      };
+      updates[`sessionAssignments/${sessionId}/${uid}`]      = record;
+      updates[`userSessionAssignments/${uid}/${sessionId}`]  = record;
+    });
+    return update(ref(db), updates);
+  },
+
+  remove: async (sessionId, uid) => {
+    const updates = {
+      [`sessionAssignments/${sessionId}/${uid}`]:     null,
+      [`userSessionAssignments/${uid}/${sessionId}`]: null,
+    };
+    return update(ref(db), updates);
+  },
+};
+
+/* ══════════════════════════════════════════════════════════
+   ★ 신규: Session Completions
+   /sessionCompletions/{sessionId}/{uid}
+   /userSessionCompletions/{uid}/{sessionId}
+   회차 완료 처리 시 생성 → 직원 교육이력카드 PASS 근거
+══════════════════════════════════════════════════════════ */
+export const sessionCompletionsDB = {
+  get: (sessionId, uid) => getVal(`sessionCompletions/${sessionId}/${uid}`),
+
+  complete: async (sessionId, uid, data) => {
+    const record = {
+      uid,
+      sessionId,
+      itemId:       data.itemId ?? "",
+      completedAt:  data.completedAt ?? Date.now(),
+      status:       "completed",
+      // 이력카드 표시용 필드
+      trainingTitle:   data.trainingTitle ?? "",
+      trainingType:    data.trainingType ?? "other",
+      instructorName:  data.instructorName ?? "",
+      startDate:       data.startDate ?? null,
+      endDate:         data.endDate ?? null,
+      completedBy:     data.completedBy ?? "",
+      completedByName: data.completedByName ?? "",
+      ...data,
+    };
+    const updates = {
+      [`sessionCompletions/${sessionId}/${uid}`]:     record,
+      [`userSessionCompletions/${uid}/${sessionId}`]: record,
+    };
+    return update(ref(db), updates);
+  },
+
+  forSession: (sessionId) => getList(`sessionCompletions/${sessionId}`),
+  forUser:    (uid)       => getList(`userSessionCompletions/${uid}`),
 };
 
 /* ══════════════════════════════════════════════════════════
@@ -291,8 +488,6 @@ export const announcementsDB = {
 
 /* ══════════════════════════════════════════════════════════
    Instructor: Lesson Plans & Cue Cards
-   /lessonPlans/{uid}/{trainingId}
-   /cueCards/{uid}/{trainingId}
 ══════════════════════════════════════════════════════════ */
 export const instructorDB = {
   getLessonPlan:  (uid, tid)       => getVal(`lessonPlans/${uid}/${tid}`),
@@ -303,7 +498,6 @@ export const instructorDB = {
 
 /* ══════════════════════════════════════════════════════════
    Settings  /settings/{key}
-   HQ Admin이 읽고 씀. 슈퍼관리자는 시스템 설정 화면에서 조회만.
 ══════════════════════════════════════════════════════════ */
 export const settingsDB = {
   getNotifications: ()       => getVal("settings/notifications"),

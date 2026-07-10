@@ -3,7 +3,11 @@ import {
   assignmentsDB,
   branchesDB,
   completionsDB,
+  sessionAssignmentsDB,
+  sessionCompletionsDB,
   templatesDB,
+  trainingItemsDB,
+  trainingSessionsDB,
   trainingsDB,
   usersDB,
 } from "../core/db.js";
@@ -454,5 +458,496 @@ export async function buildEmployeeHistoryRows(uid) {
   return {
     employee: user ? { uid, ...user } : null,
     rows: sortByRecent(rows, "completedAt"),
+  };
+}
+
+/* ══════════════════════════════════════════════════════════
+   ★ Step 1 신규: 교육 항목(Item) / 교육 회차(Session) 서비스
+   기존 trainings 기반 함수는 위에 그대로 유지됨
+   신규 함수는 이 아래에만 추가
+══════════════════════════════════════════════════════════ */
+
+
+/* ──────────────────────────────────────────────────────────
+   교육 항목(Item) 상수 및 유틸
+────────────────────────────────────────────────────────── */
+
+/** 초기/보수 구분 */
+export const ITEM_SUB_TYPES = ["initial", "recurring"];
+export const ITEM_SUB_TYPE_LABELS = {
+  initial:   "초기",
+  recurring: "보수",
+};
+
+/** 회차 상태 */
+export const SESSION_STATUS_LABELS = {
+  scheduled:   "예정",
+  in_progress: "진행중",
+  completed:   "완료",
+  closed:      "종료",
+};
+
+/**
+ * 회차 computedStatus 계산
+ * training과 동일한 로직 — status 필드 우선, 없으면 날짜 기반 계산
+ */
+export function computeSessionStatus(session, now = Date.now()) {
+  if (!session) return "scheduled";
+  if (session.status === "completed") return "completed";
+  if (session.status === "closed")    return "closed";
+
+  const { startDate, endDate } = session;
+  if (startDate && endDate) {
+    if (startDate > now) return "scheduled";
+    if (endDate >= now)  return "in_progress";
+    return "scheduled";
+  }
+  return "scheduled";
+}
+
+export function buildSessionStatusChip(status) {
+  const tone = {
+    scheduled:   "info",
+    in_progress: "success",
+    completed:   "success",
+    closed:      "neutral",
+  }[status] ?? "neutral";
+  return `<span class="chip chip--${tone}">${SESSION_STATUS_LABELS[status] ?? status}</span>`;
+}
+
+/* ──────────────────────────────────────────────────────────
+   교육 항목 CRUD
+────────────────────────────────────────────────────────── */
+
+/**
+ * 교육 항목 생성
+ * @param {object} values
+ *   title, trainingType, subType, instructorId, instructorName,
+ *   defaultHours, note, materialIds, companyId, companyName
+ */
+export async function createTrainingItem(values) {
+  const now = Date.now();
+  const payload = {
+    title:          String(values.title ?? "").trim(),
+    trainingType:   normalizeTrainingType(values.trainingType),
+    subType:        values.subType ?? "",          // initial | recurring | ""
+    instructorId:   values.instructorId ?? authStore.uid,
+    instructorName: values.instructorName ?? authStore.name,
+    defaultHours:   Number(values.defaultHours ?? 0),
+    note:           String(values.note ?? "").trim(),
+    materialIds:    Array.isArray(values.materialIds) ? values.materialIds : [],
+    companyId:      values.companyId ?? authStore.companyId ?? null,
+    companyName:    values.companyName ?? authStore.profile?.companyName ?? "",
+    createdBy:      authStore.uid,
+    createdByName:  authStore.name,
+    createdAt:      now,
+    updatedAt:      now,
+  };
+
+  const ref = await trainingItemsDB.create(payload);
+  return ref.key;
+}
+
+/**
+ * 교육 항목 수정
+ */
+export async function updateTrainingItem(itemId, values) {
+  const payload = {
+    title:          String(values.title ?? "").trim(),
+    trainingType:   normalizeTrainingType(values.trainingType),
+    subType:        values.subType ?? "",
+    instructorId:   values.instructorId ?? "",
+    instructorName: values.instructorName ?? "",
+    defaultHours:   Number(values.defaultHours ?? 0),
+    note:           String(values.note ?? "").trim(),
+    materialIds:    Array.isArray(values.materialIds) ? values.materialIds : [],
+    updatedBy:      authStore.uid,
+    updatedByName:  authStore.name,
+  };
+  await trainingItemsDB.update(itemId, payload);
+}
+
+/**
+ * 교육 항목 삭제 (연결된 회차도 함께 삭제)
+ */
+export async function deleteTrainingItem(itemId) {
+  // 해당 항목의 모든 회차 조회 후 cascade 삭제
+  const sessions = await trainingSessionsDB.listByItem(itemId);
+  await Promise.all(sessions.map((s) => trainingSessionsDB.deleteCascade(s.id)));
+  await trainingItemsDB.delete(itemId);
+}
+
+/**
+ * 교육 항목 목록 조회 (강사 본인 또는 담당 항목)
+ */
+export async function listInstructorItems() {
+  const uid       = authStore.uid;
+  const companyId = authStore.companyId ?? null;
+
+  const items = companyId
+    ? await trainingItemsDB.list(companyId)
+    : await trainingItemsDB.listAll();
+
+  return sortByRecent(
+    items.filter((item) => item.createdBy === uid || item.instructorId === uid),
+    "createdAt"
+  ).map(enrichItemRecord);
+}
+
+/**
+ * 교육 항목 전체 목록 (HQ_ADMIN / SUPER_ADMIN)
+ */
+export async function listManagedItems() {
+  const items = authStore.role === ROLES.SUPER_ADMIN
+    ? await trainingItemsDB.listAll()
+    : await trainingItemsDB.list(authStore.companyId);
+
+  return sortByRecent(items, "createdAt").map(enrichItemRecord);
+}
+
+export function enrichItemRecord(item) {
+  const trainingType = normalizeTrainingType(item.trainingType);
+  return {
+    ...item,
+    trainingType,
+    typeLabel:    getTrainingTypeLabel(trainingType),
+    subTypeLabel: ITEM_SUB_TYPE_LABELS[item.subType] ?? "",
+  };
+}
+
+/* ──────────────────────────────────────────────────────────
+   교육 회차 CRUD
+────────────────────────────────────────────────────────── */
+
+/**
+ * 교육 회차 생성
+ * @param {object} values
+ *   itemId, startDate, endDate, deadline, branchIds, branchNames,
+ *   note, companyId, companyName
+ *   (title, trainingType, instructorId, instructorName 은 항목에서 상속)
+ */
+export async function createTrainingSession(item, values) {
+  if (!item?.id) throw new Error("createTrainingSession: itemId 가 필요합니다.");
+
+  const now = Date.now();
+  const status = computeSessionStatus({
+    startDate: values.startDate,
+    endDate:   values.endDate,
+  });
+
+  const payload = {
+    itemId:         item.id,
+    // 항목에서 상속
+    title:          item.title ?? "",
+    trainingType:   item.trainingType ?? "other",
+    subType:        item.subType ?? "",
+    instructorId:   item.instructorId ?? "",
+    instructorName: item.instructorName ?? "",
+    defaultHours:   item.defaultHours ?? 0,
+    // 회차 고유 필드
+    startDate:      values.startDate ?? null,
+    endDate:        values.endDate   ?? null,
+    deadline:       values.deadline  ?? null,
+    branchIds:      Array.isArray(values.branchIds)   ? values.branchIds   : [],
+    branchNames:    Array.isArray(values.branchNames) ? values.branchNames : [],
+    note:           String(values.note ?? "").trim(),
+    status,
+    companyId:      values.companyId ?? item.companyId ?? authStore.companyId ?? null,
+    companyName:    values.companyName ?? item.companyName ?? "",
+    createdBy:      authStore.uid,
+    createdByName:  authStore.name,
+    createdAt:      now,
+    updatedAt:      now,
+  };
+
+  const ref = await trainingSessionsDB.create(payload);
+  return ref.key;
+}
+
+/**
+ * 교육 회차 수정
+ */
+export async function updateTrainingSession(sessionId, values) {
+  const status = computeSessionStatus({
+    startDate: values.startDate,
+    endDate:   values.endDate,
+  });
+  await trainingSessionsDB.update(sessionId, {
+    startDate:   values.startDate ?? null,
+    endDate:     values.endDate   ?? null,
+    deadline:    values.deadline  ?? null,
+    branchIds:   Array.isArray(values.branchIds)   ? values.branchIds   : [],
+    branchNames: Array.isArray(values.branchNames) ? values.branchNames : [],
+    note:        String(values.note ?? "").trim(),
+    status,
+    updatedBy:      authStore.uid,
+    updatedByName:  authStore.name,
+  });
+}
+
+/**
+ * 교육 회차 종료
+ */
+export async function closeSession(sessionId) {
+  await trainingSessionsDB.close(sessionId, {
+    closedBy:     authStore.uid,
+    closedByName: authStore.name,
+  });
+}
+
+/**
+ * 교육 회차 완료 처리
+ * — 배정된 직원 전원에게 sessionCompletion 생성 (중복 방지)
+ * — 이 기록이 직원 교육이력카드 PASS의 근거가 됨
+ */
+export async function completeSession(sessionId) {
+  const [session, assignments, existing] = await Promise.all([
+    trainingSessionsDB.get(sessionId),
+    sessionAssignmentsDB.forSession(sessionId),
+    sessionCompletionsDB.forSession(sessionId),
+  ]);
+
+  if (!session) throw new Error("회차 정보를 찾을 수 없습니다.");
+  if (!assignments.length) throw new Error("NO_ASSIGNMENTS");
+
+  const existingUids = new Set(existing.map((c) => c.uid));
+  const now = Date.now();
+
+  // 아직 완료 기록이 없는 직원만 생성 (중복 방지)
+  const pending = assignments.filter((a) => !existingUids.has(a.uid));
+
+  for (const assignment of pending) {
+    await sessionCompletionsDB.complete(sessionId, assignment.uid, {
+      itemId:          session.itemId ?? "",
+      trainingTitle:   session.title ?? "",
+      trainingType:    session.trainingType ?? "other",
+      subType:         session.subType ?? "",
+      instructorName:  session.instructorName ?? "",
+      startDate:       session.startDate ?? null,
+      endDate:         session.endDate   ?? null,
+      completedAt:     now,
+      completedBy:     authStore.uid,
+      completedByName: authStore.name,
+    });
+  }
+
+  await trainingSessionsDB.complete(sessionId, {
+    completedBy:     authStore.uid,
+    completedByName: authStore.name,
+  });
+}
+
+/**
+ * 교육 회차 삭제 (배정/수료 데이터 포함)
+ */
+export async function deleteSession(sessionId) {
+  await trainingSessionsDB.deleteCascade(sessionId);
+}
+
+/* ──────────────────────────────────────────────────────────
+   회차 대상자 배정
+────────────────────────────────────────────────────────── */
+
+/**
+ * 회차에 직원 배정
+ */
+export async function assignEmployeesToSession(session, employeeIds, references = null) {
+  const sessionId = session?.id;
+  if (!sessionId) throw new Error("assignEmployeesToSession: sessionId 가 필요합니다.");
+
+  const refs = references ?? await loadTrainingReferences();
+  const users = refs.employees.filter((e) => employeeIds.includes(e.id ?? e.uid));
+  if (!users.length) return;
+
+  await sessionAssignmentsDB.assignUsers(sessionId, users, {
+    assignedBy:   authStore.uid,
+    sessionTitle: session.title ?? "",
+    itemId:       session.itemId ?? "",
+    deadline:     session.deadline ?? null,
+  });
+}
+
+/**
+ * 회차 배정 해제
+ */
+export async function unassignFromSession(sessionId, uid) {
+  await sessionAssignmentsDB.remove(sessionId, uid);
+}
+
+/* ──────────────────────────────────────────────────────────
+   회차 상세 조회 (배정/수료 포함)
+────────────────────────────────────────────────────────── */
+
+export async function getSessionDetail(sessionId) {
+  const [session, assignments, completions, references] = await Promise.all([
+    trainingSessionsDB.get(sessionId),
+    sessionAssignmentsDB.forSession(sessionId),
+    sessionCompletionsDB.forSession(sessionId),
+    loadTrainingReferences(),
+  ]);
+
+  if (!session) return null;
+
+  const usersById         = new Map(references.users.map((u) => [u.id ?? u.uid, u]));
+  const completionsByUid  = new Map(completions.map((c) => [c.uid, c]));
+
+  const assignmentRows = assignments.map((a) => {
+    const user       = usersById.get(a.uid) ?? {};
+    const completion = completionsByUid.get(a.uid);
+    return {
+      ...a,
+      name:             a.employeeName ?? user.name ?? "-",
+      empNo:            a.empNo ?? user.empNo ?? "-",
+      companyName:      a.companyName ?? user.companyName ?? "-",
+      branchName:       a.branchName ?? user.branchName ?? "-",
+      completionStatus: completion?.status ?? "pending",
+      completedAt:      completion?.completedAt ?? null,
+    };
+  }).sort((a, b) => Number(b.assignedAt ?? 0) - Number(a.assignedAt ?? 0));
+
+  const completionRows = completions.map((c) => {
+    const user = usersById.get(c.uid) ?? {};
+    return {
+      ...c,
+      name:        user.name ?? "-",
+      empNo:       user.empNo ?? "-",
+      companyName: user.companyName ?? "-",
+      branchName:  user.branchName ?? "-",
+    };
+  }).sort((a, b) => Number(b.completedAt ?? 0) - Number(a.completedAt ?? 0));
+
+  return {
+    session: {
+      ...session,
+      id: session.id ?? sessionId,
+      computedStatus: computeSessionStatus(session),
+    },
+    item:        null,   // Step 2에서 항목 정보 연결
+    references,
+    assignments: assignmentRows,
+    completions: completionRows,
+  };
+}
+
+/* ──────────────────────────────────────────────────────────
+   항목 상세 조회 (회차 목록 포함)
+────────────────────────────────────────────────────────── */
+
+export async function getItemDetail(itemId) {
+  const [item, sessions] = await Promise.all([
+    trainingItemsDB.get(itemId),
+    trainingSessionsDB.listByItem(itemId),
+  ]);
+
+  if (!item) return null;
+
+  return {
+    item: enrichItemRecord({ ...item, id: item.id ?? itemId }),
+    sessions: sortByRecent(sessions, "startDate").map((s) => ({
+      ...s,
+      computedStatus: computeSessionStatus(s),
+    })),
+  };
+}
+
+/* ──────────────────────────────────────────────────────────
+   직원 교육이력카드 — 회차 수료 기록 포함
+   기존 buildEmployeeHistoryRows 는 위에 그대로 유지
+   신규: buildEmployeeHistoryRowsV2 — 회차 기반 이력 포함
+────────────────────────────────────────────────────────── */
+
+export async function buildEmployeeHistoryRowsV2(uid) {
+  const [
+    user,
+    // 기존 trainings 기반
+    legacyAssignments,
+    legacyCompletions,
+    legacyTrainings,
+    // 신규 sessions 기반
+    sessionCompletionsList,
+  ] = await Promise.all([
+    usersDB.get(uid),
+    assignmentsDB.forUser(uid),
+    completionsDB.forUser(uid),
+    authStore.role === ROLES.SUPER_ADMIN
+      ? trainingsDB.listAll()
+      : trainingsDB.list(authStore.companyId),
+    sessionCompletionsDB.forUser(uid),
+  ]);
+
+  // ── 기존 trainings 기반 행 (기존 buildEmployeeHistoryRows 와 동일)
+  const trainingMap   = new Map(legacyTrainings.map((t) => [t.id, t]));
+  const completionMap = new Map(legacyCompletions.map((c) => [c.trainingId, c]));
+  const assignmentMap = new Map(legacyAssignments.map((a) => [a.trainingId, a]));
+  const legacyIds     = Array.from(new Set([...assignmentMap.keys(), ...completionMap.keys()]));
+
+  const legacyRows = legacyIds.map((trainingId) => {
+    const training   = trainingMap.get(trainingId) ?? {};
+    const assignment = assignmentMap.get(trainingId) ?? {};
+    const completion = completionMap.get(trainingId) ?? {};
+    const trainingType = normalizeTrainingType(training.trainingType);
+
+    return {
+      _source:         "legacy",         // 기존 trainings 기반임을 표시
+      uid,
+      trainingId,
+      sessionId:       null,
+      employeeName:    user?.name ?? "-",
+      empNo:           user?.empNo ?? "-",
+      companyName:     user?.companyName ?? training.companyName ?? "-",
+      branchName:      user?.branchName ?? assignment.branchName ?? "-",
+      title:           training.title ?? assignment.trainingTitle ?? "-",
+      trainingType,
+      trainingTypeLabel: getTrainingTypeLabel(trainingType),
+      subType:         training.subType ?? "",
+      assignedAt:      assignment.assignedAt ?? null,
+      startDate:       training.startDate ?? null,
+      endDate:         training.endDate   ?? null,
+      completedAt:     completion.completedAt ?? null,
+      signedAt:        completion.signedAt ?? null,
+      signatureUrl:    completion.signatureUrl ?? "",
+      completionStatus: completion.status ?? assignment.status ?? "pending",
+      instructorName:  training.instructorName ?? "-",
+      deadline:        assignment.deadline ?? training.deadline ?? null,
+      note:            completion.note ?? "",
+    };
+  });
+
+  // ── 신규 sessions 기반 행
+  const sessionRows = sessionCompletionsList.map((sc) => {
+    const trainingType = normalizeTrainingType(sc.trainingType);
+    return {
+      _source:         "session",        // 신규 sessions 기반임을 표시
+      uid,
+      trainingId:      null,
+      sessionId:       sc.sessionId,
+      itemId:          sc.itemId ?? "",
+      employeeName:    user?.name ?? "-",
+      empNo:           user?.empNo ?? "-",
+      companyName:     user?.companyName ?? "-",
+      branchName:      user?.branchName ?? "-",
+      title:           sc.trainingTitle ?? "-",
+      trainingType,
+      trainingTypeLabel: getTrainingTypeLabel(trainingType),
+      subType:         sc.subType ?? "",
+      assignedAt:      null,
+      startDate:       sc.startDate ?? null,
+      endDate:         sc.endDate   ?? null,
+      completedAt:     sc.completedAt ?? null,
+      signedAt:        sc.completedAt ?? null,  // 회차 완료 = 서명 처리
+      signatureUrl:    "",
+      completionStatus: "completed",    // 회차 수료는 항상 PASS
+      instructorName:  sc.instructorName ?? "-",
+      deadline:        null,
+      note:            sc.note ?? "",
+    };
+  });
+
+  // ── 합산 후 완료일 기준 최신순 정렬
+  const allRows = [...legacyRows, ...sessionRows];
+
+  return {
+    employee: user ? { uid, ...user } : null,
+    rows:     sortByRecent(allRows, "completedAt"),
   };
 }
