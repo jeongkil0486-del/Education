@@ -540,12 +540,24 @@ function renderLedgerTable() {
     </table>`;
 
   // 단일 클릭 = 하이라이트, 더블클릭 = 이력카드 이동
+  // dblclick은 click 이벤트 2회 발화를 수반하므로 타이머로 구분
   el.querySelectorAll("tbody tr[data-uid]").forEach((row) => {
+    let clickTimer = null;
+
     row.addEventListener("click", () => {
-      el.querySelectorAll("tbody tr").forEach((r) => r.style.background = "");
-      row.style.background = "var(--brand-50, #eff6ff)";
+      // 이전 단일클릭 타이머 취소 (더블클릭이면 이 블록은 실행 안 됨)
+      clearTimeout(clickTimer);
+      clickTimer = setTimeout(() => {
+        // 단일 클릭: 행 선택 하이라이트
+        el.querySelectorAll("tbody tr").forEach((r) => r.style.background = "");
+        row.style.background = "var(--brand-50, #eff6ff)";
+      }, 220); // 더블클릭 인식 시간(보통 200ms)보다 약간 길게
     });
+
     row.addEventListener("dblclick", () => {
+      clearTimeout(clickTimer); // 단일클릭 타이머 취소
+      // 더블클릭: 개인 교육이력카드로 이동
+      // SUPER_ADMIN은 history-cards가 읽기 전용으로 열림 (권한 처리는 history-cards.js에서 담당)
       router.push("history-cards", { uid: row.dataset.uid });
     });
   });
