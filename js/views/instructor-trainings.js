@@ -1,13 +1,16 @@
 /**
- * instructor-trainings.js ??媛뺤궗 援먯쑁 愿由??붾㈃ (Step 2)
+ * instructor-trainings.js — 강사 교육 관리 화면 (Step 2)
  *
- * ??援ъ“
- *   [援먯쑁 ??ぉ]  ???좉퇋: trainingItems / trainingSessions 湲곕컲
- *   [湲곗〈 援먯쑁]  ???덇굅?? trainings 湲곕컲 (湲곗〈 ?곗씠???좎?)
+ * 탭 구조
+ *   [교육 항목]  — 신규: trainingItems / trainingSessions 기반
+ *   [기존 교육]  — 레거시: trainings 기반 (기존 데이터 유지)
  *
- * ?좉퇋 ?먮쫫
- *   1. 援먯쑁 ??ぉ ?깅줉/愿由? *   2. ??ぉ ???대┃ ???대떦 ??ぉ???뚯감 紐⑸줉 ?몃씪???꾧컻
- *   3. ?뚯감 異붽? ??援먯쑁?쇱옄, ?섎즺湲고븳, 吏?? *   4. ?뚯감 ?곸꽭 ??諛곗젙 吏곸썝 愿由? *   5. ?뚯감 ?꾨즺 ??吏곸썝 援먯쑁?대젰移대뱶 PASS ?앹꽦
+ * 신규 흐름
+ *   1. 교육 항목 등록/관리
+ *   2. 항목 행 클릭 → 해당 항목의 회차 목록 인라인 전개
+ *   3. 회차 추가 → 교육일자, 수료기한, 지점
+ *   4. 회차 상세 → 배정 직원 관리
+ *   5. 회차 완료 → 직원 교육이력카드 PASS 생성
  */
 
 import { modal }     from "../utils/modal.js";
@@ -16,9 +19,8 @@ import { formatDate } from "../utils/date.js";
 import { router }    from "../core/router.js";
 import { authStore } from "../core/auth.js";
 import { settingsDB } from "../core/db.js";
-import { render as renderHistoryCards } from "./history-cards.js";
 import {
-  /* 湲곗〈 trainings 愿??*/
+  /* 기존 trainings 관련 */
   TRAINING_STATUS_LABELS,
   TRAINING_TYPES,
   TRAINING_TYPE_LABELS,
@@ -30,7 +32,7 @@ import {
   listInstructorTrainings,
   loadTrainingReferences,
   saveTraining,
-  /* ?좉퇋 Item / Session 愿??*/
+  /* 신규 Item / Session 관련 */
   ITEM_SUB_TYPE_LABELS,
   SESSION_STATUS_LABELS,
   buildSessionStatusChip,
@@ -55,52 +57,52 @@ import {
   normalizeNotificationSettings,
 } from "../services/notification-settings-service.js";
 
-/* ??????????????????????????????????????????????????????????
+/* ──────────────────────────────────────────────────────────
    State
-?????????????????????????????????????????????????????????? */
-let activeTab       = "items";   // "items" | "history"
+────────────────────────────────────────────────────────── */
+let activeTab       = "items";   // "items" | "legacy"
 let activeStatFilter = null;
-let historyPaneInitialized = false;
-let expandedItemId  = null;      // ?꾩옱 ?뚯감 ?⑤꼸???대┛ ??ぉ ID
+let expandedItemId  = null;      // 현재 회차 패널이 열린 항목 ID
 
 let S = {
-  /* 怨듯넻 */
+  /* 공통 */
   references:          null,
   notificationSettings: null,
-  /* ?좉퇋 */
-  items:               [],       // enrichItemRecord 泥섎━??援먯쑁 ??ぉ 諛곗뿴
+  /* 신규 */
+  items:               [],       // enrichItemRecord 처리된 교육 항목 배열
   sessionsByItem:      {},       // { [itemId]: session[] }
-  sessionDetail:       null,     // ?꾩옱 ?대┛ ?뚯감 ?곸꽭 { sessionId, detail }
-  /* ?덇굅??*/
+  sessionDetail:       null,     // 현재 열린 회차 상세 { sessionId, detail }
+  /* 레거시 */
   trainings:           [],
 };
 
-/* ??????????????????????????????????????????????????????????
-   吏꾩엯???????????????????????????????????????????????????????????? */
+/* ──────────────────────────────────────────────────────────
+   진입점
+────────────────────────────────────────────────────────── */
 export async function render(container) {
   container.innerHTML = `
     <div class="section-header">
       <div>
-        <div class="section-title">援먯쑁 愿由?/div>
-        <div class="section-subtitle">援먯쑁 ??ぉ???깅줉?섍퀬 ?뚯감蹂꾨줈 ?댁쁺?⑸땲??</div>
+        <div class="section-title">교육 관리</div>
+        <div class="section-subtitle">교육 항목을 등록하고 회차별로 운영합니다.</div>
       </div>
       <div style="display:flex;gap:var(--space-2)" id="header-actions">
         <button class="btn btn--primary" id="btn-new-item">
           <svg class="btn__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
             <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
           </svg>
-          援먯쑁 ??ぉ 異붽?
+          교육 항목 추가
         </button>
       </div>
     </div>
 
-    <!-- ??-->
+    <!-- 탭 -->
     <div style="display:flex;gap:0;border-bottom:2px solid var(--gray-200);margin-bottom:var(--space-5)">
-      <button class="tab-btn active" id="tab-items"  style="padding:var(--space-3) var(--space-5);font-size:var(--text-sm)">援먯쑁 ??ぉ</button>
-      <button class="tab-btn"        id="tab-history" style="padding:var(--space-3) var(--space-5);font-size:var(--text-sm)">援먯쑁?대젰移대뱶</button>
+      <button class="tab-btn active" id="tab-items"  style="padding:var(--space-3) var(--space-5);font-size:var(--text-sm)">교육 항목</button>
+      <button class="tab-btn"        id="tab-legacy" style="padding:var(--space-3) var(--space-5);font-size:var(--text-sm)">기존 교육</button>
     </div>
 
-    <!-- ?좉퇋: 援먯쑁 ??ぉ ??-->
+    <!-- 신규: 교육 항목 탭 -->
     <div id="pane-items">
       <div class="dashboard-grid dashboard-grid--compact" id="item-stats" style="margin-bottom:var(--space-5)"></div>
       <div class="card" style="margin-bottom:var(--space-4)">
@@ -110,7 +112,7 @@ export async function render(container) {
               <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.25"/>
               <path d="M11 11l3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
             </svg>
-            <input class="form-control" id="search-items" type="search" placeholder="援먯쑁 ??ぉ紐낆쑝濡?寃?? />
+            <input class="form-control" id="search-items" type="search" placeholder="교육 항목명으로 검색" />
           </div>
         </div>
       </div>
@@ -121,29 +123,67 @@ export async function render(container) {
       </div>
     </div>
 
-    <!-- 강사용 교육이력카드 탭 -->
-    <div id="pane-history" style="display:none">
-      <div style="display:flex;align-items:center;justify-content:center;padding:var(--space-12)">
-        <div class="splash__spinner" style="border-color:var(--gray-200);border-top-color:var(--brand-400)"></div>
+    <!-- 레거시: 기존 교육 탭 -->
+    <div id="pane-legacy" style="display:none">
+      <div class="dashboard-grid dashboard-grid--compact" id="training-stats" style="margin-bottom:var(--space-5)"></div>
+      <div class="card" style="margin-bottom:var(--space-5)">
+        <div class="card__body card__body--compact">
+          <div class="filter-bar" style="margin-bottom:var(--space-3)">
+            <div class="filter-bar__search input-group" style="flex:1;min-width:220px">
+              <svg class="input-group__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.25"/>
+                <path d="M11 11l3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+              </svg>
+              <input class="form-control" id="search-trainings" type="search" placeholder="교육명으로 검색" />
+            </div>
+          </div>
+          <div style="display:flex;gap:var(--space-3);flex-wrap:wrap">
+            <select class="form-control" id="filter-status" style="flex:1;min-width:120px">
+              <option value="">전체 상태</option>
+              ${Object.entries(TRAINING_STATUS_LABELS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}
+            </select>
+            <select class="form-control" id="filter-type" style="flex:1;min-width:120px">
+              <option value="">전체 유형</option>
+              ${TRAINING_TYPES.map((t) => `<option value="${t}">${TRAINING_TYPE_LABELS[t]}</option>`).join("")}
+            </select>
+            <select class="form-control" id="filter-branch" style="flex:1;min-width:140px">
+              <option value="">전체 지점</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div style="margin-bottom:var(--space-4)">
+        <button class="btn btn--secondary btn--sm" id="btn-create-legacy">+ 기존 방식으로 교육 등록</button>
+      </div>
+      <div class="table-wrap" id="trainings-table-wrap">
+        <div style="display:flex;align-items:center;justify-content:center;padding:var(--space-12)">
+          <div class="splash__spinner" style="border-color:var(--gray-200);border-top-color:var(--brand-400)"></div>
+        </div>
       </div>
     </div>
   `;
 
-  /* ???대깽??*/
+  /* 탭 이벤트 */
   document.getElementById("tab-items")?.addEventListener("click",  () => switchTab("items"));
-  document.getElementById("tab-history")?.addEventListener("click", () => switchTab("history"));
+  document.getElementById("tab-legacy")?.addEventListener("click", () => switchTab("legacy"));
 
-  /* ?좉퇋 ??ぉ ?대깽??*/
+  /* 신규 항목 이벤트 */
   document.getElementById("btn-new-item")?.addEventListener("click",   () => openItemModal());
   document.getElementById("search-items")?.addEventListener("input",   () => renderItemsTable());
 
+  /* 레거시 이벤트 */
+  document.getElementById("btn-create-legacy")?.addEventListener("click", () => openTrainingModal());
+  document.getElementById("search-trainings")?.addEventListener("input",  () => renderTrainingTable());
+  document.getElementById("filter-status")?.addEventListener("change",    () => renderTrainingTable());
+  document.getElementById("filter-type")?.addEventListener("change",      () => renderTrainingTable());
+  document.getElementById("filter-branch")?.addEventListener("change",    () => renderTrainingTable());
 
   await loadAll();
 }
 
-/* ??????????????????????????????????????????????????????????
-   ?곗씠??濡쒕뱶
-?????????????????????????????????????????????????????????? */
+/* ──────────────────────────────────────────────────────────
+   데이터 로드
+────────────────────────────────────────────────────────── */
 async function loadAll() {
   try {
     const [references, items, trainings, notifications] = await Promise.all([
@@ -157,7 +197,7 @@ async function loadAll() {
     S.items                = items;
     S.trainings            = trainings;
     S.notificationSettings = normalizeNotificationSettings(notifications ?? {});
-    S.sessionsByItem       = {};  // ?뚯감????ぉ ?대┃ ??lazy load
+    S.sessionsByItem       = {};  // 회차는 항목 클릭 시 lazy load
 
     if (!getVisibleDeadlineBuckets(S.notificationSettings).some((b) => b.key === activeStatFilter)) {
       activeStatFilter = null;
@@ -170,36 +210,28 @@ async function loadAll() {
     renderTrainingTable();
   } catch (err) {
     console.error("[instructor-trainings] loadAll failed", err);
-    toast.error("?곗씠?곕? 遺덈윭?ㅼ? 紐삵뻽?듬땲??");
+    toast.error("데이터를 불러오지 못했습니다.");
   }
 }
 
-/* ??????????????????????????????????????????????????????????
-   ???꾪솚
-?????????????????????????????????????????????????????????? */
+/* ──────────────────────────────────────────────────────────
+   탭 전환
+────────────────────────────────────────────────────────── */
 function switchTab(tab) {
   activeTab = tab;
-  document.getElementById("pane-items").style.display = tab === "items" ? "" : "none";
-  document.getElementById("pane-history").style.display = tab === "history" ? "" : "none";
-  document.getElementById("tab-items").classList.toggle("active", tab === "items");
-  document.getElementById("tab-history").classList.toggle("active", tab === "history");
+  document.getElementById("pane-items").style.display  = tab === "items"  ? "" : "none";
+  document.getElementById("pane-legacy").style.display = tab === "legacy" ? "" : "none";
+  document.getElementById("tab-items").classList.toggle("active",  tab === "items");
+  document.getElementById("tab-legacy").classList.toggle("active", tab === "legacy");
 
   const headerBtn = document.getElementById("btn-new-item");
   if (headerBtn) headerBtn.style.display = tab === "items" ? "" : "none";
-
-  if (tab === "history") {
-    void ensureHistoryPane();
-  }
 }
 
-async function ensureHistoryPane() {
-  if (historyPaneInitialized) return;
-  const pane = document.getElementById("pane-history");
-  if (!pane) return;
+/* ══════════════════════════════════════════════════════════
+   ★ 신규: 교육 항목 탭
+══════════════════════════════════════════════════════════ */
 
-  historyPaneInitialized = true;
-  await renderHistoryCards(pane);
-}
 function renderItemStats() {
   const wrap = document.getElementById("item-stats");
   if (!wrap) return;
@@ -216,9 +248,9 @@ function renderItemStats() {
   }).length;
 
   wrap.innerHTML = [
-    { label: "援먯쑁 ??ぉ ??,   value: total,     tone: "" },
-    { label: "吏꾪뻾以??뚯감",    value: active,    tone: "success" },
-    { label: "?꾨즺???뚯감",    value: completed, tone: "" },
+    { label: "교육 항목 수",   value: total,     tone: "" },
+    { label: "진행중 회차",    value: active,    tone: "success" },
+    { label: "완료된 회차",    value: completed, tone: "" },
   ].map(({ label, value, tone }) => `
     <div class="stat-card">
       <div class="stat-card__label">${label}</div>
@@ -226,7 +258,7 @@ function renderItemStats() {
     </div>`).join("");
 }
 
-/* ??ぉ ?뚯씠釉??뚮뜑留?*/
+/* 항목 테이블 렌더링 */
 function renderItemsTable() {
   const body   = document.getElementById("items-body");
   if (!body) return;
@@ -239,9 +271,9 @@ function renderItemsTable() {
   if (!items.length) {
     body.innerHTML = `
       <div class="empty-state" style="padding:var(--space-16)">
-        <div class="empty-state__title">?깅줉??援먯쑁 ??ぉ???놁뒿?덈떎.</div>
+        <div class="empty-state__title">등록된 교육 항목이 없습니다.</div>
         <div style="margin-top:var(--space-3)">
-          <button class="btn btn--primary btn--sm" id="btn-empty-new-item">援먯쑁 ??ぉ 異붽?</button>
+          <button class="btn btn--primary btn--sm" id="btn-empty-new-item">교육 항목 추가</button>
         </div>
       </div>`;
     body.querySelector("#btn-empty-new-item")?.addEventListener("click", () => openItemModal());
@@ -253,11 +285,11 @@ function renderItemsTable() {
       <table class="data-table">
         <thead>
           <tr>
-            <th>援먯쑁 ??ぉ紐?/th>
-            <th>援먯쑁?좏삎</th>
-            <th>珥덇린/蹂댁닔</th>
-            <th>湲곕낯 援먯쑁?쒓컙</th>
-            <th>鍮꾧퀬</th>
+            <th>교육 항목명</th>
+            <th>교육유형</th>
+            <th>초기/보수</th>
+            <th>기본 교육시간</th>
+            <th>비고</th>
             <th style="width:140px"></th>
           </tr>
         </thead>
@@ -267,7 +299,7 @@ function renderItemsTable() {
       </table>
     </div>`;
 
-  /* ???대┃ ???뚯감 ?⑤꼸 ?좉? */
+  /* 행 클릭 → 회차 패널 토글 */
   body.querySelectorAll("tr[data-item-id]").forEach((row) => {
     row.addEventListener("click", (e) => {
       if (e.target.closest(".cell--actions")) return;
@@ -296,7 +328,7 @@ function renderItemsTable() {
     });
   });
 
-  /* ?대? ?대젮?덈뜕 ?⑤꼸 蹂듭썝 */
+  /* 이미 열려있던 패널 복원 */
   if (expandedItemId && S.items.find((i) => i.id === expandedItemId)) {
     renderSessionPanel(expandedItemId);
   }
@@ -315,41 +347,41 @@ function itemRow(item) {
         </div>
       </td>
       <td>${esc(item.typeLabel)}</td>
-      <td>${esc(item.subTypeLabel || "??)}</td>
-      <td>${item.defaultHours ? `${item.defaultHours}?쒓컙` : "??}</td>
-      <td style="color:var(--gray-400);font-size:var(--text-xs)">${esc(item.note || "??)}</td>
+      <td>${esc(item.subTypeLabel || "–")}</td>
+      <td>${item.defaultHours ? `${item.defaultHours}시간` : "–"}</td>
+      <td style="color:var(--gray-400);font-size:var(--text-xs)">${esc(item.note || "–")}</td>
       <td class="cell--actions">
         <div style="display:flex;gap:4px;justify-content:flex-end">
-          <button class="btn btn--ghost btn--sm btn-add-session"  data-id="${item.id}" title="?뚯감 異붽?">?뚯감 異붽?</button>
-          <button class="btn btn--ghost btn--sm btn-item-edit"    data-id="${item.id}" title="?섏젙">?섏젙</button>
-          <button class="btn btn--ghost btn--sm btn-item-delete"  data-id="${item.id}" title="??젣" style="color:var(--color-danger)">??젣</button>
+          <button class="btn btn--ghost btn--sm btn-add-session"  data-id="${item.id}" title="회차 추가">회차 추가</button>
+          <button class="btn btn--ghost btn--sm btn-item-edit"    data-id="${item.id}" title="수정">수정</button>
+          <button class="btn btn--ghost btn--sm btn-item-delete"  data-id="${item.id}" title="삭제" style="color:var(--color-danger)">삭제</button>
         </div>
       </td>
     </tr>
     <tr id="session-panel-${item.id}" style="${isExpanded ? "" : "display:none"}">
       <td colspan="6" style="padding:0;background:var(--gray-50)">
         <div id="session-panel-body-${item.id}" style="padding:var(--space-4)">
-          <div style="color:var(--gray-400);font-size:var(--text-sm);padding:var(--space-4)">遺덈윭?ㅻ뒗 以묅?/div>
+          <div style="color:var(--gray-400);font-size:var(--text-sm);padding:var(--space-4)">불러오는 중…</div>
         </div>
       </td>
     </tr>`;
 }
 
-/* ??????????????????????????????????????????????????????????
-   ?뚯감 ?⑤꼸 (??ぉ ???꾨옒 ?몃씪???꾧컻)
-?????????????????????????????????????????????????????????? */
+/* ──────────────────────────────────────────────────────────
+   회차 패널 (항목 행 아래 인라인 전개)
+────────────────────────────────────────────────────────── */
 async function toggleSessionPanel(itemId) {
   if (expandedItemId === itemId) {
     expandedItemId = null;
     renderItemsTable();
     return;
   }
-  /* loadAndRenderSessions ?대??먯꽌 expandedItemId ?ㅼ젙 + renderItemsTable ?몄텧 */
+  /* loadAndRenderSessions 내부에서 expandedItemId 설정 + renderItemsTable 호출 */
   await loadAndRenderSessions(itemId);
 }
 
 async function loadAndRenderSessions(itemId) {
-  /* ?⑤꼸 DOM??議댁옱?섎룄濡?癒쇱? ?뚯씠釉붿쓣 ?뚮뜑 */
+  /* 패널 DOM이 존재하도록 먼저 테이블을 렌더 */
   if (expandedItemId !== itemId) {
     expandedItemId = itemId;
     renderItemsTable();
@@ -360,7 +392,8 @@ async function loadAndRenderSessions(itemId) {
     panelBody.innerHTML = `
       <div style="display:flex;align-items:center;gap:var(--space-2);padding:var(--space-4);color:var(--gray-400);font-size:var(--text-sm)">
         <div class="splash__spinner" style="width:14px;height:14px;border-width:2px;border-color:var(--gray-200);border-top-color:var(--brand-400)"></div>
-        ?뚯감 ?곗씠??遺덈윭?ㅻ뒗 以묅?      </div>`;
+        회차 데이터 불러오는 중…
+      </div>`;
   }
 
   try {
@@ -373,9 +406,9 @@ async function loadAndRenderSessions(itemId) {
     const pb = document.getElementById(`session-panel-body-${itemId}`);
     if (pb) pb.innerHTML = `
       <div style="padding:var(--space-4);color:var(--color-danger);font-size:var(--text-sm)">
-        ?뚯감 ?곗씠?곕? 遺덈윭?ㅼ? 紐삵뻽?듬땲?? (${err?.message ?? "?????녿뒗 ?ㅻ쪟"})
+        회차 데이터를 불러오지 못했습니다. (${err?.message ?? "알 수 없는 오류"})
         <button class="btn btn--ghost btn--sm" style="margin-left:var(--space-2)"
-          onclick="this.closest('td').querySelector('button').disabled=true;location.reload()">?덈줈怨좎묠</button>
+          onclick="this.closest('td').querySelector('button').disabled=true;location.reload()">새로고침</button>
       </div>`;
   }
 }
@@ -390,19 +423,19 @@ function renderSessionPanel(itemId) {
   panelBody.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--space-3)">
       <div style="font-size:var(--text-sm);font-weight:var(--weight-semibold);color:var(--gray-700)">
-        ?뚯감 紐⑸줉 <span style="font-weight:normal;color:var(--gray-400)">(${sessions.length}嫄?</span>
+        회차 목록 <span style="font-weight:normal;color:var(--gray-400)">(${sessions.length}건)</span>
       </div>
-      <button class="btn btn--primary btn--sm btn-add-session-inner" data-id="${itemId}">+ ?뚯감 異붽?</button>
+      <button class="btn btn--primary btn--sm btn-add-session-inner" data-id="${itemId}">+ 회차 추가</button>
     </div>
     ${sessions.length === 0
-      ? `<div style="padding:var(--space-6);text-align:center;color:var(--gray-400);font-size:var(--text-sm)">?깅줉???뚯감媛 ?놁뒿?덈떎. ?뚯감瑜?異붽???二쇱꽭??</div>`
+      ? `<div style="padding:var(--space-6);text-align:center;color:var(--gray-400);font-size:var(--text-sm)">등록된 회차가 없습니다. 회차를 추가해 주세요.</div>`
       : `<table class="data-table" style="font-size:var(--text-xs)">
           <thead>
             <tr>
-              <th>援먯쑁湲곌컙</th>
-              <th>?섎즺湲고븳</th>
-              <th>吏??/th>
-              <th>?곹깭</th>
+              <th>교육기간</th>
+              <th>수료기한</th>
+              <th>지점</th>
+              <th>상태</th>
               <th style="width:190px"></th>
             </tr>
           </thead>
@@ -416,11 +449,14 @@ function renderSessionPanel(itemId) {
     if (item) openSessionModal(item);
   });
 
+  panelBody.querySelectorAll(".btn-session-detail").forEach((btn) => {
+    btn.addEventListener("click", () => openSessionDetailModal(btn.dataset.sid, btn.dataset.iid));
+  });
   panelBody.querySelectorAll(".btn-session-edit").forEach((btn) => {
     btn.addEventListener("click", () => {
       const s = (S.sessionsByItem[itemId] ?? []).find((x) => x.id === btn.dataset.sid);
       const i = S.items.find((x) => x.id === itemId);
-      if (s && i) void openSessionModal(i, s);
+      if (s && i) openSessionModal(i, s);
     });
   });
   panelBody.querySelectorAll(".btn-session-complete").forEach((btn) => {
@@ -437,8 +473,8 @@ function renderSessionPanel(itemId) {
 function sessionRow(s, item) {
   const period   = (s.startDate && s.endDate)
     ? `${formatDate(s.startDate)} ~ ${formatDate(s.endDate)}`
-    : "??;
-  const branches = s.branchNames?.length ? s.branchNames.join(", ") : "?꾩껜 吏??;
+    : "–";
+  const branches = s.branchNames?.length ? s.branchNames.join(", ") : "전체 지점";
   const isDone   = s.computedStatus === "completed";
   const isClosed = s.computedStatus === "closed";
 
@@ -450,43 +486,45 @@ function sessionRow(s, item) {
       <td>${buildSessionStatusChip(s.computedStatus)}</td>
       <td class="cell--actions">
         <div style="display:flex;gap:4px;justify-content:flex-end">
+          <button class="btn btn--ghost btn--sm btn-session-detail"
+            data-sid="${s.id}" data-iid="${item?.id ?? ""}" title="배정 관리">배정</button>
           ${!isDone && !isClosed
             ? `<button class="btn btn--ghost btn--sm btn-session-complete"
-                data-sid="${s.id}" style="color:var(--color-success,#16a34a)" title="?꾨즺 泥섎━">?꾨즺</button>`
+                data-sid="${s.id}" style="color:var(--color-success,#16a34a)" title="완료 처리">완료</button>`
             : ""}
           ${!isClosed && !isDone
             ? `<button class="btn btn--ghost btn--sm btn-session-close"
-                data-sid="${s.id}" title="醫낅즺 泥섎━">醫낅즺</button>`
+                data-sid="${s.id}" title="종료 처리">종료</button>`
             : ""}
           <button class="btn btn--ghost btn--sm btn-session-edit"
-            data-sid="${s.id}" title="?섏젙">?섏젙</button>
+            data-sid="${s.id}" title="수정">수정</button>
           <button class="btn btn--ghost btn--sm btn-session-delete"
-            data-sid="${s.id}" style="color:var(--color-danger)" title="??젣">??젣</button>
+            data-sid="${s.id}" style="color:var(--color-danger)" title="삭제">삭제</button>
         </div>
       </td>
     </tr>`;
 }
 
-/* ??????????????????????????????????????????????????????????
-   援먯쑁 ??ぉ 紐⑤떖 (?깅줉/?섏젙)
-?????????????????????????????????????????????????????????? */
+/* ──────────────────────────────────────────────────────────
+   교육 항목 모달 (등록/수정)
+────────────────────────────────────────────────────────── */
 function openItemModal(item = null) {
-  const label = item ? "?섏젙" : "?깅줉";
+  const label = item ? "수정" : "등록";
   const refs  = S.references;
 
   modal.open({
-    title: item ? "援먯쑁 ??ぉ ?섏젙" : "援먯쑁 ??ぉ ?깅줉",
+    title: item ? "교육 항목 수정" : "교육 항목 등록",
     size: "lg",
     body: `
       <div style="display:flex;flex-direction:column;gap:var(--space-5)">
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label form-label--required">援먯쑁 ??ぉ紐?/label>
+            <label class="form-label form-label--required">교육 항목명</label>
             <input class="form-control" id="it-title" type="text"
-              value="${escAttr(item?.title ?? "")}" placeholder="?? ?좎엯吏곸썝 吏곷Т援먯쑁" />
+              value="${escAttr(item?.title ?? "")}" placeholder="예: 신입직원 직무교육" />
           </div>
           <div class="form-group">
-            <label class="form-label form-label--required">援먯쑁?좏삎</label>
+            <label class="form-label form-label--required">교육유형</label>
             <select class="form-control" id="it-type">
               ${TRAINING_TYPES.map((t) => `
                 <option value="${t}" ${item?.trainingType === t ? "selected" : ""}>${TRAINING_TYPE_LABELS[t]}</option>
@@ -496,32 +534,32 @@ function openItemModal(item = null) {
         </div>
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label">珥덇린/蹂댁닔</label>
+            <label class="form-label">초기/보수</label>
             <select class="form-control" id="it-subtype">
-              <option value="">援щ텇 ?놁쓬</option>
-              <option value="initial"   ${item?.subType === "initial"   ? "selected" : ""}>珥덇린</option>
-              <option value="recurring" ${item?.subType === "recurring" ? "selected" : ""}>蹂댁닔</option>
+              <option value="">구분 없음</option>
+              <option value="initial"   ${item?.subType === "initial"   ? "selected" : ""}>초기</option>
+              <option value="recurring" ${item?.subType === "recurring" ? "selected" : ""}>보수</option>
             </select>
           </div>
           <div class="form-group">
-            <label class="form-label">湲곕낯 援먯쑁?쒓컙 (?쒓컙)</label>
+            <label class="form-label">기본 교육시간 (시간)</label>
             <input class="form-control" id="it-hours" type="number" min="0" step="0.5"
-              value="${item?.defaultHours ?? ""}" placeholder="?? 8" />
+              value="${item?.defaultHours ?? ""}" placeholder="예: 8" />
           </div>
         </div>
         <div class="form-group">
-          <label class="form-label">?대떦 媛뺤궗</label>
+          <label class="form-label">담당 강사</label>
           <input class="form-control" type="text" value="${escAttr(authStore.name)}" disabled />
-          <div class="form-hint">?꾩옱 濡쒓렇??怨꾩젙???대떦 媛뺤궗濡???λ맗?덈떎.</div>
+          <div class="form-hint">현재 로그인 계정이 담당 강사로 저장됩니다.</div>
         </div>
         <div class="form-group">
-          <label class="form-label">鍮꾧퀬</label>
+          <label class="form-label">비고</label>
           <textarea class="form-control" id="it-note" rows="2"
-            placeholder="援먯쑁 ??ぉ?????硫붾え">${esc(item?.note ?? "")}</textarea>
+            placeholder="교육 항목에 대한 메모">${esc(item?.note ?? "")}</textarea>
         </div>
       </div>`,
     actions: [
-      { label: "痍⑥냼", variant: "secondary", onClick: () => modal.close() },
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
       {
         label,
         variant: "primary",
@@ -532,8 +570,8 @@ function openItemModal(item = null) {
           const hours    = parseFloat(document.getElementById("it-hours")?.value ?? "") || 0;
           const note     = document.getElementById("it-note")?.value?.trim() ?? "";
 
-          if (!title) { toast.error("援먯쑁 ??ぉ紐낆쓣 ?낅젰??二쇱꽭??"); return; }
-          if (!trainType) { toast.error("援먯쑁?좏삎???좏깮??二쇱꽭??"); return; }
+          if (!title) { toast.error("교육 항목명을 입력해 주세요."); return; }
+          if (!trainType) { toast.error("교육유형을 선택해 주세요."); return; }
 
           modal.setLoading(label, true);
           try {
@@ -544,16 +582,16 @@ function openItemModal(item = null) {
             };
             if (item) {
               await updateTrainingItem(item.id, values);
-              toast.success("援먯쑁 ??ぉ???섏젙?덉뒿?덈떎.");
+              toast.success("교육 항목을 수정했습니다.");
             } else {
               await createTrainingItem(values);
-              toast.success("援먯쑁 ??ぉ???깅줉?덉뒿?덈떎.");
+              toast.success("교육 항목을 등록했습니다.");
             }
             modal.close();
             await loadAll();
           } catch (err) {
             console.error("[instructor-trainings] item save failed", err);
-            toast.error("???以??ㅻ쪟媛 諛쒖깮?덉뒿?덈떎.");
+            toast.error("저장 중 오류가 발생했습니다.");
             modal.setLoading(label, false);
           }
         },
@@ -562,38 +600,58 @@ function openItemModal(item = null) {
   });
 }
 
-/* ??????????????????????????????????????????????????????????
-   ?뚯감 紐⑤떖 (?깅줉/?섏젙 + 吏곸썝 利됱떆 諛곗젙)
-?????????????????????????????????????????????????????????? */
-async function openSessionModal(item, session = null) {
-  const label = session ? "?섏젙" : "異붽?";
-  const refs = S.references;
+/* ──────────────────────────────────────────────────────────
+   회차 모달 (등록/수정 + 직원 즉시 배정)
+────────────────────────────────────────────────────────── */
+function openSessionModal(item, session = null) {
+  const label    = session ? "수정" : "추가";
+  const refs     = S.references;
   const branches = refs?.branches ?? [];
   const employees = refs?.employees ?? [];
+  const existingBranchIds = session?.branchIds ?? [];
 
+  /* 직원 필터 상태 (모달 내부 클로저로 관리) */
   let filterBranchId = "";
-  let filterSearch = "";
-  let selectedUids = new Set();
-  let existingAssignedUids = new Set();
-
-  if (session?.id) {
-    try {
-      const detail = await getSessionDetail(session.id);
-      existingAssignedUids = new Set((detail?.assignments ?? []).map((assignment) => assignment.uid));
-      selectedUids = new Set(existingAssignedUids);
-    } catch (err) {
-      console.error("[instructor-trainings] preload session assignments failed", err);
-      toast.error("기존 배정 직원을 불러오지 못했습니다.");
-    }
-  }
+  let filterSearch   = "";
+  let selectedUids   = new Set();
 
   function getFilteredEmployees() {
-    return employees.filter((employee) => {
-      const matchBranch = !filterBranchId || employee.branchId === filterBranchId;
+    return employees.filter((e) => {
+      const matchBranch = !filterBranchId || e.branchId === filterBranchId;
       const matchSearch = !filterSearch
-        || String(employee.name ?? "").toLowerCase().includes(filterSearch)
-        || String(employee.empNo ?? "").toLowerCase().includes(filterSearch);
+        || String(e.name ?? "").toLowerCase().includes(filterSearch)
+        || String(e.empNo ?? "").toLowerCase().includes(filterSearch);
       return matchBranch && matchSearch;
+    });
+  }
+
+  function renderEmployeePicker() {
+    const list = document.getElementById("ss-emp-list");
+    if (!list) return;
+    const filtered = getFilteredEmployees();
+    if (!filtered.length) {
+      list.innerHTML = `<div style="padding:var(--space-4);color:var(--gray-400);font-size:var(--text-sm);text-align:center">해당 조건의 직원이 없습니다.</div>`;
+      return;
+    }
+    list.innerHTML = filtered.map((e) => {
+      const uid = e.id ?? e.uid;
+      const checked = selectedUids.has(uid);
+      return `
+        <label class="picker-item" style="padding:var(--space-2) var(--space-3)">
+          <input type="checkbox" class="ss-emp-cb" value="${uid}" ${checked ? "checked" : ""} />
+          <div class="picker-item__body">
+            <div class="picker-item__title" style="font-size:var(--text-sm)">${esc(e.name ?? "–")}</div>
+            <div class="picker-item__meta">${esc(e.empNo ?? "–")} · ${esc(e.branchName ?? "–")}</div>
+          </div>
+        </label>`;
+    }).join("");
+
+    list.querySelectorAll(".ss-emp-cb").forEach((cb) => {
+      cb.addEventListener("change", () => {
+        if (cb.checked) selectedUids.add(cb.value);
+        else            selectedUids.delete(cb.value);
+        updateSelCount();
+      });
     });
   }
 
@@ -602,110 +660,88 @@ async function openSessionModal(item, session = null) {
     if (el) el.textContent = `선택: ${selectedUids.size}명`;
   }
 
-  function renderEmployeePicker() {
-    const list = document.getElementById("ss-emp-list");
-    if (!list) return;
-
-    const filtered = getFilteredEmployees();
-    if (!filtered.length) {
-      list.innerHTML = `<div style="padding:var(--space-4);color:var(--gray-400);font-size:var(--text-sm);text-align:center">?대떦 議곌굔??吏곸썝???놁뒿?덈떎.</div>`;
-      return;
-    }
-
-    list.innerHTML = filtered.map((employee) => {
-      const uid = employee.id ?? employee.uid;
-      const checked = selectedUids.has(uid);
-      return `
-        <label class="picker-item" style="padding:var(--space-2) var(--space-3)">
-          <input type="checkbox" class="ss-emp-cb" value="${uid}" ${checked ? "checked" : ""} />
-          <div class="picker-item__body">
-            <div class="picker-item__title" style="font-size:var(--text-sm)">${esc(employee.name ?? "??)}</div>
-            <div class="picker-item__meta">${esc(employee.empNo ?? "??)} 쨌 ${esc(employee.branchName ?? "??)}</div>
-          </div>
-        </label>`;
-    }).join("");
-
-    list.querySelectorAll(".ss-emp-cb").forEach((checkbox) => {
-      checkbox.addEventListener("change", () => {
-        if (checkbox.checked) selectedUids.add(checkbox.value);
-        else selectedUids.delete(checkbox.value);
-        updateSelCount();
-      });
-    });
-  }
-
   modal.open({
-    title: session ? `?뚯감 ?섏젙 ??${esc(item.title)}` : `?뚯감 異붽? ??${esc(item.title)}`,
-    size: "lg",
+    title: session ? `회차 수정 — ${esc(item.title)}` : `회차 추가 — ${esc(item.title)}`,
+    size:  "lg",
     body: `
       <div style="display:flex;flex-direction:column;gap:var(--space-5)">
+
+        <!-- 교육 기간 -->
         <div class="form-row form-row--3">
           <div class="form-group">
-            <label class="form-label form-label--required">援먯쑁 ?쒖옉??/label>
+            <label class="form-label form-label--required">교육 시작일</label>
             <input class="form-control" id="ss-start" type="date" value="${toDateInput(session?.startDate)}" />
           </div>
           <div class="form-group">
-            <label class="form-label form-label--required">援먯쑁 醫낅즺??/label>
+            <label class="form-label form-label--required">교육 종료일</label>
             <input class="form-control" id="ss-end" type="date" value="${toDateInput(session?.endDate)}" />
           </div>
           <div class="form-group">
-            <label class="form-label form-label--required">?섎즺湲고븳</label>
+            <label class="form-label form-label--required">수료기한</label>
             <input class="form-control" id="ss-deadline" type="date" value="${toDateInput(session?.deadline)}" />
           </div>
         </div>
 
+        <!-- 비고 -->
         <div class="form-group">
-          <label class="form-label">鍮꾧퀬</label>
+          <label class="form-label">비고</label>
           <input class="form-control" id="ss-note" type="text"
-            value="${escAttr(session?.note ?? "")}" placeholder="?뚯감蹂?硫붾え" />
+            value="${escAttr(session?.note ?? "")}" placeholder="회차별 메모" />
         </div>
 
+        <!-- 직원 배정 -->
         <div class="form-group">
           <label class="form-label" style="font-weight:var(--weight-semibold)">
-            諛곗젙 吏곸썝 ?좏깮
-            <span id="ss-sel-count" style="font-weight:normal;color:var(--gray-400);margin-left:var(--space-2)">선택: ${selectedUids.size}명</span>
+            배정 직원 선택
+            <span id="ss-sel-count" style="font-weight:normal;color:var(--gray-400);margin-left:var(--space-2)">선택: 0명</span>
           </label>
+
+          <!-- 지점 필터 + 검색 -->
           <div style="display:flex;gap:var(--space-2);margin-bottom:var(--space-2)">
             <select class="form-control" id="ss-filter-branch" style="flex:0 0 160px">
-              <option value="">?꾩껜 吏??/option>
-              ${branches.map((branch) => `<option value="${branch.id}">${esc(branch.name ?? branch.code ?? branch.id)}</option>`).join("")}
+              <option value="">전체 지점</option>
+              ${branches.map((b) => `<option value="${b.id}">${esc(b.name ?? b.code ?? b.id)}</option>`).join("")}
             </select>
             <div class="input-group" style="flex:1">
               <svg class="input-group__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
                 <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.25"/>
                 <path d="M11 11l3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
               </svg>
-              <input class="form-control" id="ss-filter-search" type="search" placeholder="?대쫫 ?먮뒗 ?щ쾲 寃?? />
+              <input class="form-control" id="ss-filter-search" type="search" placeholder="이름 또는 사번 검색" />
             </div>
-            <button class="btn btn--ghost btn--sm" id="ss-select-all" type="button">?꾩껜 ?좏깮</button>
-            <button class="btn btn--ghost btn--sm" id="ss-clear-all" type="button">?꾩껜 ?댁젣</button>
+            <button class="btn btn--ghost btn--sm" id="ss-select-all" type="button">전체 선택</button>
+            <button class="btn btn--ghost btn--sm" id="ss-clear-all" type="button">전체 해제</button>
           </div>
+
+          <!-- 직원 목록 -->
           <div class="picker-list" id="ss-emp-list" style="max-height:240px;overflow-y:auto">
-            <div style="padding:var(--space-4);color:var(--gray-400);font-size:var(--text-sm);text-align:center">遺덈윭?ㅻ뒗 以묅?/div>
+            <div style="padding:var(--space-4);color:var(--gray-400);font-size:var(--text-sm);text-align:center">불러오는 중…</div>
           </div>
-          <div class="form-hint">저장 시 회차 정보와 직원 배정이 함께 저장됩니다. 체크 해제하면 배정 해제되고, 새로 체크하면 추가 배정됩니다.</div>
+          <div class="form-hint">회차 저장 시 선택한 직원이 자동 배정됩니다. 저장 후 배정 버튼으로 추가 배정도 가능합니다.</div>
         </div>
+
       </div>`,
     actions: [
-      { label: "痍⑥냼", variant: "secondary", onClick: () => modal.close() },
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
       {
         label,
         variant: "primary",
         onClick: async () => {
           const startDate = readDate("ss-start");
-          const endDate = readDate("ss-end");
-          const deadline = readDate("ss-deadline");
-          const note = document.getElementById("ss-note")?.value?.trim() ?? "";
+          const endDate   = readDate("ss-end");
+          const deadline  = readDate("ss-deadline");
+          const note      = document.getElementById("ss-note")?.value?.trim() ?? "";
 
-          if (!startDate || !endDate || !deadline) { toast.error("援먯쑁湲곌컙怨??섎즺湲고븳??紐⑤몢 ?낅젰??二쇱꽭??"); return; }
-          if (endDate < startDate) { toast.error("醫낅즺?쇱? ?쒖옉???댄썑?ъ빞 ?⑸땲??"); return; }
-          if (deadline < endDate) { toast.error("?섎즺湲고븳? 醫낅즺?쇨낵 媛숆굅???댄썑?ъ빞 ?⑸땲??"); return; }
+          if (!startDate || !endDate || !deadline) { toast.error("교육기간과 수료기한을 모두 입력해 주세요."); return; }
+          if (endDate < startDate) { toast.error("종료일은 시작일 이후여야 합니다."); return; }
+          if (deadline < endDate)  { toast.error("수료기한은 종료일과 같거나 이후여야 합니다."); return; }
 
-          const selectedEmployees = employees.filter((employee) => selectedUids.has(employee.id ?? employee.uid));
-          const branchIds = [...new Set(selectedEmployees.map((employee) => employee.branchId).filter(Boolean))];
-          const branchNames = branchIds.map((branchId) => branches.find((branch) => branch.id === branchId)?.name ?? branchId);
-          const addedUids = [...selectedUids].filter((uid) => !existingAssignedUids.has(uid));
-          const removedUids = [...existingAssignedUids].filter((uid) => !selectedUids.has(uid));
+          /* 선택된 직원 branchIds 자동 집계 (지점 저장용) */
+          const selectedEmployees = employees.filter((e) => selectedUids.has(e.id ?? e.uid));
+          const branchIds   = [...new Set(selectedEmployees.map((e) => e.branchId).filter(Boolean))];
+          const branchNames = branchIds.map((bid) =>
+            branches.find((b) => b.id === bid)?.name ?? bid
+          );
 
           modal.setLoading(label, true);
           try {
@@ -716,29 +752,30 @@ async function openSessionModal(item, session = null) {
             } else {
               sessionId = await createTrainingSession(item, {
                 startDate, endDate, deadline, branchIds, branchNames, note,
-                companyId: S.references?.company?.id,
+                companyId:   S.references?.company?.id,
                 companyName: S.references?.company?.name,
               });
             }
 
-            if (addedUids.length > 0) {
+            /* 선택된 직원 즉시 배정 */
+            let assignedCount = 0;
+            if (selectedUids.size > 0) {
               const sessionObj = { id: sessionId, deadline, title: item.title, itemId: item.id };
-              await assignEmployeesToSession(sessionObj, addedUids, refs);
-            }
-            if (removedUids.length > 0) {
-              await Promise.all(removedUids.map((uid) => unassignFromSession(sessionId, uid)));
+              await assignEmployeesToSession(sessionObj, [...selectedUids], refs);
+              assignedCount = selectedUids.size;
             }
 
+            /* 모든 처리 완료 후 단일 알림 */
             const msg = session
-              ? `?뚯감瑜??섏젙?덉뒿?덈떎.${addedUids.length || removedUids.length ? ` (추가 ${addedUids.length}명, 해제 ${removedUids.length}명)` : ""}`
-              : `?뚯감瑜?異붽??덉뒿?덈떎.${addedUids.length ? ` (${addedUids.length}명 배정)` : ""}`;
+              ? `회차를 수정했습니다.${assignedCount ? ` (${assignedCount}명 배정)` : ""}`
+              : `회차를 추가했습니다.${assignedCount ? ` (${assignedCount}명 배정)` : ""}`;
             toast.success(msg);
 
             modal.close();
             await loadAndRenderSessions(item.id);
           } catch (err) {
             console.error("[instructor-trainings] session save failed", err?.code, err?.message, err);
-            toast.error(`???以??ㅻ쪟媛 諛쒖깮?덉뒿?덈떎: ${err?.message ?? "?????녿뒗 ?ㅻ쪟"}`);
+            toast.error(`저장 중 오류가 발생했습니다: ${err?.message ?? "알 수 없는 오류"}`);
             modal.setLoading(label, false);
           }
         },
@@ -746,50 +783,54 @@ async function openSessionModal(item, session = null) {
     ],
   });
 
+  /* 모달 열린 후 이벤트 바인딩 (requestAnimationFrame으로 DOM 렌더 보장) */
   requestAnimationFrame(() => {
     renderEmployeePicker();
-    updateSelCount();
 
-    document.getElementById("ss-filter-branch")?.addEventListener("change", (event) => {
-      filterBranchId = event.target.value;
+    document.getElementById("ss-filter-branch")?.addEventListener("change", (e) => {
+      filterBranchId = e.target.value;
       renderEmployeePicker();
     });
-    document.getElementById("ss-filter-search")?.addEventListener("input", (event) => {
-      filterSearch = event.target.value.trim().toLowerCase();
+    document.getElementById("ss-filter-search")?.addEventListener("input", (e) => {
+      filterSearch = e.target.value.trim().toLowerCase();
       renderEmployeePicker();
     });
     document.getElementById("ss-select-all")?.addEventListener("click", () => {
-      getFilteredEmployees().forEach((employee) => selectedUids.add(employee.id ?? employee.uid));
+      getFilteredEmployees().forEach((e) => selectedUids.add(e.id ?? e.uid));
       renderEmployeePicker();
       updateSelCount();
     });
     document.getElementById("ss-clear-all")?.addEventListener("click", () => {
-      getFilteredEmployees().forEach((employee) => selectedUids.delete(employee.id ?? employee.uid));
+      getFilteredEmployees().forEach((e) => selectedUids.delete(e.id ?? e.uid));
       renderEmployeePicker();
       updateSelCount();
     });
   });
 }
+
+/* ──────────────────────────────────────────────────────────
+   회차 배정 모달 (배정 관리)
+────────────────────────────────────────────────────────── */
 async function openSessionDetailModal(sessionId, itemId) {
-  /* 濡쒕뵫 ?쒖떆 */
+  /* 로딩 표시 */
   modal.open({
-    title: "諛곗젙 愿由?,
+    title: "배정 관리",
     size: "lg",
     body: `<div style="display:flex;justify-content:center;padding:var(--space-10)">
       <div class="splash__spinner" style="border-color:var(--gray-200);border-top-color:var(--brand-400)"></div>
     </div>`,
-    actions: [{ label: "?リ린", variant: "secondary", onClick: () => modal.close() }],
+    actions: [{ label: "닫기", variant: "secondary", onClick: () => modal.close() }],
   });
 
   try {
     const detail = await getSessionDetail(sessionId);
-    if (!detail) { toast.error("?뚯감 ?뺣낫瑜?李얠쓣 ???놁뒿?덈떎."); modal.close(); return; }
+    if (!detail) { toast.error("회차 정보를 찾을 수 없습니다."); modal.close(); return; }
 
     S.sessionDetail = { sessionId, detail };
     renderSessionDetailBody(detail, itemId);
   } catch (err) {
     console.error("[instructor-trainings] session detail failed", err);
-    toast.error("?뚯감 ?뺣낫瑜?遺덈윭?ㅼ? 紐삵뻽?듬땲??");
+    toast.error("회차 정보를 불러오지 못했습니다.");
     modal.close();
   }
 }
@@ -802,9 +843,9 @@ function renderSessionDetailBody(detail, itemId) {
 
   const period = (session.startDate && session.endDate)
     ? `${formatDate(session.startDate)} ~ ${formatDate(session.endDate)}`
-    : "??;
+    : "–";
 
-  /* 諛곗젙 媛?ν븳 吏곸썝 紐⑸줉 */
+  /* 배정 가능한 직원 목록 */
   const candidates = employees.filter((e) => {
     const uid = e.id ?? e.uid;
     return !assignedUids.has(uid);
@@ -813,20 +854,20 @@ function renderSessionDetailBody(detail, itemId) {
   const body = `
     <div style="display:flex;flex-direction:column;gap:var(--space-5)">
       <div style="display:flex;gap:var(--space-4);flex-wrap:wrap;font-size:var(--text-sm);color:var(--gray-600)">
-        <span>援먯쑁湲곌컙: <strong>${period}</strong></span>
-        <span>?섎즺湲고븳: <strong>${formatDate(session.deadline)}</strong></span>
-        <span>?곹깭: ${buildSessionStatusChip(session.computedStatus)}</span>
+        <span>교육기간: <strong>${period}</strong></span>
+        <span>수료기한: <strong>${formatDate(session.deadline)}</strong></span>
+        <span>상태: ${buildSessionStatusChip(session.computedStatus)}</span>
       </div>
 
-      <!-- 諛곗젙 ?꾪솴 -->
+      <!-- 배정 현황 -->
       <div>
         <div style="font-weight:var(--weight-semibold);font-size:var(--text-sm);margin-bottom:var(--space-2)">
-          諛곗젙 ?꾪솴 (${assignments.length}紐?
+          배정 현황 (${assignments.length}명)
         </div>
         ${assignments.length === 0
-          ? `<div style="color:var(--gray-400);font-size:var(--text-sm)">諛곗젙??吏곸썝???놁뒿?덈떎.</div>`
+          ? `<div style="color:var(--gray-400);font-size:var(--text-sm)">배정된 직원이 없습니다.</div>`
           : `<table class="data-table" style="font-size:var(--text-xs)">
-              <thead><tr><th>?대쫫</th><th>?щ쾲</th><th>吏??/th><th>?섎즺 ?곹깭</th><th style="width:80px"></th></tr></thead>
+              <thead><tr><th>이름</th><th>사번</th><th>지점</th><th>수료 상태</th><th style="width:80px"></th></tr></thead>
               <tbody>
                 ${assignments.map((a) => `
                   <tr>
@@ -834,11 +875,11 @@ function renderSessionDetailBody(detail, itemId) {
                     <td style="font-family:monospace">${esc(a.empNo)}</td>
                     <td>${esc(a.branchName)}</td>
                     <td>${completedUids.has(a.uid)
-                      ? `<span class="chip chip--success">?섎즺</span>`
-                      : `<span class="chip chip--neutral">?湲?/span>`}</td>
+                      ? `<span class="chip chip--success">수료</span>`
+                      : `<span class="chip chip--neutral">대기</span>`}</td>
                     <td class="cell--actions">
                       <button class="btn btn--ghost btn--sm btn-unassign-session"
-                        data-uid="${a.uid}" style="color:var(--color-danger)">?댁젣</button>
+                        data-uid="${a.uid}" style="color:var(--color-danger)">해제</button>
                     </td>
                   </tr>`).join("")}
               </tbody>
@@ -846,30 +887,30 @@ function renderSessionDetailBody(detail, itemId) {
         }
       </div>
 
-      <!-- 吏곸썝 諛곗젙 -->
+      <!-- 직원 배정 -->
       <div>
-        <div style="font-weight:var(--weight-semibold);font-size:var(--text-sm);margin-bottom:var(--space-2)">吏곸썝 諛곗젙</div>
+        <div style="font-weight:var(--weight-semibold);font-size:var(--text-sm);margin-bottom:var(--space-2)">직원 배정</div>
         <div style="display:flex;gap:var(--space-2);margin-bottom:var(--space-2)">
           <div class="input-group" style="flex:1">
             <svg class="input-group__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
               <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.25"/>
               <path d="M11 11l3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
             </svg>
-            <input class="form-control" id="detail-search" type="search" placeholder="?대쫫, ?щ쾲?쇰줈 寃?? />
+            <input class="form-control" id="detail-search" type="search" placeholder="이름, 사번으로 검색" />
           </div>
-          <button class="btn btn--primary btn--sm" id="btn-do-assign">?좏깮 諛곗젙</button>
+          <button class="btn btn--primary btn--sm" id="btn-do-assign">선택 배정</button>
         </div>
         <div class="picker-list" id="candidate-picker" style="max-height:200px">
           ${candidates.length === 0
-            ? `<div style="padding:var(--space-4);color:var(--gray-400);font-size:var(--text-sm)">諛곗젙 媛?ν븳 吏곸썝???놁뒿?덈떎.</div>`
+            ? `<div style="padding:var(--space-4);color:var(--gray-400);font-size:var(--text-sm)">배정 가능한 직원이 없습니다.</div>`
             : candidates.map((e) => {
                 const uid = e.id ?? e.uid;
                 return `
                   <label class="picker-item">
                     <input type="checkbox" class="candidate-cb" value="${uid}" />
                     <div class="picker-item__body">
-                      <div class="picker-item__title">${esc(e.name ?? "??)}</div>
-                      <div class="picker-item__meta">${esc(e.empNo ?? "??)} 쨌 ${esc(e.branchName ?? "??)}</div>
+                      <div class="picker-item__title">${esc(e.name ?? "–")}</div>
+                      <div class="picker-item__meta">${esc(e.empNo ?? "–")} · ${esc(e.branchName ?? "–")}</div>
                     </div>
                   </label>`;
               }).join("")}
@@ -877,11 +918,11 @@ function renderSessionDetailBody(detail, itemId) {
       </div>
     </div>`;
 
-  /* 紐⑤떖 body 援먯껜 */
+  /* 모달 body 교체 */
   const modalBody = document.querySelector(".modal__body");
   if (modalBody) modalBody.innerHTML = body;
 
-  /* 寃???꾪꽣 */
+  /* 검색 필터 */
   document.getElementById("detail-search")?.addEventListener("input", (e) => {
     const q = e.target.value.trim().toLowerCase();
     document.querySelectorAll(".candidate-cb").forEach((cb) => {
@@ -891,75 +932,75 @@ function renderSessionDetailBody(detail, itemId) {
     });
   });
 
-  /* 諛곗젙 ?ㅽ뻾 */
+  /* 배정 실행 */
   document.getElementById("btn-do-assign")?.addEventListener("click", async () => {
     const ids = Array.from(document.querySelectorAll(".candidate-cb:checked")).map((c) => c.value);
-    if (!ids.length) { toast.warning("諛곗젙??吏곸썝???좏깮??二쇱꽭??"); return; }
+    if (!ids.length) { toast.warning("배정할 직원을 선택해 주세요."); return; }
     try {
       await assignEmployeesToSession(
         { ...session, id: sessionId },
         ids,
         S.sessionDetail?.detail?.references
       );
-      toast.success(`${ids.length}紐낆쓣 諛곗젙?덉뒿?덈떎.`);
+      toast.success(`${ids.length}명을 배정했습니다.`);
       const newDetail = await getSessionDetail(sessionId);
       S.sessionDetail = { sessionId, detail: newDetail };
       renderSessionDetailBody(newDetail, itemId);
     } catch (err) {
       console.error("[instructor-trainings] assign session failed", err);
-      toast.error("諛곗젙 以??ㅻ쪟媛 諛쒖깮?덉뒿?덈떎.");
+      toast.error("배정 중 오류가 발생했습니다.");
     }
   });
 
-  /* 諛곗젙 ?댁젣 */
+  /* 배정 해제 */
   document.querySelectorAll(".btn-unassign-session").forEach((btn) => {
     btn.addEventListener("click", async () => {
       try {
         await unassignFromSession(sessionId, btn.dataset.uid);
-        toast.success("諛곗젙???댁젣?덉뒿?덈떎.");
+        toast.success("배정을 해제했습니다.");
         const newDetail = await getSessionDetail(sessionId);
         S.sessionDetail = { sessionId, detail: newDetail };
         renderSessionDetailBody(newDetail, itemId);
       } catch (err) {
         console.error("[instructor-trainings] unassign session failed", err);
-        toast.error("諛곗젙 ?댁젣 以??ㅻ쪟媛 諛쒖깮?덉뒿?덈떎.");
+        toast.error("배정 해제 중 오류가 발생했습니다.");
       }
     });
   });
 }
 
-/* ??????????????????????????????????????????????????????????
-   ?뚯감 ?꾨즺 ?뺤씤
-?????????????????????????????????????????????????????????? */
+/* ──────────────────────────────────────────────────────────
+   회차 완료 확인
+────────────────────────────────────────────────────────── */
 function confirmCompleteSession(sessionId, itemId) {
   modal.open({
-    title: "?뚯감 ?꾨즺 泥섎━",
+    title: "회차 완료 처리",
     size: "sm",
     body: `
       <p style="font-size:var(--text-sm);color:var(--gray-600)">
-        ???뚯감瑜??꾨즺 泥섎━?섏떆寃좎뒿?덇퉴?<br/>
-        諛곗젙??吏곸썝??援먯쑁 ?대젰移대뱶???먮룞?쇰줈 <strong>PASS</strong> ?섎즺 湲곕줉???앹꽦?⑸땲??
+        이 회차를 완료 처리하시겠습니까?<br/>
+        배정된 직원의 교육 이력카드에 자동으로 <strong>PASS</strong> 수료 기록이 생성됩니다.
       </p>`,
     actions: [
-      { label: "痍⑥냼", variant: "secondary", onClick: () => modal.close() },
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
       {
-        label: "?꾨즺",
+        label: "완료",
         variant: "primary",
         onClick: async () => {
-          modal.setLoading("?꾨즺", true);
+          modal.setLoading("완료", true);
           try {
             await completeSession(sessionId);
-            toast.success("?뚯감瑜??꾨즺 泥섎━?덉뒿?덈떎. 吏곸썝 ?대젰移대뱶???섎즺 湲곕줉???앹꽦?섏뿀?듬땲??");
+            toast.success("회차를 완료 처리했습니다. 직원 이력카드에 수료 기록이 생성되었습니다.");
             modal.close();
             await loadAndRenderSessions(itemId);
           } catch (err) {
             if (err?.message === "NO_ASSIGNMENTS") {
-              toast.error("諛곗젙??吏곸썝???놁뒿?덈떎. 癒쇱? 吏곸썝??諛곗젙??二쇱꽭??");
+              toast.error("배정된 직원이 없습니다. 먼저 직원을 배정해 주세요.");
             } else {
               console.error("[instructor-trainings] completeSession failed", err);
-              toast.error("?꾨즺 泥섎━ 以??ㅻ쪟媛 諛쒖깮?덉뒿?덈떎.");
+              toast.error("완료 처리 중 오류가 발생했습니다.");
             }
-            modal.setLoading("?꾨즺", false);
+            modal.setLoading("완료", false);
           }
         },
       },
@@ -967,30 +1008,30 @@ function confirmCompleteSession(sessionId, itemId) {
   });
 }
 
-/* ??????????????????????????????????????????????????????????
-   ?뚯감 醫낅즺 ?뺤씤
-?????????????????????????????????????????????????????????? */
+/* ──────────────────────────────────────────────────────────
+   회차 종료 확인
+────────────────────────────────────────────────────────── */
 function confirmCloseSession(sessionId, itemId) {
   modal.open({
-    title: "?뚯감 醫낅즺",
+    title: "회차 종료",
     size: "sm",
-    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)">???뚯감瑜?醫낅즺 泥섎━?섏떆寃좎뒿?덇퉴?<br/>?섎즺 湲곕줉? ?앹꽦?섏? ?딆뒿?덈떎.</p>`,
+    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)">이 회차를 종료 처리하시겠습니까?<br/>수료 기록은 생성되지 않습니다.</p>`,
     actions: [
-      { label: "痍⑥냼", variant: "secondary", onClick: () => modal.close() },
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
       {
-        label: "醫낅즺",
+        label: "종료",
         variant: "primary",
         onClick: async () => {
-          modal.setLoading("醫낅즺", true);
+          modal.setLoading("종료", true);
           try {
             await closeSession(sessionId);
-            toast.success("?뚯감瑜?醫낅즺?덉뒿?덈떎.");
+            toast.success("회차를 종료했습니다.");
             modal.close();
             await loadAndRenderSessions(itemId);
           } catch (err) {
             console.error("[instructor-trainings] closeSession failed", err);
-            toast.error("?ㅻ쪟媛 諛쒖깮?덉뒿?덈떎.");
-            modal.setLoading("醫낅즺", false);
+            toast.error("오류가 발생했습니다.");
+            modal.setLoading("종료", false);
           }
         },
       },
@@ -998,30 +1039,30 @@ function confirmCloseSession(sessionId, itemId) {
   });
 }
 
-/* ??????????????????????????????????????????????????????????
-   ?뚯감 ??젣 ?뺤씤
-?????????????????????????????????????????????????????????? */
+/* ──────────────────────────────────────────────────────────
+   회차 삭제 확인
+────────────────────────────────────────────────────────── */
 function confirmDeleteSession(sessionId, itemId) {
   modal.open({
-    title: "?뚯감 ??젣",
+    title: "회차 삭제",
     size: "sm",
-    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)">???뚯감瑜???젣?섏떆寃좎뒿?덇퉴?<br/>諛곗젙 諛??섎즺 ?곗씠?곕룄 ?④퍡 ??젣?⑸땲??</p>`,
+    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)">이 회차를 삭제하시겠습니까?<br/>배정 및 수료 데이터도 함께 삭제됩니다.</p>`,
     actions: [
-      { label: "痍⑥냼", variant: "secondary", onClick: () => modal.close() },
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
       {
-        label: "??젣",
+        label: "삭제",
         variant: "danger",
         onClick: async () => {
-          modal.setLoading("??젣", true);
+          modal.setLoading("삭제", true);
           try {
             await deleteSession(sessionId);
-            toast.success("?뚯감瑜???젣?덉뒿?덈떎.");
+            toast.success("회차를 삭제했습니다.");
             modal.close();
             await loadAndRenderSessions(itemId);
           } catch (err) {
             console.error("[instructor-trainings] deleteSession failed", err);
-            toast.error("??젣 以??ㅻ쪟媛 諛쒖깮?덉뒿?덈떎.");
-            modal.setLoading("??젣", false);
+            toast.error("삭제 중 오류가 발생했습니다.");
+            modal.setLoading("삭제", false);
           }
         },
       },
@@ -1029,38 +1070,38 @@ function confirmDeleteSession(sessionId, itemId) {
   });
 }
 
-/* ??????????????????????????????????????????????????????????
-   ??ぉ ??젣 ?뺤씤
-?????????????????????????????????????????????????????????? */
+/* ──────────────────────────────────────────────────────────
+   항목 삭제 확인
+────────────────────────────────────────────────────────── */
 function confirmDeleteItem(itemId) {
   const item = S.items.find((i) => i.id === itemId);
   if (!item) return;
 
   modal.open({
-    title: "援먯쑁 ??ぉ ??젣",
+    title: "교육 항목 삭제",
     size: "sm",
     body: `
       <p style="font-size:var(--text-sm);color:var(--gray-600)">
-        <strong>${esc(item.title)}</strong> ??ぉ????젣?섏떆寃좎뒿?덇퉴?<br/>
-        ?곌껐??紐⑤뱺 ?뚯감? 諛곗젙/?섎즺 ?곗씠?곕룄 ?④퍡 ??젣?⑸땲??
+        <strong>${esc(item.title)}</strong> 항목을 삭제하시겠습니까?<br/>
+        연결된 모든 회차와 배정/수료 데이터도 함께 삭제됩니다.
       </p>`,
     actions: [
-      { label: "痍⑥냼", variant: "secondary", onClick: () => modal.close() },
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
       {
-        label: "??젣",
+        label: "삭제",
         variant: "danger",
         onClick: async () => {
-          modal.setLoading("??젣", true);
+          modal.setLoading("삭제", true);
           try {
             await deleteTrainingItem(itemId);
-            toast.success("援먯쑁 ??ぉ????젣?덉뒿?덈떎.");
+            toast.success("교육 항목을 삭제했습니다.");
             if (expandedItemId === itemId) expandedItemId = null;
             modal.close();
             await loadAll();
           } catch (err) {
             console.error("[instructor-trainings] deleteItem failed", err);
-            toast.error("??젣 以??ㅻ쪟媛 諛쒖깮?덉뒿?덈떎.");
-            modal.setLoading("??젣", false);
+            toast.error("삭제 중 오류가 발생했습니다.");
+            modal.setLoading("삭제", false);
           }
         },
       },
@@ -1068,16 +1109,16 @@ function confirmDeleteItem(itemId) {
   });
 }
 
-/* ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
-   ?덇굅?? 湲곗〈 trainings ??(湲곗〈 肄붾뱶 ?꾩쟾 蹂댁〈)
-?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧 */
+/* ══════════════════════════════════════════════════════════
+   레거시: 기존 trainings 탭 (기존 코드 완전 보존)
+══════════════════════════════════════════════════════════ */
 
 function renderBranchFilter() {
   const select = document.getElementById("filter-branch");
   if (!select) return;
   const branches = S.references?.branches ?? [];
   select.innerHTML = `
-    <option value="">?꾩껜 吏??/option>
+    <option value="">전체 지점</option>
     ${branches.map((b) => `<option value="${b.id}">${esc(b.name ?? b.code ?? b.id)}</option>`).join("")}
   `;
 }
@@ -1089,9 +1130,9 @@ function renderTrainingStats() {
   const visibleBuckets = getVisibleDeadlineBuckets(S.notificationSettings);
   wrap.innerHTML = visibleBuckets.map((bucket) => {
     const count = S.trainings.filter((t) => bucketIncludesTraining(bucket, t)).length;
-    const sub  = bucket.type === "completed" ? "?꾨즺 泥섎━??援먯쑁"
-               : bucket.type === "overdue"   ? "?섎즺湲고븳??吏??援먯쑁"
-               : `?ㅻ뒛遺??${bucket.days}???대궡 留덇컧`;
+    const sub  = bucket.type === "completed" ? "완료 처리된 교육"
+               : bucket.type === "overdue"   ? "수료기한이 지난 교육"
+               : `오늘부터 ${bucket.days}일 이내 마감`;
     const tone = bucket.type === "completed" ? "success"
                : bucket.type === "overdue"   ? "danger"
                : "warning";
@@ -1122,7 +1163,7 @@ function renderTrainingTable() {
   if (!filtered.length) {
     wrap.innerHTML = `
       <div class="empty-state" style="padding:var(--space-16)">
-        <div class="empty-state__title">議곌굔??留욌뒗 援먯쑁???놁뒿?덈떎.</div>
+        <div class="empty-state__title">조건에 맞는 교육이 없습니다.</div>
       </div>`;
     return;
   }
@@ -1131,8 +1172,8 @@ function renderTrainingTable() {
     <table class="data-table">
       <thead>
         <tr>
-          <th>援먯쑁紐?/th><th>援먯쑁?좏삎</th><th>?뚯궗/吏??/th>
-          <th>援먯쑁湲곌컙</th><th>?섎즺湲고븳</th><th>?곹깭</th><th>?앹꽦??/th>
+          <th>교육명</th><th>교육유형</th><th>회사/지점</th>
+          <th>교육기간</th><th>수료기한</th><th>상태</th><th>생성일</th>
           <th style="width:160px"></th>
         </tr>
       </thead>
@@ -1166,7 +1207,7 @@ function renderTrainingTable() {
 }
 
 function legacyTrainingRow(training) {
-  const branchSummary = training.branchNames?.length ? training.branchNames.join(", ") : "?꾩껜 吏??;
+  const branchSummary = training.branchNames?.length ? training.branchNames.join(", ") : "전체 지점";
   const isOwner       = training.createdBy === authStore.uid;
   const isInstructor  = training.instructorId === authStore.uid;
   const canAct        = isOwner || isInstructor;
@@ -1174,17 +1215,17 @@ function legacyTrainingRow(training) {
   const isClosed      = training.computedStatus === "closed";
   const actions       = [];
 
-  if (isOwner) actions.push(`<button class="btn btn--ghost btn--sm btn-training-edit" data-id="${training.id}">?섏젙</button>`);
-  if (canAct && !isCompleted) actions.push(`<button class="btn btn--ghost btn--sm btn-training-complete" data-id="${training.id}" style="color:var(--color-success,#16a34a)">?꾨즺</button>`);
-  if (!isClosed && !isCompleted && canAct) actions.push(`<button class="btn btn--ghost btn--sm btn-training-close" data-id="${training.id}">醫낅즺</button>`);
-  if (isOwner) actions.push(`<button class="btn btn--ghost btn--sm btn-training-delete" data-id="${training.id}" style="color:var(--color-danger)">??젣</button>`);
+  if (isOwner) actions.push(`<button class="btn btn--ghost btn--sm btn-training-edit" data-id="${training.id}">수정</button>`);
+  if (canAct && !isCompleted) actions.push(`<button class="btn btn--ghost btn--sm btn-training-complete" data-id="${training.id}" style="color:var(--color-success,#16a34a)">완료</button>`);
+  if (!isClosed && !isCompleted && canAct) actions.push(`<button class="btn btn--ghost btn--sm btn-training-close" data-id="${training.id}">종료</button>`);
+  if (isOwner) actions.push(`<button class="btn btn--ghost btn--sm btn-training-delete" data-id="${training.id}" style="color:var(--color-danger)">삭제</button>`);
 
   return `
     <tr data-id="${training.id}" style="cursor:pointer">
       <td><div style="font-weight:var(--weight-semibold)">${esc(training.title)}</div></td>
       <td>${esc(training.typeLabel)}</td>
       <td>
-        <div>${esc(training.companyName || "??)}</div>
+        <div>${esc(training.companyName || "–")}</div>
         <div style="font-size:var(--text-xs);color:var(--gray-400)">${esc(branchSummary)}</div>
       </td>
       <td style="white-space:nowrap">${formatDate(training.startDate)} ~ ${formatDate(training.endDate)}</td>
@@ -1193,7 +1234,7 @@ function legacyTrainingRow(training) {
       <td>${formatDate(training.createdAt)}</td>
       <td class="cell--actions">
         <div style="display:flex;gap:4px;justify-content:flex-end;flex-wrap:wrap">
-          ${actions.join("") || `<span style="font-size:var(--text-xs);color:var(--gray-400)">議고쉶 ?꾩슜</span>`}
+          ${actions.join("") || `<span style="font-size:var(--text-xs);color:var(--gray-400)">조회 전용</span>`}
         </div>
       </td>
     </tr>`;
@@ -1216,25 +1257,25 @@ function getLegacyFiltered() {
   });
 }
 
-/* ?덇굅??援먯쑁 ?깅줉/?섏젙 紐⑤떖 */
+/* 레거시 교육 등록/수정 모달 */
 function openTrainingModal(training = null) {
-  const label   = training ? "?섏젙" : "?깅줉";
+  const label   = training ? "수정" : "등록";
   const refs    = S.references;
   const branchIds = training?.branchIds ?? [];
 
   modal.open({
-    title: training ? "援먯쑁 ?섏젙" : "援먯쑁 ?깅줉 (湲곗〈 諛⑹떇)",
+    title: training ? "교육 수정" : "교육 등록 (기존 방식)",
     size: "lg",
     body: `
       <div style="display:flex;flex-direction:column;gap:var(--space-5)">
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label form-label--required">援먯쑁紐?/label>
+            <label class="form-label form-label--required">교육명</label>
             <input class="form-control" id="t-title" type="text"
-              value="${escAttr(training?.title ?? "")}" placeholder="?? 2026 ?쒕퉬?ㅺ탳?? />
+              value="${escAttr(training?.title ?? "")}" placeholder="예: 2026 서비스교육" />
           </div>
           <div class="form-group">
-            <label class="form-label form-label--required">援먯쑁?좏삎</label>
+            <label class="form-label form-label--required">교육유형</label>
             <select class="form-control" id="t-type">
               ${TRAINING_TYPES.map((t) => `<option value="${t}" ${training?.trainingType === t ? "selected" : ""}>${TRAINING_TYPE_LABELS[t]}</option>`).join("")}
             </select>
@@ -1242,16 +1283,16 @@ function openTrainingModal(training = null) {
         </div>
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label">?뚯궗</label>
-            <input class="form-control" type="text" value="${escAttr(refs?.company?.name || "??)}" disabled />
+            <label class="form-label">회사</label>
+            <input class="form-control" type="text" value="${escAttr(refs?.company?.name || "–")}" disabled />
           </div>
           <div class="form-group">
-            <label class="form-label">?대떦 媛뺤궗</label>
+            <label class="form-label">담당 강사</label>
             <input class="form-control" type="text" value="${escAttr(authStore.name)}" disabled />
           </div>
         </div>
         <div class="form-group">
-          <label class="form-label form-label--required">吏??/label>
+          <label class="form-label form-label--required">지점</label>
           <div class="selection-grid">
             ${(refs?.branches ?? []).map((b) => `
               <label class="selection-chip">
@@ -1263,21 +1304,21 @@ function openTrainingModal(training = null) {
         </div>
         <div class="form-row form-row--3">
           <div class="form-group">
-            <label class="form-label form-label--required">援먯쑁 ?쒖옉??/label>
+            <label class="form-label form-label--required">교육 시작일</label>
             <input class="form-control" id="t-start" type="date" value="${toDateInput(training?.startDate)}" />
           </div>
           <div class="form-group">
-            <label class="form-label form-label--required">援먯쑁 醫낅즺??/label>
+            <label class="form-label form-label--required">교육 종료일</label>
             <input class="form-control" id="t-end" type="date" value="${toDateInput(training?.endDate)}" />
           </div>
           <div class="form-group">
-            <label class="form-label form-label--required">?섎즺湲고븳</label>
+            <label class="form-label form-label--required">수료기한</label>
             <input class="form-control" id="t-deadline" type="date" value="${toDateInput(training?.deadline)}" />
           </div>
         </div>
       </div>`,
     actions: [
-      { label: "痍⑥냼", variant: "secondary", onClick: () => modal.close() },
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
       { label, variant: "primary", onClick: () => submitLegacyForm(training?.id ?? null, label) },
     ],
   });
@@ -1293,10 +1334,10 @@ async function submitLegacyForm(trainingId, label) {
   const endDate   = readDate("t-end");
   const deadline  = readDate("t-deadline");
 
-  if (!title)                              { toast.error("援먯쑁紐낆쓣 ?낅젰??二쇱꽭??"); return; }
-  if (!startDate || !endDate || !deadline) { toast.error("?좎쭨瑜?紐⑤몢 ?낅젰??二쇱꽭??"); return; }
-  if (endDate < startDate)                 { toast.error("醫낅즺?쇱? ?쒖옉???댄썑?ъ빞 ?⑸땲??"); return; }
-  if (deadline < endDate)                  { toast.error("?섎즺湲고븳? 醫낅즺?쇨낵 媛숆굅???댄썑?ъ빞 ?⑸땲??"); return; }
+  if (!title)                              { toast.error("교육명을 입력해 주세요."); return; }
+  if (!startDate || !endDate || !deadline) { toast.error("날짜를 모두 입력해 주세요."); return; }
+  if (endDate < startDate)                 { toast.error("종료일은 시작일 이후여야 합니다."); return; }
+  if (deadline < endDate)                  { toast.error("수료기한은 종료일과 같거나 이후여야 합니다."); return; }
 
   modal.setLoading(label, true);
   try {
@@ -1313,12 +1354,12 @@ async function submitLegacyForm(trainingId, label) {
     }
     payload.updatedAt = Date.now();
     await saveTraining(payload, trainingId);
-    toast.success(trainingId ? "援먯쑁???섏젙?덉뒿?덈떎." : "援먯쑁???깅줉?덉뒿?덈떎.");
+    toast.success(trainingId ? "교육을 수정했습니다." : "교육을 등록했습니다.");
     modal.close();
     await loadAll();
   } catch (err) {
     console.error("[instructor-trainings] legacy save failed", err);
-    toast.error("???以??ㅻ쪟媛 諛쒖깮?덉뒿?덈떎.");
+    toast.error("저장 중 오류가 발생했습니다.");
     modal.setLoading(label, false);
   }
 }
@@ -1327,22 +1368,22 @@ function confirmComplete(trainingId) {
   const t = S.trainings.find((x) => x.id === trainingId);
   if (!t) return;
   modal.open({
-    title: "援먯쑁 ?꾨즺 泥섎━", size: "sm",
+    title: "교육 완료 처리", size: "sm",
     body: `<p style="font-size:var(--text-sm);color:var(--gray-600)">
-      <strong>${esc(t.title)}</strong> 援먯쑁???꾨즺 泥섎━?섏떆寃좎뒿?덇퉴?<br/>
-      諛곗젙??吏곸썝??援먯쑁 ?대젰移대뱶???먮룞?쇰줈 ?섎즺 湲곕줉???앹꽦?⑸땲??</p>`,
+      <strong>${esc(t.title)}</strong> 교육을 완료 처리하시겠습니까?<br/>
+      배정된 직원의 교육 이력카드에 자동으로 수료 기록이 생성됩니다.</p>`,
     actions: [
-      { label: "痍⑥냼", variant: "secondary", onClick: () => modal.close() },
-      { label: "?꾨즺", variant: "primary", onClick: async () => {
-        modal.setLoading("?꾨즺", true);
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      { label: "완료", variant: "primary", onClick: async () => {
+        modal.setLoading("완료", true);
         try {
           await completeTraining(trainingId);
-          toast.success("援먯쑁???꾨즺 泥섎━?덉뒿?덈떎.");
+          toast.success("교육을 완료 처리했습니다.");
           modal.close(); await loadAll();
         } catch (err) {
-          if (err?.message === "NO_ASSIGNMENTS") toast.error("諛곗젙??吏곸썝???놁뒿?덈떎.");
-          else toast.error("?꾨즺 泥섎━ 以??ㅻ쪟媛 諛쒖깮?덉뒿?덈떎.");
-          modal.setLoading("?꾨즺", false);
+          if (err?.message === "NO_ASSIGNMENTS") toast.error("배정된 직원이 없습니다.");
+          else toast.error("완료 처리 중 오류가 발생했습니다.");
+          modal.setLoading("완료", false);
         }
       }},
     ],
@@ -1353,20 +1394,20 @@ function confirmClose(trainingId) {
   const t = S.trainings.find((x) => x.id === trainingId);
   if (!t) return;
   modal.open({
-    title: "援먯쑁 醫낅즺 泥섎━", size: "sm",
+    title: "교육 종료 처리", size: "sm",
     body: `<p style="font-size:var(--text-sm);color:var(--gray-600)">
-      <strong>${esc(t.title)}</strong> 援먯쑁??醫낅즺 泥섎━?섏떆寃좎뒿?덇퉴?</p>`,
+      <strong>${esc(t.title)}</strong> 교육을 종료 처리하시겠습니까?</p>`,
     actions: [
-      { label: "痍⑥냼", variant: "secondary", onClick: () => modal.close() },
-      { label: "醫낅즺", variant: "primary", onClick: async () => {
-        modal.setLoading("醫낅즺", true);
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      { label: "종료", variant: "primary", onClick: async () => {
+        modal.setLoading("종료", true);
         try {
           await closeTraining(trainingId);
-          toast.success("援먯쑁??醫낅즺?덉뒿?덈떎.");
+          toast.success("교육을 종료했습니다.");
           modal.close(); await loadAll();
         } catch (err) {
-          toast.error("?ㅻ쪟媛 諛쒖깮?덉뒿?덈떎.");
-          modal.setLoading("醫낅즺", false);
+          toast.error("오류가 발생했습니다.");
+          modal.setLoading("종료", false);
         }
       }},
     ],
@@ -1377,30 +1418,30 @@ function confirmDelete(trainingId) {
   const t = S.trainings.find((x) => x.id === trainingId);
   if (!t) return;
   modal.open({
-    title: "援먯쑁 ??젣", size: "sm",
+    title: "교육 삭제", size: "sm",
     body: `<p style="font-size:var(--text-sm);color:var(--gray-600)">
-      <strong>${esc(t.title)}</strong> 援먯쑁????젣?섏떆寃좎뒿?덇퉴?<br/>
-      諛곗젙/?섎즺 ?곗씠?곕룄 ?④퍡 ??젣?⑸땲??</p>`,
+      <strong>${esc(t.title)}</strong> 교육을 삭제하시겠습니까?<br/>
+      배정/수료 데이터도 함께 삭제됩니다.</p>`,
     actions: [
-      { label: "痍⑥냼", variant: "secondary", onClick: () => modal.close() },
-      { label: "??젣", variant: "danger", onClick: async () => {
-        modal.setLoading("??젣", true);
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      { label: "삭제", variant: "danger", onClick: async () => {
+        modal.setLoading("삭제", true);
         try {
           await deleteTraining(trainingId);
-          toast.success("??젣?덉뒿?덈떎.");
+          toast.success("삭제했습니다.");
           modal.close(); await loadAll();
         } catch (err) {
-          toast.error("??젣 以??ㅻ쪟媛 諛쒖깮?덉뒿?덈떎.");
-          modal.setLoading("??젣", false);
+          toast.error("삭제 중 오류가 발생했습니다.");
+          modal.setLoading("삭제", false);
         }
       }},
     ],
   });
 }
 
-/* ??????????????????????????????????????????????????????????
-   怨듯넻 ?ы띁
-?????????????????????????????????????????????????????????? */
+/* ──────────────────────────────────────────────────────────
+   공통 헬퍼
+────────────────────────────────────────────────────────── */
 function readDate(id) {
   const v = document.getElementById(id)?.value;
   return v ? new Date(`${v}T00:00:00`).getTime() : null;
@@ -1414,5 +1455,3 @@ function esc(v) {
 function escAttr(v) {
   return esc(v).replace(/'/g, "&#39;");
 }
-
-

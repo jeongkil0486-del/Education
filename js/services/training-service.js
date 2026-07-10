@@ -95,49 +95,11 @@ export function sortByRecent(items, field = "createdAt") {
   return [...items].sort((a, b) => Number(b?.[field] ?? 0) - Number(a?.[field] ?? 0));
 }
 
-async function getInstructorAccessibleBranchIds() {
-  if (authStore.role !== ROLES.INSTRUCTOR) return null;
-
-  const companyId = authStore.companyId ?? null;
-  const uid = authStore.uid;
-  const profileBranchIds = Array.isArray(authStore.profile?.branchIds)
-    ? authStore.profile.branchIds
-    : [];
-
-  const [items, sessions] = await Promise.all([
-    companyId ? trainingItemsDB.list(companyId) : trainingItemsDB.listAll(),
-    companyId ? trainingSessionsDB.list(companyId) : trainingSessionsDB.listAll(),
-  ]);
-
-  const ownedOrManagedItemIds = new Set(
-    items
-      .filter((item) => item.createdBy === uid || item.instructorId === uid)
-      .map((item) => item.id)
-      .filter(Boolean)
-  );
-
-  const allowedBranchIds = new Set(profileBranchIds.filter(Boolean));
-  if (authStore.profile?.branchId) allowedBranchIds.add(authStore.profile.branchId);
-
-  sessions.forEach((session) => {
-    const isAccessible =
-      session.createdBy === uid ||
-      session.instructorId === uid ||
-      ownedOrManagedItemIds.has(session.itemId);
-
-    if (!isAccessible) return;
-    (session.branchIds ?? []).filter(Boolean).forEach((branchId) => allowedBranchIds.add(branchId));
-  });
-
-  return allowedBranchIds;
-}
-
 export async function loadTrainingReferences() {
-  const [branches, allUsers, templates, instructorBranchIds] = await Promise.all([
+  const [branches, allUsers, templates] = await Promise.all([
     branchesDB.listAll(),
     usersDB.listAll(),
     templatesDB.list(authStore.companyId),
-    getInstructorAccessibleBranchIds(),
   ]);
 
   const companyId = authStore.companyId ?? null;
@@ -145,14 +107,8 @@ export async function loadTrainingReferences() {
     if (authStore.role === ROLES.SUPER_ADMIN || !companyId) return true;
     return user.companyId === companyId || !user.companyId;
   });
-  const branchAccessFilter = (branchId) =>
-    !(authStore.role === ROLES.INSTRUCTOR && instructorBranchIds) || instructorBranchIds.has(branchId);
-  const filteredBranches = branches.filter((branch) =>
-    (!companyId || branch.companyId === companyId) && branchAccessFilter(branch.id)
-  );
-  const employees = users.filter((user) =>
-    user.role === ROLES.EMPLOYEE && branchAccessFilter(user.branchId)
-  );
+  const filteredBranches = branches.filter((branch) => !companyId || branch.companyId === companyId);
+  const employees = users.filter((user) => user.role === ROLES.EMPLOYEE);
   const instructors = users.filter((user) => user.role === ROLES.INSTRUCTOR);
 
   return {
