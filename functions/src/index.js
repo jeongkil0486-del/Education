@@ -642,6 +642,16 @@ exports.bulkImportManualTrainingHistories = onCall(OPTS, async (request) => {
       const normalized = normalizeManualHistory(sourceRow, employee, request.auth.uid, actor.name ?? "");
       const historyId = db.ref("manualTrainingHistories").push().key;
       const now = Date.now();
+
+      // Excel의 직원 기본정보는 교육이력이 중복이더라도 갱신한다.
+      // 빈 셀은 기존 프로필을 지우지 않으며 권한 관련 필드는 변경하지 않는다.
+      const hireDateInput = sourceRow.hireDate ?? sourceRow.joinDate;
+      if (hireDateInput !== null && hireDateInput !== undefined && hireDateInput !== "") {
+        updates[`users/${employee.uid}/hireDate`] = normalizeProfileDate(hireDateInput);
+      }
+      const positionInput = normalizeText(sourceRow.position);
+      if (positionInput) updates[`users/${employee.uid}/position`] = positionInput;
+
       const record = {
         ...normalized,
         historyId,
@@ -652,7 +662,7 @@ exports.bulkImportManualTrainingHistories = onCall(OPTS, async (request) => {
         branchName: employee.branchName ?? "",
         companyId: employee.companyId ?? actor.companyId ?? null,
         companyName: employee.companyName ?? actor.companyName ?? "",
-        source: "manual",
+        source: normalized.source || "manual_excel",
         completionStatus: "completed",
         status: "completed",
         createdAt: now,
@@ -1006,6 +1016,11 @@ function normalizeManualHistory(data, employee, actorUid, actorName) {
     completedAt,
     result: normalizeText(data?.result || "PASS").toUpperCase(),
     subType: normalizeText(data?.subType),
+    educationStage: normalizeText(data?.educationStage),
+    educationType: normalizeText(data?.educationType),
+    source: normalizeText(data?.source) || "manual",
+    initialRecurrent: normalizeText(data?.initialRecurrent),
+    trainingPhase: normalizeText(data?.trainingPhase),
     note: normalizeText(data?.note),
     cycleMonths,
     enteredBy: actorUid,

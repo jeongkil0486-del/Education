@@ -1268,6 +1268,8 @@ async function submitHistoryUploadInline() {
     for (const { completedAt, educationStage, educationType } of stages) {
       historyEntries.push({
         empNo: row.empNo, employeeName: row.name,
+        hireDate: row.joinDate || "",
+        position: row.position || "",
         trainingType, subjectCode, subjectName,
         title: subjectName, courseName: subjectName,
         completedAt, educationStage, educationType,
@@ -1286,6 +1288,8 @@ async function submitHistoryUploadInline() {
     const msg = `✅ 등록 ${result.succeededCount ?? 0}건 · 중복 ${result.skippedCount ?? 0}건 · 실패 ${result.failedCount ?? 0}건`;
     if (resultEl) resultEl.innerHTML = `<span style="color:var(--color-success,#16a34a)">${esc(msg)}</span>`;
     toast.success(msg);
+    await refreshViewState();
+    await runLedgerQuery();
     pendingHistoryRows = []; selectedTemplateMeta = null;
     const fi = document.getElementById("history-upload-file-inline"); if (fi) fi.value = "";
     const fn = document.getElementById("history-upload-filename"); if (fn) fn.textContent = "선택된 파일 없음";
