@@ -42,6 +42,7 @@ let selectedTemplateMeta = null;
 let ledgerRows    = [];
 let ledgerFilter  = "all";   // all | soon30 | soon7 | overdue
 let ledgerSearch  = "";
+let ledgerSort    = { key: "", direction: "none" }; // none | asc | desc
 let selectedUids  = new Set();
 let currentLedgerMeta = null;   // { branchId, branchLabel, trainingVal, trainingMeta, cycleMonths }
 
@@ -346,6 +347,7 @@ async function runLedgerQuery() {
     document.getElementById("ledger-result").style.display = "block";
     ledgerFilter = "all";
     ledgerSearch = "";
+    ledgerSort = { key: "", direction: "none" };
     const srch = document.getElementById("ledger-search");
     if (srch) srch.value = "";
 
@@ -547,12 +549,7 @@ function renderLedgerTable() {
     });
   }
 
-  // 정렬: 미이수 → 기한초과 → 7일이내 → 30일이내 → 정상 → 성명
-  const ORDER = { none: 0, overdue: 1, soon7: 2, soon30: 3, normal: 4, unconfigured: 5 };
-  rows = [...rows].sort((a, b) =>
-    (ORDER[a.dueStatus] ?? 6) - (ORDER[b.dueStatus] ?? 6) ||
-    String(a.name).localeCompare(String(b.name), "ko")
-  );
+  rows = sortLedgerRows(rows);
 
   if (!rows.length) {
     el.innerHTML = `<div class="empty-state" style="padding:var(--space-10)"><div class="empty-state__title" style="font-size:var(--text-sm)">조건에 맞는 직원이 없습니다.</div></div>`;
@@ -567,10 +564,10 @@ function renderLedgerTable() {
       <thead>
         <tr>
           ${isHQAdmin ? `<th style="width:36px"><input type="checkbox" id="chk-all" ${allSelected ? "checked" : ""} title="전체 선택"/></th>` : ""}
-          <th>성명</th><th>사번</th><th>입사일</th><th>직급/직책</th>
-          <th>초기교육</th><th>최종교육일</th>
-          <th>${PY}년</th><th>${CY}년</th>
-          <th>다음 예정일</th><th>남은 일수</th><th>상태</th><th>비고</th>
+          ${sortableLedgerHeader("name", "성명")}${sortableLedgerHeader("empNo", "사번")}${sortableLedgerHeader("joinDate", "입사일")}${sortableLedgerHeader("position", "직급/직책")}
+          ${sortableLedgerHeader("initialDate", "초기교육")}${sortableLedgerHeader("lastDate", "최종교육일")}
+          ${sortableLedgerHeader("prevDates", `${PY}년`)}${sortableLedgerHeader("currDates", `${CY}년`)}
+          ${sortableLedgerHeader("nextDueDate", "다음 예정일")}${sortableLedgerHeader("daysRemaining", "남은 일수")}${sortableLedgerHeader("dueStatus", "상태")}${sortableLedgerHeader("note", "비고")}
           ${isHQAdmin ? "<th style='width:60px'>관리</th>" : ""}
         </tr>
       </thead>
@@ -601,6 +598,16 @@ function renderLedgerTable() {
         }).join("")}
       </tbody>
     </table>`;
+
+  el.querySelectorAll("th[data-sort-key]").forEach((header) => {
+    header.addEventListener("click", () => cycleLedgerSort(header.dataset.sortKey));
+    header.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        cycleLedgerSort(header.dataset.sortKey);
+      }
+    });
+  });
 
   // 전체 선택 체크박스
   if (isHQAdmin) {
@@ -651,6 +658,77 @@ function renderLedgerTable() {
       router.push("history-cards", { uid: row.dataset.uid });
     });
   });
+}
+
+function sortableLedgerHeader(key, label) {
+  const active = ledgerSort.key === key && ledgerSort.direction !== "none";
+  const icon = active ? (ledgerSort.direction === "asc" ? "▲" : "▼") : "";
+  const ariaSort = !active ? "none" : ledgerSort.direction === "asc" ? "ascending" : "descending";
+  return `<th data-sort-key="${esc(key)}" tabindex="0" role="columnheader" aria-sort="${ariaSort}" style="cursor:pointer;user-select:none;white-space:nowrap" title="클릭하여 정렬">${esc(label)}${icon ? ` <span aria-hidden="true" style="font-size:10px">${icon}</span>` : ""}</th>`;
+}
+
+function cycleLedgerSort(key) {
+  if (ledgerSort.key !== key || ledgerSort.direction === "none") {
+    ledgerSort = { key, direction: "asc" };
+  } else if (ledgerSort.direction === "asc") {
+    ledgerSort = { key, direction: "desc" };
+  } else {
+    ledgerSort = { key: "", direction: "none" };
+  }
+  renderLedgerTable();
+}
+
+function sortLedgerRows(inputRows) {
+  const rows = [...inputRows];
+  if (!ledgerSort.key || ledgerSort.direction === "none") {
+    const order = { none: 0, overdue: 1, soon7: 2, soon30: 3, normal: 4, unconfigured: 5 };
+    return rows.sort((a, b) =>
+      (order[a.dueStatus] ?? 6) - (order[b.dueStatus] ?? 6) ||
+      String(a.name ?? "").localeCompare(String(b.name ?? ""), "ko", { numeric: true })
+    );
+  }
+
+  const { key, direction } = ledgerSort;
+  const multiplier = direction === "asc" ? 1 : -1;
+  return rows.sort((a, b) => {
+    const av = ledgerSortValue(a, key);
+    const bv = ledgerSortValue(b, key);
+    const aEmpty = av === null || av === undefined || av === "" || Number.isNaN(av);
+    const bEmpty = bv === null || bv === undefined || bv === "" || Number.isNaN(bv);
+    if (aEmpty !== bEmpty) return aEmpty ? 1 : -1; // 빈 값은 방향과 관계없이 항상 마지막
+    if (aEmpty && bEmpty) return String(a.name ?? "").localeCompare(String(b.name ?? ""), "ko");
+
+    let compared;
+    if (typeof av === "number" && typeof bv === "number") compared = av - bv;
+    else compared = String(av).localeCompare(String(bv), "ko", { numeric: true, sensitivity: "base" });
+    return compared * multiplier || String(a.name ?? "").localeCompare(String(b.name ?? ""), "ko", { numeric: true });
+  });
+}
+
+function ledgerSortValue(row, key) {
+  const latestDate = (values) => {
+    const dates = (Array.isArray(values) ? values : [values]).filter((value) => value && value !== "–").sort();
+    return dates.length ? ledgerDateValue(dates[dates.length - 1]) : null;
+  };
+  if (["joinDate", "initialDate", "lastDate", "nextDueDate"].includes(key)) return ledgerDateValue(row[key]);
+  if (key === "prevDates" || key === "currDates") return latestDate(row[key]);
+  if (key === "daysRemaining") return Number.isFinite(Number(row.daysRemaining)) ? Number(row.daysRemaining) : null;
+  if (key === "dueStatus") {
+    const statusOrder = { overdue: 0, soon7: 1, soon30: 2, normal: 3, unconfigured: 4, none: 5 };
+    return statusOrder[row.dueStatus] ?? 6;
+  }
+  return String(row[key] ?? "").trim() || null;
+}
+
+function ledgerDateValue(value) {
+  if (!value || value === "–") return null;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.getTime();
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 1000000000) return numeric;
+  const ymd = formatDateYMD(value);
+  if (!ymd) return null;
+  const timestamp = Date.parse(`${ymd}T00:00:00Z`);
+  return Number.isNaN(timestamp) ? null : timestamp;
 }
 
 function updateResetBtn() {
@@ -787,21 +865,21 @@ async function openEditEmployeeModal(row) {
         <div class="form-row">
           <div class="form-group">
             <label class="form-label">초기교육</label>
-            <textarea class="form-control" id="edit-history-initial" rows="2" placeholder="YYYY-MM-DD, YYYY-MM-DD">${esc(initialDates.join(", "))}</textarea>
+            <textarea class="form-control history-date-field" id="edit-history-initial" rows="1" placeholder="YYYY-MM-DD, YYYY-MM-DD" style="height:40px;min-height:40px;max-height:40px;resize:none;line-height:1.4;overflow-y:auto;padding-top:9px;padding-bottom:9px">${esc(initialDates.join(", "))}</textarea>
           </div>
           <div class="form-group">
             <label class="form-label">최종교육일 (자동 계산)</label>
-            <input class="form-control" value="${esc(row.lastDate ?? "–")}" readonly/>
+            <input class="form-control history-date-field" value="${esc(row.lastDate ?? "–")}" readonly style="height:40px;min-height:40px;max-height:40px;line-height:1.4"/>
           </div>
         </div>
         <div class="form-row">
           <div class="form-group">
             <label class="form-label">${PY}년</label>
-            <textarea class="form-control" id="edit-history-previous" rows="2" placeholder="YYYY-MM-DD, YYYY-MM-DD">${esc(previousDates.join(", "))}</textarea>
+            <textarea class="form-control history-date-field" id="edit-history-previous" rows="1" placeholder="YYYY-MM-DD, YYYY-MM-DD" style="height:40px;min-height:40px;max-height:40px;resize:none;line-height:1.4;overflow-y:auto;padding-top:9px;padding-bottom:9px">${esc(previousDates.join(", "))}</textarea>
           </div>
           <div class="form-group">
             <label class="form-label">${CY}년</label>
-            <textarea class="form-control" id="edit-history-current" rows="2" placeholder="YYYY-MM-DD, YYYY-MM-DD">${esc(currentDates.join(", "))}</textarea>
+            <textarea class="form-control history-date-field" id="edit-history-current" rows="1" placeholder="YYYY-MM-DD, YYYY-MM-DD" style="height:40px;min-height:40px;max-height:40px;resize:none;line-height:1.4;overflow-y:auto;padding-top:9px;padding-bottom:9px">${esc(currentDates.join(", "))}</textarea>
           </div>
         </div>
         <div style="font-size:var(--text-xs);color:var(--gray-400)">
