@@ -1007,3 +1007,28 @@ export async function buildEmployeeHistoryRowsV2(uid) {
     rows:     sortByRecent(allRows, "completedAt"),
   };
 }
+
+
+/**
+ * 회차 직원 선택 UI용 교육이력 요약.
+ * buildEmployeeHistoryRowsV2의 권한 검사를 그대로 사용하므로 강사는 assignedBranches 밖 직원을 조회할 수 없다.
+ */
+export async function getEmployeeSessionHistorySummary(uid, itemId, currentSessionId = "") {
+  const history = await buildEmployeeHistoryRowsV2(uid);
+  const rows = history.rows ?? [];
+  const completedRows = rows.filter((row) => row.completionStatus === "completed");
+  const sameItemRows = rows
+    .filter((row) => row._source === "session"
+      && String(row.itemId ?? "") === String(itemId ?? "")
+      && String(row.sessionId ?? "") !== String(currentSessionId ?? "")
+      && row.completionStatus === "completed"
+      && row.completedAt)
+    .sort((a, b) => Number(b.completedAt ?? 0) - Number(a.completedAt ?? 0));
+
+  return {
+    ...history,
+    totalCount: rows.length,
+    completedCount: completedRows.length,
+    latestSameItemCompletion: sameItemRows[0] ?? null,
+  };
+}
