@@ -5,6 +5,7 @@ import {
   completionsDB,
   sessionAssignmentsDB,
   sessionCompletionsDB,
+  manualTrainingHistoriesDB,
   templatesDB,
   trainingItemsDB,
   trainingSessionsDB,
@@ -29,6 +30,29 @@ export const TRAINING_TYPE_LABELS = {
   online: "온라인교육",
   other: "기타",
 };
+
+export const TRAINING_SUBJECT_OPTIONS = {
+  job: [
+    { code: "job_duty", name: "직무" },
+    { code: "job_operations", name: "운항관리" },
+    { code: "job_instructor", name: "사내강사" },
+    { code: "job_wb", name: "W&B" },
+  ],
+  legal: [
+    { code: "legal_sms", name: "SMS" },
+    { code: "legal_security", name: "항공보안" },
+    { code: "legal_dangerous_goods", name: "위험물" },
+  ],
+};
+
+export const DUE_STATUS_LABELS = {
+  normal: "정상",
+  soon: "재교육 임박",
+  overdue: "기한 초과",
+  unconfigured: "주기 미설정",
+  history: "과거 이력",
+};
+
 
 const LEGACY_TRAINING_TYPE_MAP = {
   initial: "job",
@@ -459,8 +483,8 @@ export async function getCurrentUserAssignments() {
 }
 
 export async function getCurrentUserHistory() {
-  const completions = await completionsDB.forUser(authStore.uid);
-  return sortByRecent(completions, "completedAt");
+  const { rows } = await buildEmployeeHistoryRowsV2(authStore.uid);
+  return sortByRecent(rows.filter((row) => row.completionStatus === "completed"), "completedAt");
 }
 
 export async function buildEmployeeHistoryRows(uid) {
@@ -583,6 +607,9 @@ export async function createTrainingItem(values) {
     title:          String(values.title ?? "").trim(),
     trainingType:   normalizeTrainingType(values.trainingType),
     subType:        values.subType ?? "",          // initial | recurring | ""
+    subjectCode:    String(values.subjectCode ?? "").trim(),
+    subjectName:    String(values.subjectName ?? values.title ?? "").trim(),
+    cycleMonths:    Math.max(0, Number(values.cycleMonths ?? 0) || 0),
     instructorId:   values.instructorId ?? authStore.uid,
     instructorName: values.instructorName ?? authStore.name,
     defaultHours:   Number(values.defaultHours ?? 0),
@@ -608,6 +635,9 @@ export async function updateTrainingItem(itemId, values) {
     title:          String(values.title ?? "").trim(),
     trainingType:   normalizeTrainingType(values.trainingType),
     subType:        values.subType ?? "",
+    subjectCode:    String(values.subjectCode ?? "").trim(),
+    subjectName:    String(values.subjectName ?? values.title ?? "").trim(),
+    cycleMonths:    Math.max(0, Number(values.cycleMonths ?? 0) || 0),
     instructorId:   values.instructorId ?? "",
     instructorName: values.instructorName ?? "",
     defaultHours:   Number(values.defaultHours ?? 0),
@@ -664,6 +694,9 @@ export function enrichItemRecord(item) {
     trainingType,
     typeLabel:    getTrainingTypeLabel(trainingType),
     subTypeLabel: ITEM_SUB_TYPE_LABELS[item.subType] ?? "",
+    subjectName:  item.subjectName ?? item.title ?? "",
+    subjectCode:  item.subjectCode ?? "",
+    cycleMonths:  Math.max(0, Number(item.cycleMonths ?? 0) || 0),
   };
 }
 
@@ -693,6 +726,9 @@ export async function createTrainingSession(item, values) {
     title:          item.title ?? "",
     trainingType:   item.trainingType ?? "other",
     subType:        item.subType ?? "",
+    subjectCode:    item.subjectCode ?? "",
+    subjectName:    item.subjectName ?? item.title ?? "",
+    cycleMonths:    Math.max(0, Number(item.cycleMonths ?? 0) || 0),
     instructorId:   item.instructorId ?? "",
     instructorName: item.instructorName ?? "",
     defaultHours:   item.defaultHours ?? 0,
@@ -774,6 +810,10 @@ export async function completeSession(sessionId) {
       trainingTitle:   session.title ?? "",
       trainingType:    session.trainingType ?? "other",
       subType:         session.subType ?? "",
+      subjectCode:     session.subjectCode ?? "",
+      subjectName:     session.subjectName ?? session.title ?? "",
+      cycleMonths:     Math.max(0, Number(session.cycleMonths ?? 0) || 0),
+      hours:           Number(session.defaultHours ?? 0),
       instructorName:  session.instructorName ?? "",
       startDate:       session.startDate ?? null,
       endDate:         session.endDate   ?? null,
@@ -922,6 +962,7 @@ export async function buildEmployeeHistoryRowsV2(uid) {
     legacyCompletions,
     legacyTrainings,
     sessionCompletionsList,
+    manualHistories,
   ] = await Promise.all([
     assignmentsDB.forUser(uid),
     completionsDB.forUser(uid),
@@ -929,6 +970,7 @@ export async function buildEmployeeHistoryRowsV2(uid) {
       ? trainingsDB.listAll()
       : trainingsDB.list(authStore.companyId),
     sessionCompletionsDB.forUser(uid),
+    manualTrainingHistoriesDB.forUser(uid),
   ]);
 
   // ── 기존 trainings 기반 행 (기존 buildEmployeeHistoryRows 와 동일)
@@ -948,6 +990,12 @@ export async function buildEmployeeHistoryRowsV2(uid) {
       uid,
       trainingId,
       sessionId:       null,
+      historyId:       null,
+      subjectCode:     training.subjectCode ?? "",
+      subjectName:     training.subjectName ?? training.title ?? assignment.trainingTitle ?? "",
+      courseName:      training.courseName ?? training.title ?? assignment.trainingTitle ?? "",
+      hours:           Number(training.hours ?? training.defaultHours ?? 0),
+      cycleMonths:     Math.max(0, Number(training.cycleMonths ?? 0) || 0),
       employeeName:    user?.name ?? "-",
       empNo:           user?.empNo ?? "-",
       companyName:     user?.companyName ?? training.companyName ?? "-",
@@ -978,6 +1026,12 @@ export async function buildEmployeeHistoryRowsV2(uid) {
       trainingId:      null,
       sessionId:       sc.sessionId,
       itemId:          sc.itemId ?? "",
+      historyId:       null,
+      subjectCode:     sc.subjectCode ?? "",
+      subjectName:     sc.subjectName ?? sc.trainingTitle ?? "",
+      courseName:      sc.courseName ?? sc.trainingTitle ?? "",
+      hours:           Number(sc.hours ?? sc.defaultHours ?? 0),
+      cycleMonths:     Math.max(0, Number(sc.cycleMonths ?? 0) || 0),
       employeeName:    user?.name ?? "-",
       empNo:           user?.empNo ?? "-",
       companyName:     user?.companyName ?? "-",
@@ -999,36 +1053,38 @@ export async function buildEmployeeHistoryRowsV2(uid) {
     };
   });
 
-  // ── 합산 후 완료일 기준 최신순 정렬
-  const allRows = [...legacyRows, ...sessionRows];
+  // ── 본사 교육관리자가 직접 입력/업로드한 개인 교육이력
+  const manualRows = manualHistories.map((mh) => ({
+    ...mh,
+    _source: "manual",
+    uid,
+    historyId: mh.historyId ?? mh.id,
+    trainingId: null,
+    sessionId: null,
+    employeeName: user?.name ?? mh.employeeName ?? "-",
+    empNo: user?.empNo ?? mh.empNo ?? "-",
+    companyName: user?.companyName ?? mh.companyName ?? "-",
+    branchName: user?.branchName ?? mh.branchName ?? "-",
+    title: mh.title ?? mh.courseName ?? mh.subjectName ?? "-",
+    courseName: mh.courseName ?? mh.title ?? "-",
+    subjectCode: mh.subjectCode ?? "",
+    subjectName: mh.subjectName ?? mh.title ?? "-",
+    trainingType: normalizeTrainingType(mh.trainingType),
+    trainingTypeLabel: getTrainingTypeLabel(mh.trainingType),
+    subType: mh.subType ?? "",
+    hours: Number(mh.hours ?? 0),
+    cycleMonths: Math.max(0, Number(mh.cycleMonths ?? 0) || 0),
+    completionStatus: "completed",
+    completedAt: mh.completedAt ?? null,
+    instructorName: mh.instructorName ?? "-",
+    note: mh.note ?? "",
+  }));
+
+  // ── 합산 후 교육별 최신 이력을 기준으로 재교육 예정일/잔여일 계산
+  const allRows = applyDueMetadata([...legacyRows, ...sessionRows, ...manualRows]);
 
   return {
     employee: user ? { uid, ...user } : null,
     rows:     sortByRecent(allRows, "completedAt"),
-  };
-}
-
-
-/**
- * 회차 직원 선택 UI용 교육이력 요약.
- * buildEmployeeHistoryRowsV2의 권한 검사를 그대로 사용하므로 강사는 assignedBranches 밖 직원을 조회할 수 없다.
- */
-export async function getEmployeeSessionHistorySummary(uid, itemId, currentSessionId = "") {
-  const history = await buildEmployeeHistoryRowsV2(uid);
-  const rows = history.rows ?? [];
-  const completedRows = rows.filter((row) => row.completionStatus === "completed");
-  const sameItemRows = rows
-    .filter((row) => row._source === "session"
-      && String(row.itemId ?? "") === String(itemId ?? "")
-      && String(row.sessionId ?? "") !== String(currentSessionId ?? "")
-      && row.completionStatus === "completed"
-      && row.completedAt)
-    .sort((a, b) => Number(b.completedAt ?? 0) - Number(a.completedAt ?? 0));
-
-  return {
-    ...history,
-    totalCount: rows.length,
-    completedCount: completedRows.length,
-    latestSameItemCompletion: sameItemRows[0] ?? null,
   };
 }

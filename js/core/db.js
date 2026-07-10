@@ -438,6 +438,20 @@ export const sessionCompletionsDB = {
 
   forSession: (sessionId) => getList(`sessionCompletions/${sessionId}`),
   forUser:    (uid)       => getList(`userSessionCompletions/${uid}`),
+  listAll:    ()          => getList("sessionCompletions"),
+};
+
+
+/* ══════════════════════════════════════════════════════════
+   Manual Training Histories
+   /manualTrainingHistories/{historyId}
+   /userManualTrainingHistories/{uid}/{historyId}
+   본사 교육관리자가 입력/업로드하는 기존 개인 교육이력
+══════════════════════════════════════════════════════════ */
+export const manualTrainingHistoriesDB = {
+  get:     (historyId) => getVal(`manualTrainingHistories/${historyId}`),
+  forUser: (uid)       => getList(`userManualTrainingHistories/${uid}`),
+  listAll: ()          => getList("manualTrainingHistories"),
 };
 
 /* ══════════════════════════════════════════════════════════

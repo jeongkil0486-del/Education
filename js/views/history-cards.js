@@ -1,9 +1,9 @@
 import { toast } from "../utils/toast.js";
 import { modal } from "../utils/modal.js";
 import { formatDate } from "../utils/date.js";
-import { buildEmployeeHistoryRowsV2, loadTrainingReferences } from "../services/training-service.js";
+import { buildEmployeeHistoryRowsV2, loadTrainingReferences, DUE_STATUS_LABELS } from "../services/training-service.js";
 import { authStore, ROLES } from "../core/auth.js";
-import { deleteEmployeeHistory } from "../core/admin-api.js";
+import { deleteEmployeeHistory, upsertManualTrainingHistory } from "../core/admin-api.js";
 import {
   exportEmployeeHistoryCard,
   getLatestHistoryCardTemplate,
@@ -40,6 +40,7 @@ let S = {
   selectedEmployee:   null,
   rows:               [],
   templates:          [],
+  dueStatusFilter:    "",
 };
 
 /* ──────────────────────────────────────────────────────────
@@ -55,7 +56,7 @@ export async function render(container, params = {}) {
           <div class="section-subtitle">지점별 직원을 선택하여 교육 이력을 조회하고 다운로드합니다.</div>
         </div>
         <div style="display:flex;gap:var(--space-2);flex-wrap:wrap">
-          <button class="btn btn--secondary" id="btn-upload-template">양식 업로드</button>
+          ${authStore.role === ROLES.HQ_ADMIN ? '<button class="btn btn--secondary" id="btn-add-manual-history">개인 이력 추가</button><button class="btn btn--secondary" id="btn-upload-template">양식 업로드</button>' : ''}
           <button class="btn btn--primary" id="btn-download-card" disabled>이력카드 다운로드</button>
         </div>
       </div>
@@ -78,6 +79,16 @@ export async function render(container, params = {}) {
               <label class="form-label">지점 선택</label>
               <select class="form-control" id="hc-branch">
                 <option value="">전체 지점</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">재교육 상태</label>
+              <select class="form-control" id="hc-due-status">
+                <option value="">전체 상태</option>
+                <option value="normal">정상</option>
+                <option value="soon">재교육 임박</option>
+                <option value="overdue">기한 초과</option>
+                <option value="unconfigured">주기 미설정</option>
               </select>
             </div>
           </div>
@@ -132,10 +143,15 @@ export async function render(container, params = {}) {
 
   /* 이벤트 */
   document.getElementById("btn-upload-template")?.addEventListener("click", openUploadModal);
+  document.getElementById("btn-add-manual-history")?.addEventListener("click", () => openManualHistoryModal());
   document.getElementById("btn-download-card")?.addEventListener("click", handleDownload);
   document.getElementById("btn-deselect")?.addEventListener("click", deselectEmployee);
   document.getElementById("hc-search")?.addEventListener("input", onFilter);
   document.getElementById("hc-branch")?.addEventListener("change", onFilter);
+  document.getElementById("hc-due-status")?.addEventListener("change", () => {
+    S.dueStatusFilter = document.getElementById("hc-due-status")?.value ?? "";
+    if (S.selectedEmployee) { renderSummary(S.selectedEmployee, filteredRows()); renderSections(filteredRows()); }
+  });
 
   await initView(params.uid ?? "");
 }
@@ -277,9 +293,9 @@ async function loadCard(uid) {
       bannerLabel.textContent = `${employee?.name ?? "–"} (${employee?.empNo ?? "–"}) · ${employee?.branchName ?? "–"} · ${employee?.position ?? "–"}`;
     }
 
-    renderSummary(employee, rows);
+    renderSummary(employee, filteredRows());
     renderProfile(employee);
-    renderSections(rows);
+    renderSections(filteredRows());
 
     if (cardSection) cardSection.style.display = "block";
   } catch (err) {
@@ -304,6 +320,11 @@ function deselectEmployee() {
   renderEmployeeList();
 }
 
+function filteredRows() {
+  if (!S.dueStatusFilter) return S.rows;
+  return S.rows.filter((row) => row.dueStatus === S.dueStatusFilter);
+}
+
 /* ──────────────────────────────────────────────────────────
    요약 카드 렌더링 (웹 전용)
 ────────────────────────────────────────────────────────── */
@@ -317,7 +338,10 @@ function renderSummary(emp, rows) {
   const inProgressCnt = rows.filter((r) => r.completionStatus !== "completed" && (!r.deadline || r.deadline >= now)).length;
   const failCnt       = rows.filter((r) => r.completionStatus !== "completed" && r.deadline && r.deadline < now).length;
   const lastDate      = rows.filter((r) => r.completedAt).sort((a, b) => b.completedAt - a.completedAt)[0]?.completedAt ?? null;
-  const nextDate      = rows.filter((r) => r.deadline && r.deadline > now).sort((a, b) => a.deadline - b.deadline)[0]?.deadline ?? null;
+  const activeDueRows = rows.filter((r) => r.dueStatus && r.dueStatus !== "history");
+  const nextDate = activeDueRows.filter((r) => r.nextDueDate).sort((a, b) => a.nextDueDate - b.nextDueDate)[0]?.nextDueDate ?? null;
+  const dueSoonCnt = activeDueRows.filter((r) => r.dueStatus === "soon").length;
+  const overdueCnt = activeDueRows.filter((r) => r.dueStatus === "overdue").length;
 
   el.innerHTML = [
     { label: "총 교육 건수",    value: totalCount,                          isDate: false },
@@ -326,6 +350,8 @@ function renderSummary(emp, rows) {
     { label: "미수료",          value: failCnt,                             isDate: false },
     { label: "최근 교육일",     value: lastDate ? formatDate(lastDate) : "–", isDate: true },
     { label: "다음 교육 예정일", value: nextDate ? formatDate(nextDate) : "–", isDate: true },
+    { label: "30일 이내",       value: dueSoonCnt,                         isDate: false },
+    { label: "기한 초과",       value: overdueCnt,                         isDate: false },
   ].map(({ label, value, isDate }) => `
     <div class="stat-card">
       <div class="stat-card__label">${esc(label)}</div>
@@ -401,6 +427,9 @@ function renderSections(rows) {
                       <th>수료일</th>
                       <th>결과</th>
                       <th>초기/보수</th>
+                      <th>다음 예정일</th>
+                      <th>남은 일수</th>
+                      <th>상태</th>
                       <th>비고</th>
                       ${authStore.role === ROLES.HQ_ADMIN ? "<th>관리</th>" : ""}
                     </tr>
@@ -416,6 +445,12 @@ function renderSections(rows) {
   }).join("");
 
   if (authStore.role === ROLES.HQ_ADMIN) {
+    el.querySelectorAll(".hc-edit-history").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const row = S.rows.find((item) => item._source === "manual" && String(item.historyId) === String(btn.dataset.historyId));
+        if (row) openManualHistoryModal(row);
+      });
+    });
     el.querySelectorAll(".hc-delete-history").forEach((btn) => {
       btn.addEventListener("click", async () => {
         if (!S.selectedEmployeeId) return;
@@ -428,6 +463,7 @@ function renderSections(rows) {
             source: btn.dataset.source,
             sessionId: btn.dataset.sessionId || "",
             trainingId: btn.dataset.trainingId || "",
+            historyId: btn.dataset.historyId || "",
           });
           toast.success("교육이력이 삭제되었습니다.");
           await loadCard(S.selectedEmployeeId);
@@ -444,31 +480,47 @@ function renderSections(rows) {
 }
 
 function historyRow(row) {
-  const period = (row.startDate && row.endDate)
-    ? `${formatDate(row.startDate)} ~ ${formatDate(row.endDate)}`
-    : (row.startDate ? formatDate(row.startDate) : "–");
-  const result  = row.completionStatus === "completed" ? "PASS" : "–";
-  const subType = row.trainingType === "job" ? (row.subType === "initial" ? "초기" : "보수") : "–";
-
-  return `
-    <tr>
-      <td>${esc(row.title)}</td>
-      <td>–</td>
-      <td>${esc(row.instructorName)}</td>
-      <td>–</td>
-      <td style="white-space:nowrap">${period}</td>
-      <td style="white-space:nowrap">${row.completedAt ? formatDate(row.completedAt) : "–"}</td>
-      <td>${result}</td>
-      <td>${subType}</td>
-      <td>${esc(row.note || "–")}</td>
-      ${authStore.role === ROLES.HQ_ADMIN
-        ? `<td><button type="button" class="btn btn--ghost btn--sm hc-delete-history"
-              data-source="${esc(row._source)}"
-              data-session-id="${esc(row.sessionId ?? "")}"
-              data-training-id="${esc(row.trainingId ?? "")}">삭제</button></td>`
-        : ""}
-    </tr>`;
+  const period = (row.startDate && row.endDate) ? `${formatDate(row.startDate)} ~ ${formatDate(row.endDate)}` : (row.startDate ? formatDate(row.startDate) : "–");
+  const result = row.completionStatus === "completed" ? (row.result || "PASS") : "–";
+  const subType = row.trainingType === "job" ? (row.subType === "initial" ? "초기" : row.subType === "recurring" ? "보수" : "–") : "–";
+  const days = row.daysRemaining === null || row.daysRemaining === undefined ? "–" : row.daysRemaining < 0 ? `${Math.abs(row.daysRemaining)}일 초과` : `${row.daysRemaining}일`;
+  const tone = row.dueStatus === "overdue" ? "danger" : row.dueStatus === "soon" ? "warning" : row.dueStatus === "normal" ? "success" : "neutral";
+  const canEditManual = authStore.role === ROLES.HQ_ADMIN && row._source === "manual";
+  return `<tr>
+    <td>${esc(row.courseName ?? row.title)}</td><td>${esc(row.subjectName ?? "–")}</td><td>${esc(row.instructorName)}</td><td>${row.hours ? `${row.hours}시간` : "–"}</td>
+    <td style="white-space:nowrap">${period}</td><td style="white-space:nowrap">${row.completedAt ? formatDate(row.completedAt) : "–"}</td><td>${esc(result)}</td><td>${subType}</td>
+    <td style="white-space:nowrap">${row.nextDueDate ? formatDate(row.nextDueDate) : "–"}</td><td style="white-space:nowrap">${days}</td><td><span class="chip chip--${tone}">${esc(row.dueStatusLabel ?? DUE_STATUS_LABELS[row.dueStatus] ?? "–")}</span></td><td>${esc(row.note || "–")}</td>
+    ${authStore.role === ROLES.HQ_ADMIN ? `<td><div style="display:flex;gap:4px">${canEditManual ? `<button type="button" class="btn btn--ghost btn--sm hc-edit-history" data-history-id="${esc(row.historyId ?? "")}">수정</button>` : ""}<button type="button" class="btn btn--ghost btn--sm hc-delete-history" data-source="${esc(row._source)}" data-session-id="${esc(row.sessionId ?? "")}" data-training-id="${esc(row.trainingId ?? "")}" data-history-id="${esc(row.historyId ?? "")}">삭제</button></div></td>` : ""}
+  </tr>`;
 }
+
+function toInputDate(value) {
+  if (!value) return "";
+  const date = new Date(Number(value));
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+}
+function dateInputMillis(id) { const value=document.getElementById(id)?.value; return value ? new Date(`${value}T00:00:00`).getTime() : null; }
+
+function openManualHistoryModal(row = null) {
+  if (!S.selectedEmployeeId) { toast.warning("먼저 직원을 선택해 주세요."); return; }
+  modal.open({
+    title: row ? "개인 교육이력 수정" : "개인 교육이력 추가", size: "lg",
+    body: `<div style="display:flex;flex-direction:column;gap:var(--space-4)">
+      <div class="form-row"><div class="form-group"><label class="form-label form-label--required">교육유형</label><select class="form-control" id="mh-type">${[["job","직무교육"],["legal","법정교육"],["online","온라인교육"],["external","외부교육"],["other","기타"]].map(([v,l])=>`<option value="${v}" ${row?.trainingType===v?"selected":""}>${l}</option>`).join("")}</select></div><div class="form-group"><label class="form-label form-label--required">교육 세부분류/과목</label><input class="form-control" id="mh-subject" value="${esc(row?.subjectName??"")}"/></div></div>
+      <div class="form-row"><div class="form-group"><label class="form-label form-label--required">교육과정명</label><input class="form-control" id="mh-title" value="${esc(row?.courseName??row?.title??"")}"/></div><div class="form-group"><label class="form-label">강사명</label><input class="form-control" id="mh-instructor" value="${esc(row?.instructorName??"")}"/></div></div>
+      <div class="form-row form-row--3"><div class="form-group"><label class="form-label">교육시간</label><input class="form-control" id="mh-hours" type="number" min="0" step="0.5" value="${row?.hours??""}"/></div><div class="form-group"><label class="form-label">초기/보수</label><select class="form-control" id="mh-subtype"><option value="">구분 없음</option><option value="initial" ${row?.subType==="initial"?"selected":""}>초기</option><option value="recurring" ${row?.subType==="recurring"?"selected":""}>보수</option></select></div><div class="form-group"><label class="form-label">재교육 주기(개월)</label><input class="form-control" id="mh-cycle" type="number" min="0" value="${row?.cycleMonths??""}"/></div></div>
+      <div class="form-row form-row--3"><div class="form-group"><label class="form-label">교육 시작일</label><input class="form-control" id="mh-start" type="date" value="${toInputDate(row?.startDate)}"/></div><div class="form-group"><label class="form-label">교육 종료일</label><input class="form-control" id="mh-end" type="date" value="${toInputDate(row?.endDate)}"/></div><div class="form-group"><label class="form-label form-label--required">수료일</label><input class="form-control" id="mh-completed" type="date" value="${toInputDate(row?.completedAt)}"/></div></div>
+      <div class="form-group"><label class="form-label">비고</label><textarea class="form-control" id="mh-note" rows="2">${esc(row?.note??"")}</textarea></div>
+    </div>`,
+    actions:[{label:"취소",variant:"secondary",onClick:()=>modal.close()},{label:row?"수정":"등록",variant:"primary",onClick:async()=>{
+      const payload={historyId:row?.historyId??"",uid:S.selectedEmployeeId,trainingType:document.getElementById("mh-type")?.value,subjectName:document.getElementById("mh-subject")?.value?.trim(),title:document.getElementById("mh-title")?.value?.trim(),courseName:document.getElementById("mh-title")?.value?.trim(),instructorName:document.getElementById("mh-instructor")?.value?.trim(),hours:Number(document.getElementById("mh-hours")?.value)||0,subType:document.getElementById("mh-subtype")?.value,cycleMonths:Number(document.getElementById("mh-cycle")?.value)||0,startDate:dateInputMillis("mh-start"),endDate:dateInputMillis("mh-end"),completedAt:dateInputMillis("mh-completed"),result:"PASS",note:document.getElementById("mh-note")?.value?.trim()};
+      if(!payload.subjectName||!payload.title||!payload.completedAt){toast.error("세부분류, 교육과정명, 수료일을 입력해 주세요.");return;}
+      modal.setLoading(row?"수정":"등록",true);try{await upsertManualTrainingHistory(payload);toast.success(`개인 교육이력을 ${row?"수정":"등록"}했습니다.`);modal.close();await loadCard(S.selectedEmployeeId);}catch(err){console.error(err);toast.error(err?.message||"저장에 실패했습니다.");modal.setLoading(row?"수정":"등록",false);}
+    }}]
+  });
+}
+
 
 /* ──────────────────────────────────────────────────────────
    양식 업로드

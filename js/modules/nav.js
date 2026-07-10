@@ -12,6 +12,7 @@ const NAV_CONFIG = {
         { path: "admin/branches",   label: TEXT.routes.branches,       icon: iconMapPin() },
         { path: "admin/accounts",   label: TEXT.routes.accounts,       icon: iconUsers() },
         { path: "admin/employees",  label: TEXT.routes.adminEmployees, icon: iconUserPlus() },
+        { path: "history-overview", label: TEXT.routes.historyOverview, icon: iconHistory() },
         { path: "admin/settings",   label: TEXT.routes.adminSettings,  icon: iconSettings() },
       ],
     },

@@ -36,6 +36,7 @@ export const TEXT = {
     trainings: "교육 관리",
     trainingDetail: "교육 상세",
     historyCards: "직원 교육 이력카드",
+    historyOverview: "교육 관리",
     materials: "교육자료",
     employees: "직원 조회",
     employeeDetail: "직원 상세",

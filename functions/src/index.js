@@ -547,6 +547,146 @@ exports.deleteManagedAccount = onCall(OPTS, async (request) => {
 });
 
 
+
+exports.upsertManualTrainingHistory = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await ensureHQAdminProfile(request.auth.uid);
+
+  const historyId = normalizeText(request.data?.historyId);
+  const uid = normalizeText(request.data?.uid);
+  if (!uid) throw new HttpsError("invalid-argument", "직원 UID가 필요합니다.");
+
+  const employeeSnap = await db.ref(`users/${uid}`).get();
+  if (!employeeSnap.exists() || employeeSnap.val()?.role !== "employee") {
+    throw new HttpsError("not-found", "직원 정보를 찾을 수 없습니다.");
+  }
+  const employee = employeeSnap.val();
+  assertSameCompany(actor, employee);
+
+  const normalized = normalizeManualHistory(request.data, employee, request.auth.uid, actor.name ?? "");
+  const targetId = historyId || db.ref("manualTrainingHistories").push().key;
+  const existingSnap = historyId ? await db.ref(`manualTrainingHistories/${historyId}`).get() : null;
+  if (historyId && !existingSnap?.exists()) {
+    throw new HttpsError("not-found", "수정할 개인 교육이력을 찾을 수 없습니다.");
+  }
+  if (existingSnap?.exists() && existingSnap.val()?.uid !== uid) {
+    throw new HttpsError("failed-precondition", "직원 정보가 일치하지 않습니다.");
+  }
+
+  const now = Date.now();
+  const record = {
+    ...(existingSnap?.exists() ? existingSnap.val() : {}),
+    ...normalized,
+    historyId: targetId,
+    uid,
+    empNo: employee.empNo ?? "",
+    employeeName: employee.name ?? "",
+    branchId: employee.branchId ?? "",
+    branchName: employee.branchName ?? "",
+    companyId: employee.companyId ?? actor.companyId ?? null,
+    companyName: employee.companyName ?? actor.companyName ?? "",
+    source: "manual",
+    completionStatus: "completed",
+    status: "completed",
+    createdAt: existingSnap?.val()?.createdAt ?? now,
+    createdBy: existingSnap?.val()?.createdBy ?? request.auth.uid,
+    createdByName: existingSnap?.val()?.createdByName ?? actor.name ?? "",
+    updatedAt: now,
+    updatedBy: request.auth.uid,
+    updatedByName: actor.name ?? "",
+  };
+  record.dedupeKey = buildManualHistoryDedupeKey(record);
+
+  await db.ref().update({
+    [`manualTrainingHistories/${targetId}`]: record,
+    [`userManualTrainingHistories/${uid}/${targetId}`]: record,
+  });
+
+  return { historyId: targetId, uid, message: historyId ? "개인 교육이력 수정 완료" : "개인 교육이력 등록 완료" };
+});
+
+exports.bulkImportManualTrainingHistories = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await ensureHQAdminProfile(request.auth.uid);
+  const rows = Array.isArray(request.data?.rows) ? request.data.rows : [];
+  if (!rows.length) throw new HttpsError("invalid-argument", "업로드할 교육이력이 없습니다.");
+  if (rows.length > 2000) throw new HttpsError("invalid-argument", "한 번에 최대 2000건까지 업로드할 수 있습니다.");
+
+  const [usersSnap, existingSnap] = await Promise.all([
+    db.ref("users").get(),
+    db.ref("manualTrainingHistories").get(),
+  ]);
+  const users = usersSnap.val() ?? {};
+  const employeeByEmpNo = new Map();
+  Object.entries(users).forEach(([uid, user]) => {
+    if (user?.role === "employee") employeeByEmpNo.set(normalizeEmpNo(user.empNo).toLowerCase(), { uid, ...user });
+  });
+  const existingKeys = new Set(Object.values(existingSnap.val() ?? {}).map((item) => item?.dedupeKey).filter(Boolean));
+
+  const updates = {};
+  const succeeded = [];
+  const failed = [];
+  const skipped = [];
+  const batchKeys = new Set();
+
+  for (let index = 0; index < rows.length; index += 1) {
+    const sourceRow = rows[index] ?? {};
+    const empNo = normalizeEmpNo(sourceRow.empNo).toLowerCase();
+    const employee = employeeByEmpNo.get(empNo);
+    try {
+      if (!empNo || !employee) throw new Error("등록된 사번을 찾을 수 없습니다.");
+      assertSameCompany(actor, employee);
+      const inputName = normalizeText(sourceRow.employeeName || sourceRow.name);
+      if (inputName && inputName !== normalizeText(employee.name)) throw new Error("사번과 이름이 일치하지 않습니다.");
+
+      const normalized = normalizeManualHistory(sourceRow, employee, request.auth.uid, actor.name ?? "");
+      const historyId = db.ref("manualTrainingHistories").push().key;
+      const now = Date.now();
+      const record = {
+        ...normalized,
+        historyId,
+        uid: employee.uid,
+        empNo: employee.empNo ?? empNo,
+        employeeName: employee.name ?? "",
+        branchId: employee.branchId ?? "",
+        branchName: employee.branchName ?? "",
+        companyId: employee.companyId ?? actor.companyId ?? null,
+        companyName: employee.companyName ?? actor.companyName ?? "",
+        source: "manual",
+        completionStatus: "completed",
+        status: "completed",
+        createdAt: now,
+        createdBy: request.auth.uid,
+        createdByName: actor.name ?? "",
+        updatedAt: now,
+        updatedBy: request.auth.uid,
+        updatedByName: actor.name ?? "",
+      };
+      record.dedupeKey = buildManualHistoryDedupeKey(record);
+      if (existingKeys.has(record.dedupeKey) || batchKeys.has(record.dedupeKey)) {
+        skipped.push({ row: index + 2, empNo, message: "동일 교육이력이 이미 등록되어 있습니다." });
+        continue;
+      }
+      batchKeys.add(record.dedupeKey);
+      updates[`manualTrainingHistories/${historyId}`] = record;
+      updates[`userManualTrainingHistories/${employee.uid}/${historyId}`] = record;
+      succeeded.push({ row: index + 2, empNo, historyId });
+    } catch (err) {
+      failed.push({ row: index + 2, empNo, message: err?.message || "검증 실패" });
+    }
+  }
+
+  if (Object.keys(updates).length) await db.ref().update(updates);
+  return {
+    succeededCount: succeeded.length,
+    skippedCount: skipped.length,
+    failedCount: failed.length,
+    succeeded,
+    skipped,
+    failed,
+  };
+});
+
 exports.deleteEmployeeHistory = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
   await ensureHQAdmin(request.auth.uid);
@@ -555,8 +695,9 @@ exports.deleteEmployeeHistory = onCall(OPTS, async (request) => {
   const source = normalizeText(request.data?.source);
   const sessionId = normalizeText(request.data?.sessionId);
   const trainingId = normalizeText(request.data?.trainingId);
+  const historyId = normalizeText(request.data?.historyId);
 
-  if (!uid || !["session", "legacy"].includes(source)) {
+  if (!uid || !["session", "legacy", "manual"].includes(source)) {
     throw new HttpsError("invalid-argument", "삭제할 교육이력 정보가 올바르지 않습니다.");
   }
 
@@ -565,15 +706,100 @@ exports.deleteEmployeeHistory = onCall(OPTS, async (request) => {
     if (!sessionId) throw new HttpsError("invalid-argument", "회차 ID가 필요합니다.");
     updates[`sessionCompletions/${sessionId}/${uid}`] = null;
     updates[`userSessionCompletions/${uid}/${sessionId}`] = null;
-  } else {
+  } else if (source === "legacy") {
     if (!trainingId) throw new HttpsError("invalid-argument", "교육 ID가 필요합니다.");
     updates[`trainingCompletions/${trainingId}/${uid}`] = null;
     updates[`userCompletions/${uid}/${trainingId}`] = null;
+  } else {
+    if (!historyId) throw new HttpsError("invalid-argument", "개인 교육이력 ID가 필요합니다.");
+    const historySnap = await db.ref(`manualTrainingHistories/${historyId}`).get();
+    if (!historySnap.exists() || historySnap.val()?.uid !== uid) {
+      throw new HttpsError("not-found", "개인 교육이력을 찾을 수 없습니다.");
+    }
+    updates[`manualTrainingHistories/${historyId}`] = null;
+    updates[`userManualTrainingHistories/${uid}/${historyId}`] = null;
   }
 
   await db.ref().update(updates);
-  return { uid, source, sessionId, trainingId, message: "교육이력 삭제 완료" };
+  return { uid, source, sessionId, trainingId, historyId, message: "교육이력 삭제 완료" };
 });
+
+
+async function ensureHQAdminProfile(uid) {
+  const snap = await db.ref(`users/${uid}`).get();
+  if (!snap.exists() || snap.val()?.role !== "hq_admin") {
+    throw new HttpsError("permission-denied", "본사 교육관리자만 개인 교육이력을 관리할 수 있습니다.");
+  }
+  return { uid, ...snap.val() };
+}
+
+function assertSameCompany(actor, employee) {
+  if (actor?.companyId && employee?.companyId && actor.companyId !== employee.companyId) {
+    throw new HttpsError("permission-denied", "다른 회사 직원의 교육이력은 관리할 수 없습니다.");
+  }
+}
+
+function normalizeTrainingTypeValue(value) {
+  const raw = normalizeText(value).toLowerCase();
+  const map = {
+    job: "job", "직무교육": "job", "직무 교육": "job",
+    legal: "legal", "법정교육": "legal", "법정 교육": "legal",
+    online: "online", "온라인교육": "online", "온라인 교육": "online",
+    external: "external", "외부교육": "external", "외부 교육": "external",
+    other: "other", "기타": "other",
+  };
+  return map[raw] || map[normalizeText(value)] || "other";
+}
+
+function normalizeDateMillis(value, label) {
+  if (value === null || value === undefined || value === "") return null;
+  const numberValue = Number(value);
+  if (Number.isFinite(numberValue) && numberValue > 100000000000) return numberValue;
+  const parsed = Date.parse(String(value));
+  if (!Number.isFinite(parsed)) throw new Error(`${label} 형식이 올바르지 않습니다.`);
+  return parsed;
+}
+
+function normalizeManualHistory(data, employee, actorUid, actorName) {
+  const trainingType = normalizeTrainingTypeValue(data?.trainingType);
+  const subjectName = normalizeText(data?.subjectName || data?.trainingSubject || data?.courseSubject);
+  const title = normalizeText(data?.title || data?.courseName || subjectName);
+  const completedAt = normalizeDateMillis(data?.completedAt || data?.completionDate, "수료일");
+  if (!title) throw new Error("교육과정명이 필요합니다.");
+  if (!subjectName) throw new Error("교육 세부분류 또는 교육과목이 필요합니다.");
+  if (!completedAt) throw new Error("수료일이 필요합니다.");
+
+  const cycleMonths = Math.max(0, Number(data?.cycleMonths ?? data?.retrainingCycleMonths ?? 0) || 0);
+  const hours = Math.max(0, Number(data?.hours ?? data?.trainingHours ?? 0) || 0);
+  return {
+    trainingType,
+    subjectCode: normalizeText(data?.subjectCode),
+    subjectName,
+    title,
+    courseName: normalizeText(data?.courseName || title),
+    instructorName: normalizeText(data?.instructorName),
+    hours,
+    startDate: normalizeDateMillis(data?.startDate, "교육 시작일"),
+    endDate: normalizeDateMillis(data?.endDate, "교육 종료일"),
+    completedAt,
+    result: normalizeText(data?.result || "PASS").toUpperCase(),
+    subType: normalizeText(data?.subType),
+    note: normalizeText(data?.note),
+    cycleMonths,
+    enteredBy: actorUid,
+    enteredByName: actorName,
+  };
+}
+
+function buildManualHistoryDedupeKey(record) {
+  return [
+    normalizeEmpNo(record.empNo).toLowerCase(),
+    normalizeText(record.trainingType).toLowerCase(),
+    normalizeText(record.subjectCode || record.subjectName).toLowerCase(),
+    normalizeText(record.title).toLowerCase(),
+    Number(record.completedAt || 0),
+  ].join("|");
+}
 
 async function deactivateEmployeeAndRemoveProfile(uid) {
   try {

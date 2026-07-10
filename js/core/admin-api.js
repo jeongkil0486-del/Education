@@ -8,6 +8,8 @@ const updateManagedAccountCallable = httpsCallable(functions, "updateManagedAcco
 const deleteEmployeeCallable       = httpsCallable(functions, "deleteEmployeeAccount");
 const deleteManagedAccountCallable = httpsCallable(functions, "deleteManagedAccount");
 const deleteEmployeeHistoryCallable = httpsCallable(functions, "deleteEmployeeHistory");
+const upsertManualTrainingHistoryCallable = httpsCallable(functions, "upsertManualTrainingHistory");
+const bulkImportManualTrainingHistoriesCallable = httpsCallable(functions, "bulkImportManualTrainingHistories");
 
 export async function createEmployeeAccounts(payload) {
   const result = await createEmployeesCallable(payload);
@@ -36,6 +38,16 @@ export async function deleteManagedAccount(payload) {
 
 export async function deleteEmployeeHistory(payload) {
   const result = await deleteEmployeeHistoryCallable(payload);
+  return result.data;
+}
+
+export async function upsertManualTrainingHistory(payload) {
+  const result = await upsertManualTrainingHistoryCallable(payload);
+  return result.data;
+}
+
+export async function bulkImportManualTrainingHistories(payload) {
+  const result = await bulkImportManualTrainingHistoriesCallable(payload);
   return result.data;
 }
 
