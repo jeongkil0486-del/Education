@@ -587,7 +587,10 @@ function renderLedgerTable() {
             <td style="font-size:var(--text-xs)">${esc(days)}</td>
             <td><span class="chip chip--${tone}" style="font-size:var(--text-xs)">${esc(r.dueStatusLabel)}</span></td>
             <td style="font-size:var(--text-xs)">${esc(r.note || "–")}</td>
-            ${isHQAdmin ? `<td><button class="btn btn--ghost btn--sm btn-edit-emp" data-uid="${esc(r.uid)}" style="padding:2px 6px;font-size:var(--text-xs)">수정</button></td>` : ""}
+            ${isHQAdmin ? `<td style="text-align:right;white-space:nowrap">
+              <button class="btn btn--ghost btn--sm btn-view-card" data-uid="${esc(r.uid)}" style="padding:2px 6px;font-size:var(--text-xs)">이력카드</button>
+              <button class="btn btn--ghost btn--sm btn-edit-emp" data-uid="${esc(r.uid)}" style="padding:2px 6px;font-size:var(--text-xs)">수정</button>
+            </td>` : ""}
           </tr>`;
         }).join("")}
       </tbody>
@@ -623,6 +626,14 @@ function renderLedgerTable() {
         renderLedgerTable();
       });
       chk.addEventListener("click", (e) => e.stopPropagation());
+    });
+
+    // 이력카드 버튼
+    el.querySelectorAll(".btn-view-card").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        router.push("history-cards", { uid: btn.dataset.uid });
+      });
     });
 
     // 수정 버튼
