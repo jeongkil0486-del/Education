@@ -690,25 +690,28 @@ function sortLedgerRows(inputRows) {
 
   const { key, direction } = ledgerSort;
   const multiplier = direction === "asc" ? 1 : -1;
-  return rows.sort((a, b) => {
-    const av = ledgerSortValue(a, key);
-    const bv = ledgerSortValue(b, key);
+  return rows.map((row, index) => ({ row, index })).sort((a, b) => {
+    const av = ledgerSortValue(a.row, key);
+    const bv = ledgerSortValue(b.row, key);
     const aEmpty = av === null || av === undefined || av === "" || Number.isNaN(av);
     const bEmpty = bv === null || bv === undefined || bv === "" || Number.isNaN(bv);
     if (aEmpty !== bEmpty) return aEmpty ? 1 : -1; // 빈 값은 방향과 관계없이 항상 마지막
-    if (aEmpty && bEmpty) return String(a.name ?? "").localeCompare(String(b.name ?? ""), "ko");
+    if (aEmpty && bEmpty) return a.index - b.index;
 
     let compared;
     if (typeof av === "number" && typeof bv === "number") compared = av - bv;
     else compared = String(av).localeCompare(String(bv), "ko", { numeric: true, sensitivity: "base" });
-    return compared * multiplier || String(a.name ?? "").localeCompare(String(b.name ?? ""), "ko", { numeric: true });
-  });
+    return compared * multiplier || a.index - b.index;
+  }).map(({ row }) => row);
 }
 
 function ledgerSortValue(row, key) {
   const latestDate = (values) => {
-    const dates = (Array.isArray(values) ? values : [values]).filter((value) => value && value !== "–").sort();
-    return dates.length ? ledgerDateValue(dates[dates.length - 1]) : null;
+    const dates = (Array.isArray(values) ? values : [values])
+      .flatMap((value) => typeof value === "string" ? value.split(/[,，、]/) : [value])
+      .map(ledgerDateValue)
+      .filter((value) => value !== null);
+    return dates.length ? Math.max(...dates) : null;
   };
   if (["joinDate", "initialDate", "lastDate", "nextDueDate"].includes(key)) return ledgerDateValue(row[key]);
   if (key === "prevDates" || key === "currDates") return latestDate(row[key]);
@@ -721,14 +724,28 @@ function ledgerSortValue(row, key) {
 }
 
 function ledgerDateValue(value) {
-  if (!value || value === "–") return null;
+  if (value === null || value === undefined || value === "") return null;
+  if (Array.isArray(value)) {
+    const dates = value.map(ledgerDateValue).filter((item) => item !== null);
+    return dates.length ? Math.max(...dates) : null;
+  }
   if (value instanceof Date && !Number.isNaN(value.getTime())) return value.getTime();
-  const numeric = Number(value);
-  if (Number.isFinite(numeric) && numeric > 1000000000) return numeric;
-  const ymd = formatDateYMD(value);
-  if (!ymd) return null;
-  const timestamp = Date.parse(`${ymd}T00:00:00Z`);
-  return Number.isNaN(timestamp) ? null : timestamp;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return null;
+    if (value > 100000000000) return value;
+    if (value > 1000000000) return value * 1000;
+  }
+
+  const text = String(value).trim();
+  if (!text || text === "-" || text === "–") return null;
+  const first = text.split(/[,，、]/)[0].trim();
+  const ymd = first.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (ymd) {
+    const timestamp = Date.UTC(Number(ymd[1]), Number(ymd[2]) - 1, Number(ymd[3]));
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+  const timestamp = Date.parse(first);
+  return Number.isFinite(timestamp) ? timestamp : null;
 }
 
 function updateResetBtn() {
