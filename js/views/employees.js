@@ -329,7 +329,7 @@ async function downloadTypedTemplate({ trainingType, subjectCode, subjectName })
   ]);
   XLSX.utils.book_append_sheet(wb, metaWs, "_meta");
 
-  // ── 안내 문구 (1~3행)
+  // ── 안내 문구 (1~4행) + 헤더 (5행)
   const infoRows = [
     [`[${typeLabel} — ${subjectName}] 개인 교육이력 등록 양식`],
     [`기준연도: ${currentYear}년 (전년도: ${prevYear}년 / 금년도: ${currentYear}년)`],
@@ -339,26 +339,78 @@ async function downloadTypedTemplate({ trainingType, subjectCode, subjectName })
     ["성명", "사번", "입사일", "직급/직책", "초기교육", "최종교육일", `${prevYear}년`, `${currentYear}년`, "비고"],
   ];
 
-  // 직원 데이터 행
+  // ── 직원 데이터 행
+  // 입사일은 문자열 대신 Date 객체로 넣어야 SheetJS가 날짜 셀(t:'d')로 처리함
+  const parseJoinDate = (emp) => {
+    // 프로필에서 쓰이는 필드명을 모두 시도
+    const raw = emp.joinDate ?? emp.hireDate ?? emp.joinedAt ?? emp.employmentDate ?? null;
+    if (!raw) return null;
+    const n = Number(raw);
+    // 밀리초 타임스탬프 (13자리)
+    if (Number.isFinite(n) && n > 1e11) return new Date(n);
+    // YYYY-MM-DD 문자열
+    const d = new Date(String(raw));
+    return isNaN(d.getTime()) ? null : d;
+  };
+
   const dataRows = targetEmployees.map((emp) => [
-    emp.name ?? "",
-    emp.empNo ?? "",
-    emp.joinDate ? formatDateYMD(emp.joinDate) : "",
-    emp.position ?? "",
-    "", // 초기교육 (입력)
-    "", // 최종교육일 (입력)
-    "", // 전년도 (입력)
-    "", // 금년도 (입력)
-    "", // 비고
+    emp.name ?? "",          // A: 성명
+    String(emp.empNo ?? ""), // B: 사번 — 반드시 문자열로 (앞자리 0 보존)
+    parseJoinDate(emp),      // C: 입사일 — Date 객체 또는 null
+    emp.position ?? "",      // D: 직급/직책
+    null,                    // E: 초기교육 (입력)
+    null,                    // F: 최종교육일 (입력)
+    null,                    // G: 전년도 (입력)
+    null,                    // H: 금년도 (입력)
+    "",                      // I: 비고
   ]);
 
   const allRows = [...infoRows, ...dataRows];
-  const ws = XLSX.utils.aoa_to_sheet(allRows);
+  // cellDates:true로 Date 객체를 날짜 셀로 변환
+  const ws = XLSX.utils.aoa_to_sheet(allRows, { cellDates: true, dateNF: "yyyy-mm-dd" });
+
+  // ── 열 너비
   ws["!cols"] = [
-    { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 14 },
+    { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 14 },
     { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 20 },
   ];
-  // 안내 행 보호: 1~4행 (sheetProtect은 클라이언트 XLSX에서 제한적이므로 스타일만)
+
+  // ── 날짜 컬럼(C,E,F,G,H) + 사번 컬럼(B) 셀 서식 적용
+  // 헤더는 5행(index 4), 데이터는 6행(index 5)부터
+  const HEADER_ROW = 5; // 1-based
+  const DATA_START  = 6; // 1-based
+  const DATA_END    = DATA_START + dataRows.length - 1;
+
+  // 날짜 서식을 적용할 열 (0-based): C=2, E=4, F=5, G=6, H=7
+  const DATE_COLS   = [2, 4, 5, 6, 7];
+  // 사번 열 (0-based): B=1
+  const EMPNO_COL   = 1;
+
+  // SheetJS 열 이름 변환 (0→A, 1→B, ...)
+  const colName = (idx) => {
+    let name = "";
+    let n = idx;
+    do { name = String.fromCharCode(65 + (n % 26)) + name; n = Math.floor(n / 26) - 1; } while (n >= 0);
+    return name;
+  };
+  const cellAddr = (r, c) => `${colName(c)}${r}`; // r: 1-based
+
+  // 데이터 행에만 서식 적용 (헤더 행 제외)
+  for (let r = DATA_START; r <= DATA_END; r++) {
+    // 날짜 컬럼: yyyy-mm-dd 서식
+    for (const c of DATE_COLS) {
+      const addr = cellAddr(r, c);
+      if (!ws[addr]) {
+        // 빈 셀도 미리 날짜 서식 지정 (사용자가 입력 시 날짜로 표시)
+        ws[addr] = { t: "z", v: undefined, z: "yyyy-mm-dd" };
+      } else {
+        ws[addr].z = "yyyy-mm-dd";
+      }
+    }
+    // 사번 컬럼: 텍스트 서식 (앞자리 0 보존)
+    const empAddr = cellAddr(r, EMPNO_COL);
+    if (ws[empAddr]) ws[empAddr].t = "s"; // 문자열로 강제
+  }
 
   XLSX.utils.book_append_sheet(wb, ws, "개인교육이력");
 
@@ -394,7 +446,8 @@ async function parseHistoryUploadFileInline(event) {
 
   try {
     const XLSX = await loadXlsx();
-    const wb   = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: false });
+    // cellDates:true: 날짜 셀을 JS Date 객체로 받음 (serial number 오파싱 방지)
+    const wb   = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
 
     // ── 1) _meta 시트 읽기
     const metaSheet = wb.Sheets["_meta"];
@@ -449,29 +502,37 @@ async function parseHistoryUploadFileInline(event) {
       return n !== "" || e !== "";
     });
 
+    // ★ Excel 날짜 정규화: JS Date / Excel serial / 문자열 모두 지원
+    //   cellDates:true면 Date 객체로 오고, cellDates:false면 serial number로 옴
+    //   serial 범위: 60(1900-03-01) ~ 2958465(9999-12-31)
+    const EXCEL_SERIAL_MIN = 60;
+    const EXCEL_SERIAL_MAX = 2958465;
+    const serialToYMD = (serial) => {
+      // Excel 에포크(1899-12-30)와 JS 에포크(1970-01-01)의 차이: 25569일
+      const d = new Date(Math.round((serial - 25569) * 86400 * 1000));
+      return isNaN(d.getTime()) ? "" : formatDateYMD(d.getTime());
+    };
+    const xlDateToYMD = (v) => {
+      if (v === null || v === undefined || v === "") return "";
+      // JS Date 객체 (cellDates:true)
+      if (v instanceof Date) return isNaN(v.getTime()) ? "" : formatDateYMD(v.getTime());
+      // Excel serial number (cellDates:false 또는 혼용)
+      if (typeof v === "number" && v >= EXCEL_SERIAL_MIN && v <= EXCEL_SERIAL_MAX) {
+        return serialToYMD(v);
+      }
+      // 문자열
+      const s = String(v).trim();
+      if (!s) return "";
+      // YYYY-MM-DD / YYYY.MM.DD / YYYY/MM/DD 정규화
+      const normalized = s.replace(/[./]/g, "-");
+      const d = new Date(normalized);
+      return isNaN(d.getTime()) ? "" : formatDateYMD(d.getTime());
+    };
+
     // ★ 사번 정규화: 숫자 사번도 안전하게 문자열로 변환
     const safeEmpNo = (v) => {
       if (v === null || v === undefined) return "";
-      // Excel serial 숫자가 아닌 일반 숫자·문자열 모두 처리
       return String(v).trim();
-    };
-
-    // ★ Excel 날짜 셀 정규화: serial number / JS Date / 문자열 모두 지원
-    const xlDateToYMD = (v) => {
-      if (v === null || v === undefined || v === "") return "";
-      // Excel serial number (일반적으로 40000~50000 범위)
-      if (typeof v === "number" && v > 0 && v < 3000) {
-        // XLSX.SSF.parse_date_code 대신 직접 계산
-        const d = new Date(Math.round((v - 25569) * 86400 * 1000));
-        if (!isNaN(d.getTime())) return formatDateYMD(d.getTime());
-        return "";
-      }
-      // 문자열 또는 큰 숫자(밀리초 타임스탬프)
-      const s = String(v).trim();
-      if (!s) return "";
-      const d = new Date(s);
-      if (!isNaN(d.getTime())) return formatDateYMD(d.getTime());
-      return "";
     };
 
     // 사번 → 직원 매핑
@@ -483,12 +544,13 @@ async function parseHistoryUploadFileInline(event) {
 
       const name     = getStr(col.name);
       const empNo    = safeEmpNo(getRaw(col.empNo));
+      // 날짜 컬럼은 반드시 getRaw → xlDateToYMD (Date 객체 또는 serial 처리)
       const joinDate = xlDateToYMD(getRaw(col.joinDate));
       const position = getStr(col.position);
-      const initial  = getStr(col.initial);
-      const lastDate = getStr(col.lastDate);
-      const prevDate = getStr(col.prev);
-      const currDate = getStr(col.curr);
+      const initial  = getRaw(col.initial);
+      const lastDate = xlDateToYMD(getRaw(col.lastDate));
+      const prevDate = getRaw(col.prev);
+      const currDate = getRaw(col.curr);
       const note     = getStr(col.note);
 
       // ── 검증 (요구 순서대로)
@@ -500,10 +562,13 @@ async function parseHistoryUploadFileInline(event) {
       if (empNo && !emp) errors.push("존재하지 않는 사번");
       else if (emp && name && emp.name !== name) errors.push("사번과 성명 불일치");
 
-      // 날짜 파싱 — 쉼표 구분 여러 날짜 지원
-      const parsedInitial = parseDateCells(initial,  Number(currentYear) - 10, Number(currentYear) + 1, errors, "초기교육");
+      // 날짜 파싱
+      // 초기교육: 연도 제한 없음 (입사 전후 모두 허용)
+      const parsedInitial = parseDateCells(initial,  null, null, errors, "초기교육");
+      // 전년도·금년도: 해당 연도 날짜만 허용
       const parsedPrev    = parseDateCells(prevDate,  Number(previousYear), Number(previousYear), errors, `${previousYear}년`);
       const parsedCurr    = parseDateCells(currDate,  Number(currentYear),  Number(currentYear),  errors, `${currentYear}년`);
+      // 최종교육일: 연도 제한 없음, 단 유효 날짜인지만 확인
       const parsedLast    = parseDateCell(lastDate);
 
       // 날짜가 하나도 없으면 건너뜀(실패 아님)
@@ -584,38 +649,64 @@ async function parseHistoryUploadFileInline(event) {
   }
 }
 
-// 날짜 셀 파싱 — 단일 날짜 (Excel serial / 문자열 / 밀리초 모두 지원)
-function parseDateCell(value) {
-  if (value === null || value === undefined || value === "") return "";
+/* ──────────────────────────────────────────────────────────
+   날짜 파싱 유틸
+   - JS Date 객체 (cellDates:true)
+   - Excel serial number (60 ~ 2958465)
+   - 문자열 YYYY-MM-DD / YYYY.MM.DD / YYYY/MM/DD
+   - 쉼표 구분 복수 날짜 (parseDateCells)
+────────────────────────────────────────────────────────── */
+const _SERIAL_MIN = 60;       // 1900-03-01
+const _SERIAL_MAX = 2958465;  // 9999-12-31
+
+/** 단일 원시값(Date / serial / 문자열) → "YYYY-MM-DD" 또는 "" */
+function _rawToYmd(v) {
+  if (v === null || v === undefined || v === "") return "";
+  // JS Date 객체
+  if (v instanceof Date) return isNaN(v.getTime()) ? "" : formatDateYMD(v.getTime());
   // Excel serial number
-  if (typeof value === "number" && value > 0 && value < 3000) {
-    const d = new Date(Math.round((value - 25569) * 86400 * 1000));
+  if (typeof v === "number" && v >= _SERIAL_MIN && v <= _SERIAL_MAX) {
+    const d = new Date(Math.round((v - 25569) * 86400 * 1000));
     return isNaN(d.getTime()) ? "" : formatDateYMD(d.getTime());
   }
-  const s = String(value).trim();
+  // 문자열 — YYYY-MM-DD / YYYY.MM.DD / YYYY/MM/DD
+  const s = String(v).trim().replace(/[./]/g, "-");
   if (!s) return "";
   const d = new Date(s);
-  if (isNaN(d.getTime())) return "";
-  return formatDateYMD(d.getTime());
+  return isNaN(d.getTime()) ? "" : formatDateYMD(d.getTime());
 }
 
-// 날짜 셀 파싱 — 쉼표 구분 복수 날짜, 연도 범위 검증
-// Excel serial number / 문자열 / 밀리초 모두 지원
+/**
+ * 단일 날짜 셀 파싱 (연도 제한 없음 — 입사일·최종교육일·초기교육용)
+ * @returns {string} "YYYY-MM-DD" 또는 ""
+ */
+function parseDateCell(value) {
+  return _rawToYmd(value);
+}
+
+/**
+ * 날짜 셀 파싱 — 쉼표 구분 복수 날짜 지원 + 연도 범위 검증
+ * minYear/maxYear 를 null로 전달하면 연도 범위 제한 없음
+ * @returns {string[]} "YYYY-MM-DD" 배열
+ */
 function parseDateCells(value, minYear, maxYear, errors, label) {
   if (value === null || value === undefined || value === "") return [];
 
-  // Excel serial number는 쉼표 구분이 없으므로 단독 처리
-  if (typeof value === "number") {
-    const ymd = parseDateCell(value);
+  // Date 객체 또는 serial number → 단독 처리 (쉼표 구분 불필요)
+  if (value instanceof Date || (typeof value === "number" && value >= _SERIAL_MIN && value <= _SERIAL_MAX)) {
+    const ymd = _rawToYmd(value);
     if (!ymd) { errors.push(`${label} 날짜 형식 오류`); return []; }
-    const year = new Date(ymd).getFullYear();
-    if (year < minYear || year > maxYear) {
-      errors.push(`${label} 연도 오류 (${year}년, ${minYear}~${maxYear}년만 허용)`);
-      return [];
+    if (minYear !== null && maxYear !== null) {
+      const year = Number(ymd.slice(0, 4));
+      if (year < minYear || year > maxYear) {
+        errors.push(`${label} 연도 오류 (${year}년 입력, ${minYear}년 날짜만 허용)`);
+        return [];
+      }
     }
     return [ymd];
   }
 
+  // 문자열 처리 — 쉼표로 복수 날짜 허용
   const s = String(value).trim();
   if (!s) return [];
   const parts = s.split(/[,，、]/);
@@ -623,17 +714,16 @@ function parseDateCells(value, minYear, maxYear, errors, label) {
   for (const part of parts) {
     const trimmed = part.trim();
     if (!trimmed) continue;
-    const d = new Date(trimmed);
-    if (isNaN(d.getTime())) {
-      errors.push(`${label} 날짜 형식 오류: ${trimmed}`);
-      continue;
+    const ymd = _rawToYmd(trimmed);
+    if (!ymd) { errors.push(`${label} 날짜 형식 오류: ${trimmed}`); continue; }
+    if (minYear !== null && maxYear !== null) {
+      const year = Number(ymd.slice(0, 4));
+      if (year < minYear || year > maxYear) {
+        errors.push(`${label} 연도 오류 (${year}년 입력, ${minYear}년 날짜만 허용)`);
+        continue;
+      }
     }
-    const year = d.getFullYear();
-    if (year < minYear || year > maxYear) {
-      errors.push(`${label} 연도 오류 (${year}년, ${minYear}~${maxYear}년만 허용)`);
-      continue;
-    }
-    results.push(formatDateYMD(d.getTime()));
+    results.push(ymd);
   }
   return results;
 }
