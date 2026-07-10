@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 직원관리대장 (employees.js)
  * - 지점 + 교육 항목 선택 후 조회
  * - 4개 요약 카드 (전체/30일이내/7일이내/기한초과) + 클릭 필터
@@ -44,6 +44,43 @@ let ledgerSearch  = "";
 let selectedUids  = new Set();
 let currentLedgerMeta = null;   // { branchId, branchLabel, trainingVal, trainingMeta, cycleMonths }
 
+async function refreshViewState() {
+  const [references, items] = await Promise.all([
+    loadTrainingReferences(),
+    listManagedItems().catch(() => []),
+  ]);
+
+  viewState = {
+    company: references.company ?? null,
+    branches: [...(references.branches ?? [])].sort((a, b) =>
+      String(a.name ?? a.code ?? "").localeCompare(String(b.name ?? b.code ?? ""), "ko")),
+    employees: [...(references.employees ?? [])].sort((a, b) =>
+      String(a.name ?? "").localeCompare(String(b.name ?? ""), "ko")),
+    items,
+  };
+}
+
+function getSelectedBranch() {
+  const branchId = document.getElementById("ledger-branch")?.value ?? "";
+  return viewState.branches.find((branch) => String(branch.id) === String(branchId)) ?? null;
+}
+
+function getSelectedTrainingMeta() {
+  return parseTrainingValue(document.getElementById("ledger-training")?.value ?? "");
+}
+
+function getEffectiveCompanyId(trainingMeta = getSelectedTrainingMeta(), branch = getSelectedBranch()) {
+  return String(
+    authStore.companyId ??
+    branch?.companyId ??
+    (trainingMeta?.itemId
+      ? viewState.items.find((item) => item.id === trainingMeta.itemId)?.companyId
+      : null) ??
+    viewState.company?.id ??
+    ""
+  ).trim();
+}
+
 /* ═══════════════════════════════════════════════════════
    render
 ═══════════════════════════════════════════════════════ */
@@ -53,18 +90,7 @@ export async function render(container) {
   container.innerHTML = `<div style="padding:var(--space-2);text-align:center;color:var(--gray-400);font-size:var(--text-sm)">로딩 중...</div>`;
 
   try {
-    const [references, items] = await Promise.all([
-      loadTrainingReferences(),
-      listManagedItems().catch(() => []),
-    ]);
-    viewState = {
-      company:   references.company ?? null,
-      branches:  [...(references.branches ?? [])].sort((a, b) =>
-        String(a.name ?? a.code ?? "").localeCompare(String(b.name ?? b.code ?? ""), "ko")),
-      employees: [...(references.employees ?? [])].sort((a, b) =>
-        String(a.name ?? "").localeCompare(String(b.name ?? ""), "ko")),
-      items,
-    };
+    await refreshViewState();
   } catch (err) {
     container.innerHTML = `<div class="empty-state" style="padding:var(--space-16)"><div class="empty-state__title">데이터를 불러오지 못했습니다.</div></div>`;
     console.error("[employees] init error", err);
@@ -285,13 +311,13 @@ async function runLedgerQuery() {
     const branch       = viewState.branches.find((b) => b.id === branchId);
     const branchLabel  = branch?.name ?? branch?.code ?? branchId;
     const trainingLabel = trainingMeta?.label ?? trainingVal;
+    const effectiveCompanyId = getEffectiveCompanyId(trainingMeta, branch);
 
     // 재교육 주기 설정 조회
     let cycleMonths = 0;
     try {
       const educationKey = buildEducationKey(trainingMeta);
-      const companyId    = authStore.companyId;
-      const config       = companyId ? await educationCycleConfigsDB.get(companyId, educationKey) : null;
+      const config       = effectiveCompanyId ? await educationCycleConfigsDB.get(effectiveCompanyId, educationKey) : null;
       cycleMonths = Number(config?.cycleMonths ?? 0) || 0;
       // trainingItem 자체 cycleMonths도 폴백
       if (!cycleMonths && trainingMeta?.itemId) {
@@ -300,7 +326,7 @@ async function runLedgerQuery() {
       }
     } catch (e) { /* cycleMonths 조회 실패 무시 */ }
 
-    currentLedgerMeta = { branchId, branchLabel, trainingVal, trainingMeta, cycleMonths };
+    currentLedgerMeta = { branchId, branchLabel, trainingVal, trainingMeta, cycleMonths, companyId: effectiveCompanyId };
 
     const branchEmployees = viewState.employees.filter((e) => matchesBranch(e, branchId));
     const [manualAll, sessionAll] = await Promise.all([
@@ -639,34 +665,32 @@ function updateResetBtn() {
 ═══════════════════════════════════════════════════════ */
 async function openResetConfirmModal() {
   if (!currentLedgerMeta || selectedUids.size === 0) { toast.warning("지점·교육 조회 후 직원을 선택하세요."); return; }
-  const { branchLabel, trainingMeta } = currentLedgerMeta;
+  const { branchLabel } = currentLedgerMeta;
   const uids = [...selectedUids];
 
-  // 삭제 예정 이력 수 계산 (manualTrainingHistories에서 해당 uid + 교육 + source=manual_excel)
+  // 삭제 예정 이력 수 계산 (선택 직원의 manual/manual_excel 전체)
   let deleteCnt = 0;
   try {
     const allManual = await manualTrainingHistoriesDB.listAll();
     deleteCnt = allManual.filter((h) =>
       uids.includes(h.uid) &&
-      h.source === "manual_excel" &&
-      filterByTraining([h], trainingMeta).length > 0
+      ["manual", "manual_excel"].includes(String(h.source ?? "").toLowerCase())
     ).length;
   } catch (e) { /* 조회 실패 무시 */ }
 
   modal.open({
-    title: "선택 직원 교육이력 초기화",
+    title: "선택 직원 개인이력 전체 초기화",
     size: "sm",
     body: `
       <div style="display:flex;flex-direction:column;gap:var(--space-4)">
         <div style="font-size:var(--text-sm);line-height:1.7">
           <div><b>지점:</b> ${esc(branchLabel)}</div>
-          <div><b>교육:</b> ${esc(trainingMeta?.label ?? "")}</div>
           <div><b>선택 직원:</b> ${uids.length}명</div>
-          <div><b>삭제 예정 Excel 이력:</b> ${deleteCnt}건</div>
+          <div><b>삭제 예정 개인이력:</b> ${deleteCnt}건</div>
         </div>
         <div style="background:#fff1f2;border:1px solid #fecaca;border-radius:var(--radius-md);padding:var(--space-3);font-size:var(--text-sm);color:#dc2626">
-          ⚠️ 선택한 직원의 해당 교육 항목 Excel 업로드 이력만 삭제됩니다.<br/>
-          직원 계정과 다른 교육이력은 삭제되지 않습니다.<br/>
+          ⚠️ 선택한 직원의 수동 입력 / Excel 업로드 개인이력이 모두 삭제됩니다.<br/>
+          회차 완료 이력과 기존 완료 이력은 삭제되지 않습니다.<br/>
           삭제 후 복구할 수 없습니다.
         </div>
         <div class="form-group" style="margin:0">
@@ -677,23 +701,18 @@ async function openResetConfirmModal() {
     actions: [
       { label: "취소", variant: "secondary", onClick: () => modal.close() },
       {
-        label: "선택 이력 초기화",
+        label: "선택 직원 개인이력 전체 초기화",
         variant: "danger",
         onClick: async () => {
           const val = document.getElementById("reset-confirm-input")?.value?.trim();
           if (val !== "초기화") { toast.warning("'초기화'를 정확히 입력해 주세요."); return; }
-          modal.setLoading("선택 이력 초기화", true);
+          modal.setLoading("선택 직원 개인이력 전체 초기화", true);
           try {
             const result = await resetSelectedManualTrainingHistories({
-              companyId:   authStore.companyId,
-              branchId:    currentLedgerMeta.branchId,
-              itemId:      trainingMeta?.itemId ?? "",
-              trainingType: trainingMeta?.trainingType ?? "",
-              subjectCode:  trainingMeta?.subjectCode ?? "",
-              subjectName:  trainingMeta?.subjectName ?? "",
-              employeeUids: uids,
+              uids: Array.from(selectedUids),
+              resetAllForUser: true,
             });
-            toast.success(`초기화 완료: ${result.deletedHistoryCount ?? 0}건 삭제`);
+            toast.success(`초기화 완료: ${result.deletedCount ?? 0}건 삭제`);
             modal.close();
             selectedUids.clear();
             updateResetBtn();
@@ -701,7 +720,7 @@ async function openResetConfirmModal() {
           } catch (err) {
             console.error("[employees] reset failed", err);
             toast.error(err?.message || "초기화에 실패했습니다.");
-            modal.setLoading("선택 이력 초기화", false);
+            modal.setLoading("선택 직원 개인이력 전체 초기화", false);
           }
         },
       },
@@ -800,6 +819,7 @@ function openEditEmployeeModal(row) {
             });
             toast.success("직원 정보가 수정되었습니다.");
             modal.close();
+            await refreshViewState();
             await runLedgerQuery();
           } catch (err) {
             console.error("[employees] updateEmployee failed", err);
@@ -821,7 +841,8 @@ async function openCycleConfigModal() {
   if (!trainingMeta) { toast.warning("교육을 먼저 선택하세요."); return; }
 
   const educationKey = buildEducationKey(trainingMeta);
-  const companyId    = authStore.companyId;
+  const selectedBranch = getSelectedBranch();
+  const companyId    = getEffectiveCompanyId(trainingMeta, selectedBranch);
   let currentCycle   = 0;
   try {
     const config = companyId ? await educationCycleConfigsDB.get(companyId, educationKey) : null;
@@ -870,6 +891,7 @@ async function openCycleConfigModal() {
           try {
             await saveEducationCycleConfig({
               companyId,
+              branchId:     selectedBranch?.id ?? currentLedgerMeta?.branchId ?? "",
               itemId:       trainingMeta.itemId ?? "",
               trainingType: trainingMeta.trainingType,
               subjectCode:  trainingMeta.subjectCode ?? "",
@@ -878,6 +900,7 @@ async function openCycleConfigModal() {
             });
             toast.success(`재교육 주기가 ${val ? `${val}개월` : "주기 없음"}으로 설정되었습니다.`);
             modal.close();
+            await refreshViewState();
             await runLedgerQuery();
           } catch (err) {
             console.error("[employees] saveEducationCycleConfig failed", err);
@@ -901,10 +924,13 @@ async function openCycleConfigModal() {
 }
 
 function buildEducationKey(meta) {
-  if (!meta) return "unknown";
-  if (meta.itemId)     return `item_${meta.itemId}`;
-  if (meta.subjectCode) return `${meta.trainingType}_${meta.subjectCode}`;
-  return `${meta.trainingType}_${String(meta.subjectName ?? "").replace(/\s+/g, "_")}`;
+  const typeKey = String(meta?.trainingType ?? "other").trim().toLowerCase() || "other";
+  const subjectKey = String(meta?.subjectCode || meta?.subjectName || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9가-힣]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return `${typeKey}__${subjectKey || "default"}`;
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -1221,9 +1247,10 @@ async function submitHistoryUploadInline() {
   // 해당 교육의 기본 주기 포함
   const trainingMeta = parseTrainingValue(`${trainingType}|${subjectCode}`);
   const educationKey = buildEducationKey(trainingMeta ?? { trainingType, subjectCode, subjectName });
+  const effectiveCompanyId = getEffectiveCompanyId(trainingMeta, getSelectedBranch());
   let defaultCycle   = 0;
   try {
-    const cfg = authStore.companyId ? await educationCycleConfigsDB.get(authStore.companyId, educationKey) : null;
+    const cfg = effectiveCompanyId ? await educationCycleConfigsDB.get(effectiveCompanyId, educationKey) : null;
     defaultCycle = Number(cfg?.cycleMonths ?? 0) || 0;
   } catch (e) { /* 무시 */ }
 
@@ -1339,3 +1366,4 @@ async function loadXlsx() { return import("https://cdn.sheetjs.com/xlsx-0.20.3/p
 function matchesBranch(emp, branchId) { return String(emp.branchId ?? "") === String(branchId); }
 function metaError(msg) { return `<div style="color:var(--color-danger,#dc2626);padding:var(--space-4);font-size:var(--text-sm);border:1px solid #fecaca;border-radius:var(--radius-md);background:#fff1f2">${esc(msg)}</div>`; }
 function esc(v) { return String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+

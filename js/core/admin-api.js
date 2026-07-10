@@ -1,4 +1,4 @@
-import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-functions.js";
+﻿import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-functions.js";
 
 const { functions } = window.__firebase;
 
@@ -151,3 +151,4 @@ export async function getEducationCycleConfig(payload) {
   // 클라이언트에서 직접 DB를 읽어도 되므로 여기서는 noop (educationCycleConfigsDB.get 사용)
   return null;
 }
+

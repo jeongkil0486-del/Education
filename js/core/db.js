@@ -438,20 +438,22 @@ export const sessionCompletionsDB = {
 
   forSession: (sessionId) => getList(`sessionCompletions/${sessionId}`),
   forUser:    (uid)       => getList(`userSessionCompletions/${uid}`),
-  listAll:    ()          => getList("sessionCompletions"),
 };
 
-
-/* ══════════════════════════════════════════════════════════
-   Manual Training Histories
-   /manualTrainingHistories/{historyId}
-   /userManualTrainingHistories/{uid}/{historyId}
-   본사 교육관리자가 입력/업로드하는 기존 개인 교육이력
-══════════════════════════════════════════════════════════ */
 export const manualTrainingHistoriesDB = {
   get:     (historyId) => getVal(`manualTrainingHistories/${historyId}`),
-  forUser: (uid)       => getList(`userManualTrainingHistories/${uid}`),
   listAll: ()          => getList("manualTrainingHistories"),
+  forUser: (uid)       => getList(`userManualTrainingHistories/${uid}`),
+};
+
+export const educationCycleConfigsDB = {
+  get:     (companyId, educationKey) => getVal(`educationCycleConfigs/${companyId}/${educationKey}`),
+  set:     (companyId, educationKey, data) =>
+    set(r(`educationCycleConfigs/${companyId}`, educationKey), { ...data, updatedAt: Date.now() }),
+  update:  (companyId, educationKey, data) =>
+    update(r(`educationCycleConfigs/${companyId}`, educationKey), { ...data, updatedAt: Date.now() }),
+  listAll: (companyId) => getList(`educationCycleConfigs/${companyId}`),
+  delete:  (companyId, educationKey) => remove(r(`educationCycleConfigs/${companyId}`, educationKey)),
 };
 
 /* ══════════════════════════════════════════════════════════
@@ -522,20 +524,6 @@ export const settingsDB = {
 
 export const batchDB = {
   update: (updates) => update(ref(db), updates),
-};
-
-/* ══════════════════════════════════════════════════════════
-   Education Cycle Configs
-   /educationCycleConfigs/{companyId}/{educationKey}
-   교육 항목별 재교육 주기 기본 설정 (HQ_ADMIN이 관리대장에서 설정)
-══════════════════════════════════════════════════════════ */
-export const educationCycleConfigsDB = {
-  get:    (companyId, educationKey) => getVal(`educationCycleConfigs/${companyId}/${educationKey}`),
-  set:    (companyId, educationKey, data) =>
-    set(r(`educationCycleConfigs/${companyId}`, educationKey), { ...data, updatedAt: Date.now() }),
-  update: (companyId, educationKey, data) =>
-    update(r(`educationCycleConfigs/${companyId}`, educationKey), { ...data, updatedAt: Date.now() }),
-  listAll: (companyId) => getList(`educationCycleConfigs/${companyId}`),
 };
 
 /* ══════════════════════════════════════════════════════════

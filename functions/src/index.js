@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const logger = require("firebase-functions/logger");
@@ -884,7 +884,14 @@ exports.saveEducationCycleConfig = onCall(OPTS, async (request) => {
   const actor = await ensureHQAdminProfile(request.auth.uid);
 
   const payload = request.data && typeof request.data === "object" ? request.data : {};
-  const companyId = normalizeText(payload.companyId) || normalizeText(actor.companyId);
+  const itemId = normalizeText(payload.itemId);
+  const branchId = normalizeText(payload.branchId);
+  const companyId = await resolveEducationCycleCompanyId({
+    payloadCompanyId: normalizeText(payload.companyId),
+    actor,
+    itemId,
+    branchId,
+  });
   const trainingType = normalizeTrainingTypeValue(payload.trainingType);
   const subjectCode = normalizeText(payload.subjectCode);
   const subjectName = normalizeText(payload.subjectName);
@@ -915,6 +922,8 @@ exports.saveEducationCycleConfig = onCall(OPTS, async (request) => {
 
   await db.ref(targetPath).set({
     companyId,
+    branchId,
+    itemId,
     trainingType,
     subjectCode,
     subjectName,
@@ -926,6 +935,8 @@ exports.saveEducationCycleConfig = onCall(OPTS, async (request) => {
 
   return {
     companyId,
+    branchId,
+    itemId,
     configKey,
     trainingType,
     subjectCode,
@@ -1306,6 +1317,35 @@ function buildEducationCycleConfigKey(trainingType, subjectCode, subjectName) {
     .replace(/[^a-z0-9가-힣]+/g, "_")
     .replace(/^_+|_+$/g, "");
   return `${typeKey}__${subjectKey || "default"}`;
+}
+
+async function resolveEducationCycleCompanyId({ payloadCompanyId, actor, itemId, branchId }) {
+  if (payloadCompanyId) return payloadCompanyId;
+  if (normalizeText(actor?.companyId)) return normalizeText(actor.companyId);
+
+  if (itemId) {
+    const itemSnap = await db.ref(`trainingItems/${itemId}/companyId`).get();
+    if (itemSnap.exists() && normalizeText(itemSnap.val())) {
+      return normalizeText(itemSnap.val());
+    }
+  }
+
+  if (branchId) {
+    const branchSnap = await db.ref(`branches/${branchId}/companyId`).get();
+    if (branchSnap.exists() && normalizeText(branchSnap.val())) {
+      return normalizeText(branchSnap.val());
+    }
+  }
+
+  const actorBranchId = normalizeText(actor?.branchId);
+  if (actorBranchId) {
+    const branchSnap = await db.ref(`branches/${actorBranchId}/companyId`).get();
+    if (branchSnap.exists() && normalizeText(branchSnap.val())) {
+      return normalizeText(branchSnap.val());
+    }
+  }
+
+  return "";
 }
 
 function normalizeCycleMonths(value) {
