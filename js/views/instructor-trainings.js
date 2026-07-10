@@ -583,18 +583,72 @@ function openItemModal(item = null) {
 }
 
 /* ──────────────────────────────────────────────────────────
-   회차 모달 (등록/수정)
+   회차 모달 (등록/수정 + 직원 즉시 배정)
 ────────────────────────────────────────────────────────── */
 function openSessionModal(item, session = null) {
   const label    = session ? "수정" : "추가";
   const refs     = S.references;
-  const branchIds = session?.branchIds ?? [];
+  const branches = refs?.branches ?? [];
+  const employees = refs?.employees ?? [];
+  const existingBranchIds = session?.branchIds ?? [];
+
+  /* 직원 필터 상태 (모달 내부 클로저로 관리) */
+  let filterBranchId = "";
+  let filterSearch   = "";
+  let selectedUids   = new Set();
+
+  function getFilteredEmployees() {
+    return employees.filter((e) => {
+      const matchBranch = !filterBranchId || e.branchId === filterBranchId;
+      const matchSearch = !filterSearch
+        || String(e.name ?? "").toLowerCase().includes(filterSearch)
+        || String(e.empNo ?? "").toLowerCase().includes(filterSearch);
+      return matchBranch && matchSearch;
+    });
+  }
+
+  function renderEmployeePicker() {
+    const list = document.getElementById("ss-emp-list");
+    if (!list) return;
+    const filtered = getFilteredEmployees();
+    if (!filtered.length) {
+      list.innerHTML = `<div style="padding:var(--space-4);color:var(--gray-400);font-size:var(--text-sm);text-align:center">해당 조건의 직원이 없습니다.</div>`;
+      return;
+    }
+    list.innerHTML = filtered.map((e) => {
+      const uid = e.id ?? e.uid;
+      const checked = selectedUids.has(uid);
+      return `
+        <label class="picker-item" style="padding:var(--space-2) var(--space-3)">
+          <input type="checkbox" class="ss-emp-cb" value="${uid}" ${checked ? "checked" : ""} />
+          <div class="picker-item__body">
+            <div class="picker-item__title" style="font-size:var(--text-sm)">${esc(e.name ?? "–")}</div>
+            <div class="picker-item__meta">${esc(e.empNo ?? "–")} · ${esc(e.branchName ?? "–")}</div>
+          </div>
+        </label>`;
+    }).join("");
+
+    list.querySelectorAll(".ss-emp-cb").forEach((cb) => {
+      cb.addEventListener("change", () => {
+        if (cb.checked) selectedUids.add(cb.value);
+        else            selectedUids.delete(cb.value);
+        updateSelCount();
+      });
+    });
+  }
+
+  function updateSelCount() {
+    const el = document.getElementById("ss-sel-count");
+    if (el) el.textContent = `선택: ${selectedUids.size}명`;
+  }
 
   modal.open({
-    title: session ? "회차 수정" : `회차 추가 — ${esc(item.title)}`,
-    size: "lg",
+    title: session ? `회차 수정 — ${esc(item.title)}` : `회차 추가 — ${esc(item.title)}`,
+    size:  "lg",
     body: `
       <div style="display:flex;flex-direction:column;gap:var(--space-5)">
+
+        <!-- 교육 기간 -->
         <div class="form-row form-row--3">
           <div class="form-group">
             <label class="form-label form-label--required">교육 시작일</label>
@@ -609,23 +663,45 @@ function openSessionModal(item, session = null) {
             <input class="form-control" id="ss-deadline" type="date" value="${toDateInput(session?.deadline)}" />
           </div>
         </div>
-        <div class="form-group">
-          <label class="form-label">대상 지점</label>
-          <div class="selection-grid">
-            ${(refs?.branches ?? []).map((b) => `
-              <label class="selection-chip">
-                <input type="checkbox" class="branch-selector" value="${b.id}"
-                  ${branchIds.includes(b.id) ? "checked" : ""} />
-                <span>${esc(b.name ?? b.code ?? b.id)}</span>
-              </label>`).join("")}
-          </div>
-          <div class="form-hint">선택하지 않으면 전체 지점 회차로 저장됩니다.</div>
-        </div>
+
+        <!-- 비고 -->
         <div class="form-group">
           <label class="form-label">비고</label>
           <input class="form-control" id="ss-note" type="text"
             value="${escAttr(session?.note ?? "")}" placeholder="회차별 메모" />
         </div>
+
+        <!-- 직원 배정 -->
+        <div class="form-group">
+          <label class="form-label" style="font-weight:var(--weight-semibold)">
+            배정 직원 선택
+            <span id="ss-sel-count" style="font-weight:normal;color:var(--gray-400);margin-left:var(--space-2)">선택: 0명</span>
+          </label>
+
+          <!-- 지점 필터 + 검색 -->
+          <div style="display:flex;gap:var(--space-2);margin-bottom:var(--space-2)">
+            <select class="form-control" id="ss-filter-branch" style="flex:0 0 160px">
+              <option value="">전체 지점</option>
+              ${branches.map((b) => `<option value="${b.id}">${esc(b.name ?? b.code ?? b.id)}</option>`).join("")}
+            </select>
+            <div class="input-group" style="flex:1">
+              <svg class="input-group__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.25"/>
+                <path d="M11 11l3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+              </svg>
+              <input class="form-control" id="ss-filter-search" type="search" placeholder="이름 또는 사번 검색" />
+            </div>
+            <button class="btn btn--ghost btn--sm" id="ss-select-all" type="button">전체 선택</button>
+            <button class="btn btn--ghost btn--sm" id="ss-clear-all" type="button">전체 해제</button>
+          </div>
+
+          <!-- 직원 목록 -->
+          <div class="picker-list" id="ss-emp-list" style="max-height:240px;overflow-y:auto">
+            <div style="padding:var(--space-4);color:var(--gray-400);font-size:var(--text-sm);text-align:center">불러오는 중…</div>
+          </div>
+          <div class="form-hint">회차 저장 시 선택한 직원이 자동 배정됩니다. 저장 후 배정 버튼으로 추가 배정도 가능합니다.</div>
+        </div>
+
       </div>`,
     actions: [
       { label: "취소", variant: "secondary", onClick: () => modal.close() },
@@ -636,41 +712,76 @@ function openSessionModal(item, session = null) {
           const startDate = readDate("ss-start");
           const endDate   = readDate("ss-end");
           const deadline  = readDate("ss-deadline");
-          const branchIds = Array.from(document.querySelectorAll(".branch-selector:checked")).map((c) => c.value);
           const note      = document.getElementById("ss-note")?.value?.trim() ?? "";
 
           if (!startDate || !endDate || !deadline) { toast.error("교육기간과 수료기한을 모두 입력해 주세요."); return; }
           if (endDate < startDate) { toast.error("종료일은 시작일 이후여야 합니다."); return; }
           if (deadline < endDate)  { toast.error("수료기한은 종료일과 같거나 이후여야 합니다."); return; }
 
+          /* 선택된 직원 branchIds 자동 집계 (지점 저장용) */
+          const selectedEmployees = employees.filter((e) => selectedUids.has(e.id ?? e.uid));
+          const branchIds   = [...new Set(selectedEmployees.map((e) => e.branchId).filter(Boolean))];
           const branchNames = branchIds.map((bid) =>
-            (refs?.branches ?? []).find((b) => b.id === bid)?.name ?? bid
+            branches.find((b) => b.id === bid)?.name ?? bid
           );
 
           modal.setLoading(label, true);
           try {
+            let sessionId;
             if (session) {
               await updateTrainingSession(session.id, { startDate, endDate, deadline, branchIds, branchNames, note });
+              sessionId = session.id;
               toast.success("회차를 수정했습니다.");
             } else {
-              await createTrainingSession(item, {
+              sessionId = await createTrainingSession(item, {
                 startDate, endDate, deadline, branchIds, branchNames, note,
-                companyId: S.references?.company?.id,
+                companyId:   S.references?.company?.id,
                 companyName: S.references?.company?.name,
               });
               toast.success("회차를 추가했습니다.");
             }
+
+            /* 선택된 직원 즉시 배정 */
+            if (selectedUids.size > 0) {
+              const sessionObj = { id: sessionId, ...item, deadline, title: item.title, itemId: item.id };
+              await assignEmployeesToSession(sessionObj, [...selectedUids], refs);
+              toast.success(`${selectedUids.size}명을 배정했습니다.`);
+            }
+
             modal.close();
-            /* 해당 항목 패널만 리로드 */
             await loadAndRenderSessions(item.id);
           } catch (err) {
             console.error("[instructor-trainings] session save failed", err);
-            toast.error("저장 중 오류가 발생했습니다.");
+            toast.error(`저장 중 오류가 발생했습니다: ${err?.message ?? ""}`);
             modal.setLoading(label, false);
           }
         },
       },
     ],
+  });
+
+  /* 모달 열린 후 이벤트 바인딩 (requestAnimationFrame으로 DOM 렌더 보장) */
+  requestAnimationFrame(() => {
+    renderEmployeePicker();
+
+    document.getElementById("ss-filter-branch")?.addEventListener("change", (e) => {
+      filterBranchId = e.target.value;
+      renderEmployeePicker();
+    });
+    document.getElementById("ss-filter-search")?.addEventListener("input", (e) => {
+      filterSearch = e.target.value.trim().toLowerCase();
+      renderEmployeePicker();
+    });
+    document.getElementById("ss-select-all")?.addEventListener("click", () => {
+      getFilteredEmployees().forEach((e) => selectedUids.add(e.id ?? e.uid));
+      renderEmployeePicker();
+      updateSelCount();
+    });
+    document.getElementById("ss-clear-all")?.addEventListener("click", () => {
+      getFilteredEmployees().forEach((e) => selectedUids.delete(e.id ?? e.uid));
+      renderEmployeePicker();
+      updateSelCount();
+    });
   });
 }
 
