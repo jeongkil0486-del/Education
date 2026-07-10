@@ -13,7 +13,7 @@ const routes = [
   { path: "history-overview", title: TEXT.routes.historyOverview, allow: [ROLES.SUPER_ADMIN], view: () => import("../views/history-overview.js").then((m) => m.render) },
   { path: "history-cards", title: TEXT.routes.historyCards, allow: [ROLES.HQ_ADMIN, ROLES.SUPER_ADMIN], view: () => import("../views/history-cards.js").then((m) => m.render) },
   { path: "materials", title: TEXT.routes.materials, allow: [ROLES.HQ_ADMIN, ROLES.INSTRUCTOR, ROLES.SUPER_ADMIN], view: () => import("../views/materials.js").then((m) => m.render) },
-  { path: "employees", title: TEXT.routes.employees, allow: [ROLES.HQ_ADMIN], view: () => import("../views/employees.js").then((m) => m.render) },
+  { path: "employees", title: TEXT.routes.employees, allow: [ROLES.HQ_ADMIN, ROLES.SUPER_ADMIN], view: () => import("../views/employees.js").then((m) => m.render) },
   { path: "employee-detail", title: TEXT.routes.employeeDetail, allow: [ROLES.HQ_ADMIN], view: () => import("../views/employee-detail.js").then((m) => m.render) },
   { path: "statistics", title: TEXT.routes.statistics, allow: [ROLES.HQ_ADMIN], view: () => import("../views/statistics.js").then((m) => m.render) },
   { path: "announcements", title: TEXT.routes.announcements, allow: null, view: () => import("../views/announcements.js").then((m) => m.render) },

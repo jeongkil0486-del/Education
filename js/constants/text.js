@@ -38,7 +38,7 @@ export const TEXT = {
     historyCards: "직원 교육 이력카드",
     historyOverview: "교육 관리",
     materials: "교육자료",
-    employees: "직원 조회",
+    employees: "직원관리대장",
     employeeDetail: "직원 상세",
     statistics: "통계",
     announcements: "공지사항",
