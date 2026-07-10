@@ -280,8 +280,24 @@ exports.createEmployeeAccounts = onCall(OPTS, async (request) => {
           continue;
         }
 
+        await auth.updateUser(existingUser.uid, {
+          password: empNo,
+          displayName: name,
+          disabled: false,
+        });
+
         await saveEmployeeProfile(existingUser.uid, { empNo, name, email, position, branch });
-        created.push({ empNo, name, uid: existingUser.uid, message: "인증 계정과 DB를 연결했습니다." });
+        const migration = await migrateEmployeeHistoryByEmpNo(empNo, existingUser.uid);
+
+        created.push({
+          empNo,
+          name,
+          uid: existingUser.uid,
+          migratedHistoryCount: migration.migratedCompletionCount,
+          message: migration.migratedCompletionCount > 0
+            ? `기존 계정을 활성화하고 교육이력 ${migration.migratedCompletionCount}건을 다시 연결했습니다.`
+            : "기존 계정을 활성화하고 DB 프로필을 다시 연결했습니다.",
+        });
         continue;
       }
 
@@ -487,8 +503,12 @@ exports.deleteEmployeeAccount = onCall(OPTS, async (request) => {
     throw new HttpsError("failed-precondition", "직원 계정만 삭제할 수 있습니다.");
   }
 
-  await deleteAuthAndProfile(uid);
-  return { uid, empNo: profile.empNo ?? "", message: "삭제 완료" };
+  await deactivateEmployeeAndRemoveProfile(uid);
+  return {
+    uid,
+    empNo: profile.empNo ?? "",
+    message: "계정 비활성화 및 직원 목록 제거 완료",
+  };
 });
 
 exports.deleteManagedAccount = onCall(OPTS, async (request) => {
@@ -510,8 +530,20 @@ exports.deleteManagedAccount = onCall(OPTS, async (request) => {
     throw new HttpsError("failed-precondition", "삭제할 수 없는 계정입니다.");
   }
 
-  await deleteAuthAndProfile(uid);
-  return { uid, empNo: profile.empNo ?? "", role: profile.role ?? "", message: "삭제 완료" };
+  if (profile.role === "employee") {
+    await deactivateEmployeeAndRemoveProfile(uid);
+  } else {
+    await deleteAuthAndProfile(uid);
+  }
+
+  return {
+    uid,
+    empNo: profile.empNo ?? "",
+    role: profile.role ?? "",
+    message: profile.role === "employee"
+      ? "계정 비활성화 및 직원 목록 제거 완료"
+      : "삭제 완료",
+  };
 });
 
 
@@ -542,6 +574,129 @@ exports.deleteEmployeeHistory = onCall(OPTS, async (request) => {
   await db.ref().update(updates);
   return { uid, source, sessionId, trainingId, message: "교육이력 삭제 완료" };
 });
+
+async function deactivateEmployeeAndRemoveProfile(uid) {
+  try {
+    await auth.updateUser(uid, { disabled: true });
+  } catch (err) {
+    if (err?.code !== "auth/user-not-found") throw err;
+  }
+
+  await db.ref(`users/${uid}`).remove();
+}
+
+async function migrateEmployeeHistoryByEmpNo(empNo, targetUid) {
+  const normalizedEmpNo = normalizeEmpNo(empNo);
+  if (!normalizedEmpNo || !targetUid) {
+    return { migratedAssignmentCount: 0, migratedCompletionCount: 0 };
+  }
+
+  const [
+    sessionAssignmentsSnap,
+    sessionCompletionsSnap,
+    trainingAssignmentsSnap,
+    trainingCompletionsSnap,
+  ] = await Promise.all([
+    db.ref("sessionAssignments").get(),
+    db.ref("sessionCompletions").get(),
+    db.ref("trainingAssignments").get(),
+    db.ref("trainingCompletions").get(),
+  ]);
+
+  const sessionAssignments = sessionAssignmentsSnap.val() ?? {};
+  const sessionCompletions = sessionCompletionsSnap.val() ?? {};
+  const trainingAssignments = trainingAssignmentsSnap.val() ?? {};
+  const trainingCompletions = trainingCompletionsSnap.val() ?? {};
+
+  const updates = {};
+  let migratedAssignmentCount = 0;
+  let migratedCompletionCount = 0;
+  const migratedAt = Date.now();
+
+  for (const [sessionId, assignmentsByUid] of Object.entries(sessionAssignments)) {
+    for (const [oldUid, assignment] of Object.entries(assignmentsByUid ?? {})) {
+      if (oldUid === targetUid) continue;
+      if (normalizeEmpNo(assignment?.empNo) !== normalizedEmpNo) continue;
+
+      const migratedAssignment = {
+        ...assignment,
+        uid: targetUid,
+        migratedFromUid: oldUid,
+        migratedAt,
+      };
+
+      updates[`sessionAssignments/${sessionId}/${targetUid}`] = migratedAssignment;
+      updates[`userSessionAssignments/${targetUid}/${sessionId}`] = migratedAssignment;
+      updates[`sessionAssignments/${sessionId}/${oldUid}`] = null;
+      updates[`userSessionAssignments/${oldUid}/${sessionId}`] = null;
+      migratedAssignmentCount += 1;
+
+      const completion = sessionCompletions?.[sessionId]?.[oldUid];
+      if (completion) {
+        const migratedCompletion = {
+          ...completion,
+          uid: targetUid,
+          migratedFromUid: oldUid,
+          migratedAt,
+        };
+
+        updates[`sessionCompletions/${sessionId}/${targetUid}`] = migratedCompletion;
+        updates[`userSessionCompletions/${targetUid}/${sessionId}`] = migratedCompletion;
+        updates[`sessionCompletions/${sessionId}/${oldUid}`] = null;
+        updates[`userSessionCompletions/${oldUid}/${sessionId}`] = null;
+        migratedCompletionCount += 1;
+      }
+    }
+  }
+
+  for (const [trainingId, assignmentsByUid] of Object.entries(trainingAssignments)) {
+    for (const [oldUid, assignment] of Object.entries(assignmentsByUid ?? {})) {
+      if (oldUid === targetUid) continue;
+      if (normalizeEmpNo(assignment?.empNo) !== normalizedEmpNo) continue;
+
+      const migratedAssignment = {
+        ...assignment,
+        uid: targetUid,
+        migratedFromUid: oldUid,
+        migratedAt,
+      };
+
+      updates[`trainingAssignments/${trainingId}/${targetUid}`] = migratedAssignment;
+      updates[`userAssignments/${targetUid}/${trainingId}`] = migratedAssignment;
+      updates[`trainingAssignments/${trainingId}/${oldUid}`] = null;
+      updates[`userAssignments/${oldUid}/${trainingId}`] = null;
+      migratedAssignmentCount += 1;
+
+      const completion = trainingCompletions?.[trainingId]?.[oldUid];
+      if (completion) {
+        const migratedCompletion = {
+          ...completion,
+          uid: targetUid,
+          migratedFromUid: oldUid,
+          migratedAt,
+        };
+
+        updates[`trainingCompletions/${trainingId}/${targetUid}`] = migratedCompletion;
+        updates[`userCompletions/${targetUid}/${trainingId}`] = migratedCompletion;
+        updates[`trainingCompletions/${trainingId}/${oldUid}`] = null;
+        updates[`userCompletions/${oldUid}/${trainingId}`] = null;
+        migratedCompletionCount += 1;
+      }
+    }
+  }
+
+  if (Object.keys(updates).length > 0) {
+    await db.ref().update(updates);
+    logger.info("employee history relink completed", {
+      empNo: normalizedEmpNo,
+      targetUid,
+      migratedAssignmentCount,
+      migratedCompletionCount,
+    });
+  }
+
+  return { migratedAssignmentCount, migratedCompletionCount };
+}
 
 async function deleteAuthAndProfile(uid) {
   try {

@@ -696,23 +696,55 @@ async function openSessionModal(item, session = null) {
       const uid = e.id ?? e.uid;
       const checked = selectedUids.has(uid);
       return `
-        <div class="picker-item" style="padding:var(--space-2) var(--space-3);display:flex;align-items:center;gap:var(--space-2)">
+        <div class="picker-item ss-emp-row"
+          data-uid="${uid}"
+          role="checkbox"
+          aria-checked="${checked ? "true" : "false"}"
+          tabindex="0"
+          style="padding:var(--space-2) var(--space-3);display:flex;align-items:center;gap:var(--space-2);cursor:pointer">
           <input type="checkbox" class="ss-emp-cb" value="${uid}" ${checked ? "checked" : ""} />
-          <label class="picker-item__body" style="flex:1;cursor:pointer">
+          <div class="picker-item__body" style="flex:1">
             <div class="picker-item__title" style="font-size:var(--text-sm)">${esc(e.name ?? "–")}</div>
             <div class="picker-item__meta">${esc(e.empNo ?? "–")} · ${esc(e.branchName ?? "–")}</div>
-          </label>
+          </div>
           <button type="button" class="btn btn--ghost btn--sm ss-emp-history"
             data-uid="${uid}" title="이 교육 항목의 이력 보기"
             style="width:30px;height:30px;padding:0;border-radius:999px;font-size:18px;line-height:1">+</button>
         </div>`;
     }).join("");
 
+    function syncEmployeeSelection(cb) {
+      if (cb.checked) selectedUids.add(cb.value);
+      else            selectedUids.delete(cb.value);
+
+      const row = cb.closest(".ss-emp-row");
+      row?.setAttribute("aria-checked", cb.checked ? "true" : "false");
+      updateSelCount();
+    }
+
     list.querySelectorAll(".ss-emp-cb").forEach((cb) => {
-      cb.addEventListener("change", () => {
-        if (cb.checked) selectedUids.add(cb.value);
-        else            selectedUids.delete(cb.value);
-        updateSelCount();
+      cb.addEventListener("change", () => syncEmployeeSelection(cb));
+    });
+
+    list.querySelectorAll(".ss-emp-row").forEach((row) => {
+      const cb = row.querySelector(".ss-emp-cb");
+      if (!cb) return;
+
+      const toggleRow = () => {
+        cb.checked = !cb.checked;
+        syncEmployeeSelection(cb);
+      };
+
+      row.addEventListener("click", (event) => {
+        if (event.target === cb || event.target.closest(".ss-emp-history")) return;
+        toggleRow();
+      });
+
+      row.addEventListener("keydown", (event) => {
+        if (event.target === cb || event.target.closest(".ss-emp-history")) return;
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        toggleRow();
       });
     });
 
