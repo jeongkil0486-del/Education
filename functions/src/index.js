@@ -358,7 +358,13 @@ exports.createManagedAccount = onCall(OPTS, async (request) => {
         displayName: name,
         disabled: false,
       });
-      await saveManagedProfile(existingUser.uid, { empNo, name, email, role, assignedBranches: role === "instructor" ? assignedBranches : [] });
+      await saveManagedProfile(existingUser.uid, {
+        empNo,
+        name,
+        email,
+        role,
+        assignedBranches: role === "instructor" ? assignedBranches : [],
+      }, { overwrite: true });
 
       return {
         uid: existingUser.uid,
@@ -375,7 +381,13 @@ exports.createManagedAccount = onCall(OPTS, async (request) => {
       displayName: name,
       disabled: false,
     });
-    await saveManagedProfile(newUser.uid, { empNo, name, email, role, assignedBranches: role === "instructor" ? assignedBranches : [] });
+    await saveManagedProfile(newUser.uid, {
+      empNo,
+      name,
+      email,
+      role,
+      assignedBranches: role === "instructor" ? assignedBranches : [],
+    }, { overwrite: true });
 
     return {
       uid: newUser.uid,
@@ -389,6 +401,71 @@ exports.createManagedAccount = onCall(OPTS, async (request) => {
     logger.error("createManagedAccount error", { role, empNo, message: err?.message, code: err?.code });
     throw new HttpsError("internal", simplifyError(err));
   }
+});
+
+exports.updateManagedAccount = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  await ensureSuperAdmin(request.auth.uid);
+
+  const uid = normalizeText(request.data?.uid);
+  const role = normalizeText(request.data?.role);
+  const name = normalizeText(request.data?.name);
+  const assignedBranches = normalizeAssignedBranches(request.data?.assignedBranches);
+
+  if (!uid) {
+    throw new HttpsError("invalid-argument", "怨꾩젙 UID媛 ?꾩슂?⑸땲??");
+  }
+  if (!["hq_admin", "instructor"].includes(role)) {
+    throw new HttpsError("invalid-argument", "蹂寃쏀븷 沅뚰븳???щ컮瑜댁? ?딆뒿?덈떎.");
+  }
+  if (!name) {
+    throw new HttpsError("invalid-argument", "?대쫫???낅젰??二쇱꽭??");
+  }
+  if (role === "instructor" && assignedBranches.length === 0) {
+    throw new HttpsError("invalid-argument", "媛뺤궗 怨꾩젙? ?대떦 吏?먯쓣 1媛??댁긽 ?좏깮?댁빞 ?⑸땲??");
+  }
+  if (role === "instructor") {
+    const branchSnaps = await Promise.all(assignedBranches.map((branchId) => db.ref(`branches/${branchId}`).get()));
+    if (branchSnaps.some((snap) => !snap.exists())) {
+      throw new HttpsError("invalid-argument", "議댁옱?섏? ?딅뒗 ?대떦 吏?먯씠 ?ы븿?섏뼱 ?덉뒿?덈떎.");
+    }
+  }
+
+  const snap = await db.ref(`users/${uid}`).get();
+  if (!snap.exists()) {
+    throw new HttpsError("not-found", "怨꾩젙 ?뺣낫瑜?李얠쓣 ???놁뒿?덈떎.");
+  }
+
+  const profile = snap.val();
+  if (!["hq_admin", "instructor"].includes(profile.role)) {
+    throw new HttpsError("failed-precondition", "愿由??ㅼ젙 怨꾩젙留?섏젙?????덉뒿?덈떎.");
+  }
+
+  try {
+    await auth.updateUser(uid, {
+      displayName: name,
+      disabled: false,
+    });
+  } catch (err) {
+    if (err?.code !== "auth/user-not-found") throw err;
+  }
+
+  await saveManagedProfile(uid, {
+    empNo: profile.empNo ?? "",
+    name,
+    email: profile.email ?? "",
+    role,
+    assignedBranches: role === "instructor" ? assignedBranches : [],
+    position: profile.position ?? "",
+    active: profile.active !== false,
+  }, { overwrite: false });
+
+  return {
+    uid,
+    role,
+    assignedBranches: role === "instructor" ? assignedBranches : [],
+    message: "?섏젙 ?꾨즺",
+  };
 });
 
 exports.deleteEmployeeAccount = onCall(OPTS, async (request) => {
@@ -485,21 +562,41 @@ async function saveEmployeeProfile(uid, payload) {
   });
 }
 
-async function saveManagedProfile(uid, payload) {
-  await db.ref(`users/${uid}`).set({
+async function saveManagedProfile(uid, payload, options = {}) {
+  const assignedBranches = normalizeAssignedBranches(payload.assignedBranches);
+  const primaryBranchId = assignedBranches[0] ?? payload.branchId ?? "";
+
+  let primaryBranch = null;
+  if (primaryBranchId) {
+    primaryBranch = await getBranch(primaryBranchId, new Map());
+  }
+
+  const record = {
     empNo: payload.empNo,
     name: payload.name,
     email: payload.email,
     role: payload.role,
-    assignedBranches: normalizeAssignedBranches(payload.assignedBranches),
+    assignedBranches,
     position: payload.position ?? "",
-    branchId: payload.branchId ?? "",
-    branchCode: payload.branchCode ?? "",
-    branchName: payload.branchName ?? "",
-    companyId: payload.companyId ?? null,
-    companyName: payload.companyName ?? "",
-    active: true,
-    createdAt: admin.database.ServerValue.TIMESTAMP,
+    branchId: primaryBranch?.id ?? payload.branchId ?? "",
+    branchCode: primaryBranch?.code ?? payload.branchCode ?? "",
+    branchName: primaryBranch?.name ?? payload.branchName ?? "",
+    companyId: primaryBranch?.companyId ?? payload.companyId ?? null,
+    companyName: primaryBranch?.companyName ?? payload.companyName ?? "",
+    active: payload.active ?? true,
+  };
+
+  if (options.overwrite) {
+    await db.ref(`users/${uid}`).set({
+      ...record,
+      createdAt: admin.database.ServerValue.TIMESTAMP,
+    });
+    return;
+  }
+
+  await db.ref(`users/${uid}`).update({
+    ...record,
+    updatedAt: admin.database.ServerValue.TIMESTAMP,
   });
 }
 

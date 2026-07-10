@@ -4,6 +4,7 @@ const { functions } = window.__firebase;
 
 const createEmployeesCallable      = httpsCallable(functions, "createEmployeeAccounts");
 const createManagedAccountCallable = httpsCallable(functions, "createManagedAccount");
+const updateManagedAccountCallable = httpsCallable(functions, "updateManagedAccount");
 const deleteEmployeeCallable       = httpsCallable(functions, "deleteEmployeeAccount");
 const deleteManagedAccountCallable = httpsCallable(functions, "deleteManagedAccount");
 
@@ -14,6 +15,11 @@ export async function createEmployeeAccounts(payload) {
 
 export async function createManagedAccount(payload) {
   const result = await createManagedAccountCallable(payload);
+  return result.data;
+}
+
+export async function updateManagedAccount(payload) {
+  const result = await updateManagedAccountCallable(payload);
   return result.data;
 }
 

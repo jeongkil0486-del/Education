@@ -106,28 +106,43 @@ export function getAssignedBranchIds(profile = authStore.profile) {
   return [];
 }
 
-export function canAccessEmployeeHistory(employee) {
+async function getLatestAssignedBranchIds() {
+  if (authStore.role !== ROLES.INSTRUCTOR) return [];
+
+  const latestProfile = await usersDB.get(authStore.uid).catch(() => null);
+  return getAssignedBranchIds(latestProfile ?? authStore.profile);
+}
+
+export function canAccessEmployeeHistory(employee, assignedBranchIds = getAssignedBranchIds()) {
   if (!employee) return false;
   if (authStore.role === ROLES.HQ_ADMIN || authStore.role === ROLES.SUPER_ADMIN) return true;
   if (authStore.role === ROLES.INSTRUCTOR) {
-    return getAssignedBranchIds().includes(String(employee.branchId ?? ""));
+    return assignedBranchIds.includes(String(employee.branchId ?? ""));
   }
   return (employee.id ?? employee.uid) === authStore.uid;
 }
 
-function assertEmployeeHistoryAccess(employee) {
-  if (!canAccessEmployeeHistory(employee)) {
+async function assertEmployeeHistoryAccess(uid) {
+  const employee = await usersDB.get(uid);
+  const assignedBranchIds = authStore.role === ROLES.INSTRUCTOR
+    ? await getLatestAssignedBranchIds()
+    : getAssignedBranchIds();
+
+  if (!canAccessEmployeeHistory(employee ? { uid, ...employee } : null, assignedBranchIds)) {
     const error = new Error("조회 권한이 없는 직원입니다.");
     error.code = "permission-denied";
     throw error;
   }
+
+  return employee;
 }
 
 export async function loadTrainingReferences() {
-  const [branches, allUsers, templates] = await Promise.all([
+  const [branches, allUsers, templates, latestAssignedBranchIds] = await Promise.all([
     branchesDB.listAll(),
     usersDB.listAll(),
     templatesDB.list(authStore.companyId),
+    getLatestAssignedBranchIds(),
   ]);
 
   const companyId = authStore.companyId ?? null;
@@ -137,7 +152,7 @@ export async function loadTrainingReferences() {
   });
   const companyBranches = branches.filter((branch) => !companyId || branch.companyId === companyId);
 
-  const assignedBranchIds = authStore.role === ROLES.INSTRUCTOR ? getAssignedBranchIds() : [];
+  const assignedBranchIds = authStore.role === ROLES.INSTRUCTOR ? latestAssignedBranchIds : [];
   const assignedSet = new Set(assignedBranchIds);
   const filteredBranches = authStore.role === ROLES.INSTRUCTOR
     ? companyBranches.filter((branch) => assignedSet.has(String(branch.id ?? branch.branchId ?? "")))
@@ -449,8 +464,7 @@ export async function getCurrentUserHistory() {
 }
 
 export async function buildEmployeeHistoryRows(uid) {
-  const user = await usersDB.get(uid);
-  assertEmployeeHistoryAccess(user ? { uid, ...user } : null);
+  const user = await assertEmployeeHistoryAccess(uid);
   const [assignments, completions, trainings] = await Promise.all([
     assignmentsDB.forUser(uid),
     completionsDB.forUser(uid),
@@ -902,8 +916,7 @@ export async function getItemDetail(itemId) {
 ────────────────────────────────────────────────────────── */
 
 export async function buildEmployeeHistoryRowsV2(uid) {
-  const user = await usersDB.get(uid);
-  assertEmployeeHistoryAccess(user ? { uid, ...user } : null);
+  const user = await assertEmployeeHistoryAccess(uid);
   const [
     legacyAssignments,
     legacyCompletions,

@@ -4,7 +4,7 @@
  */
 
 import { branchesDB, usersDB } from "../../core/db.js";
-import { createManagedAccount, deleteManagedAccount, bulkDeleteManagedAccounts } from "../../core/admin-api.js";
+import { createManagedAccount, deleteManagedAccount, bulkDeleteManagedAccounts, updateManagedAccount } from "../../core/admin-api.js";
 import { modal } from "../../utils/modal.js";
 import { toast } from "../../utils/toast.js";
 import { formatDate } from "../../utils/date.js";
@@ -488,10 +488,11 @@ function openRoleModal(uid, currentRole) {
 
           modal.setLoading("변경", true);
           try {
-            await usersDB.update(uid, {
+            await updateManagedAccount({
+              uid,
               role: newRole,
+              name: account.name ?? "",
               assignedBranches: newRole === "instructor" ? assignedBranches : [],
-              updatedAt: Date.now(),
             });
             toast.success("권한과 담당 지점이 변경되었습니다.");
             modal.close();
