@@ -95,6 +95,34 @@ export function sortByRecent(items, field = "createdAt") {
   return [...items].sort((a, b) => Number(b?.[field] ?? 0) - Number(a?.[field] ?? 0));
 }
 
+export function getAssignedBranchIds(profile = authStore.profile) {
+  const value = profile?.assignedBranches;
+  if (Array.isArray(value)) {
+    return Array.from(new Set(value.map(String).map((id) => id.trim()).filter(Boolean)));
+  }
+  if (value && typeof value === "object") {
+    return Object.entries(value).filter(([, enabled]) => !!enabled).map(([id]) => id);
+  }
+  return [];
+}
+
+export function canAccessEmployeeHistory(employee) {
+  if (!employee) return false;
+  if (authStore.role === ROLES.HQ_ADMIN || authStore.role === ROLES.SUPER_ADMIN) return true;
+  if (authStore.role === ROLES.INSTRUCTOR) {
+    return getAssignedBranchIds().includes(String(employee.branchId ?? ""));
+  }
+  return (employee.id ?? employee.uid) === authStore.uid;
+}
+
+function assertEmployeeHistoryAccess(employee) {
+  if (!canAccessEmployeeHistory(employee)) {
+    const error = new Error("조회 권한이 없는 직원입니다.");
+    error.code = "permission-denied";
+    throw error;
+  }
+}
+
 export async function loadTrainingReferences() {
   const [branches, allUsers, templates] = await Promise.all([
     branchesDB.listAll(),
@@ -103,13 +131,22 @@ export async function loadTrainingReferences() {
   ]);
 
   const companyId = authStore.companyId ?? null;
-  const users = allUsers.filter((user) => {
+  const companyUsers = allUsers.filter((user) => {
     if (authStore.role === ROLES.SUPER_ADMIN || !companyId) return true;
     return user.companyId === companyId || !user.companyId;
   });
-  const filteredBranches = branches.filter((branch) => !companyId || branch.companyId === companyId);
+  const companyBranches = branches.filter((branch) => !companyId || branch.companyId === companyId);
+
+  const assignedBranchIds = authStore.role === ROLES.INSTRUCTOR ? getAssignedBranchIds() : [];
+  const assignedSet = new Set(assignedBranchIds);
+  const filteredBranches = authStore.role === ROLES.INSTRUCTOR
+    ? companyBranches.filter((branch) => assignedSet.has(String(branch.id ?? branch.branchId ?? "")))
+    : companyBranches;
+  const users = authStore.role === ROLES.INSTRUCTOR
+    ? companyUsers.filter((user) => user.role !== ROLES.EMPLOYEE || assignedSet.has(String(user.branchId ?? "")))
+    : companyUsers;
   const employees = users.filter((user) => user.role === ROLES.EMPLOYEE);
-  const instructors = users.filter((user) => user.role === ROLES.INSTRUCTOR);
+  const instructors = companyUsers.filter((user) => user.role === ROLES.INSTRUCTOR);
 
   return {
     company: {
@@ -412,8 +449,9 @@ export async function getCurrentUserHistory() {
 }
 
 export async function buildEmployeeHistoryRows(uid) {
-  const [user, assignments, completions, trainings] = await Promise.all([
-    usersDB.get(uid),
+  const user = await usersDB.get(uid);
+  assertEmployeeHistoryAccess(user ? { uid, ...user } : null);
+  const [assignments, completions, trainings] = await Promise.all([
     assignmentsDB.forUser(uid),
     completionsDB.forUser(uid),
     authStore.role === ROLES.SUPER_ADMIN ? trainingsDB.listAll() : trainingsDB.list(authStore.companyId),
@@ -864,16 +902,14 @@ export async function getItemDetail(itemId) {
 ────────────────────────────────────────────────────────── */
 
 export async function buildEmployeeHistoryRowsV2(uid) {
+  const user = await usersDB.get(uid);
+  assertEmployeeHistoryAccess(user ? { uid, ...user } : null);
   const [
-    user,
-    // 기존 trainings 기반
     legacyAssignments,
     legacyCompletions,
     legacyTrainings,
-    // 신규 sessions 기반
     sessionCompletionsList,
   ] = await Promise.all([
-    usersDB.get(uid),
     assignmentsDB.forUser(uid),
     completionsDB.forUser(uid),
     authStore.role === ROLES.SUPER_ADMIN

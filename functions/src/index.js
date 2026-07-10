@@ -318,6 +318,7 @@ exports.createManagedAccount = onCall(OPTS, async (request) => {
   const name = normalizeText(request.data?.name);
   const empNo = normalizeEmpNo(request.data?.empNo).toLowerCase();
   const password = String(request.data?.password ?? "").trim();
+  const assignedBranches = normalizeAssignedBranches(request.data?.assignedBranches);
 
   if (!["hq_admin", "instructor"].includes(role)) {
     throw new HttpsError("invalid-argument", "생성할 계정 권한이 올바르지 않습니다.");
@@ -327,6 +328,15 @@ exports.createManagedAccount = onCall(OPTS, async (request) => {
   }
   if (password.length < 6) {
     throw new HttpsError("invalid-argument", "임시 비밀번호는 6자 이상이어야 합니다.");
+  }
+  if (role === "instructor" && assignedBranches.length === 0) {
+    throw new HttpsError("invalid-argument", "강사 계정은 담당 지점을 1개 이상 선택해야 합니다.");
+  }
+  if (role === "instructor") {
+    const branchSnaps = await Promise.all(assignedBranches.map((branchId) => db.ref(`branches/${branchId}`).get()));
+    if (branchSnaps.some((snap) => !snap.exists())) {
+      throw new HttpsError("invalid-argument", "존재하지 않는 담당 지점이 포함되어 있습니다.");
+    }
   }
 
   const email = `${empNo}@${EMAIL_DOMAIN}`;
@@ -348,7 +358,7 @@ exports.createManagedAccount = onCall(OPTS, async (request) => {
         displayName: name,
         disabled: false,
       });
-      await saveManagedProfile(existingUser.uid, { empNo, name, email, role });
+      await saveManagedProfile(existingUser.uid, { empNo, name, email, role, assignedBranches: role === "instructor" ? assignedBranches : [] });
 
       return {
         uid: existingUser.uid,
@@ -365,7 +375,7 @@ exports.createManagedAccount = onCall(OPTS, async (request) => {
       displayName: name,
       disabled: false,
     });
-    await saveManagedProfile(newUser.uid, { empNo, name, email, role });
+    await saveManagedProfile(newUser.uid, { empNo, name, email, role, assignedBranches: role === "instructor" ? assignedBranches : [] });
 
     return {
       uid: newUser.uid,
@@ -481,6 +491,7 @@ async function saveManagedProfile(uid, payload) {
     name: payload.name,
     email: payload.email,
     role: payload.role,
+    assignedBranches: normalizeAssignedBranches(payload.assignedBranches),
     position: payload.position ?? "",
     branchId: payload.branchId ?? "",
     branchCode: payload.branchCode ?? "",
@@ -499,6 +510,11 @@ async function getAuthUserByEmail(email) {
     if (err?.code === "auth/user-not-found") return null;
     throw err;
   }
+}
+
+function normalizeAssignedBranches(value) {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value.map((item) => String(item ?? "").trim()).filter(Boolean)));
 }
 
 function normalizeEmpNo(value) {

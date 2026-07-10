@@ -44,8 +44,6 @@ let S = {
    render
 ────────────────────────────────────────────────────────── */
 export async function render(container, params = {}) {
-  const allowedBranchIds = Array.isArray(params.allowedBranchIds) ? params.allowedBranchIds.filter(Boolean) : null;
-  S = { employees: [], branches: [], selectedBranchId: "", searchText: "", selectedEmployeeId: "", selectedEmployee: null, rows: [], templates: [] };
   container.innerHTML = `
     <div class="hc-wrap">
       <!-- 헤더 -->
@@ -137,22 +135,21 @@ export async function render(container, params = {}) {
   document.getElementById("hc-search")?.addEventListener("input", onFilter);
   document.getElementById("hc-branch")?.addEventListener("change", onFilter);
 
-  await initView(params.uid ?? "", allowedBranchIds);
+  await initView(params.uid ?? "");
 }
 
 /* ──────────────────────────────────────────────────────────
    초기화
 ────────────────────────────────────────────────────────── */
-async function initView(initialUid = "", allowedBranchIds = null) {
+async function initView(initialUid = "") {
   try {
     const [references, templates] = await Promise.all([
       loadTrainingReferences(),
       listHistoryCardTemplates(),
     ]);
 
-    const allowed = Array.isArray(allowedBranchIds) ? new Set(allowedBranchIds) : null;
-    S.employees  = (references.employees ?? []).filter((emp) => !allowed || allowed.has(emp.branchId));
-    S.branches   = (references.branches ?? []).filter((branch) => !allowed || allowed.has(branch.id));
+    S.employees  = references.employees ?? [];
+    S.branches   = references.branches  ?? [];
     S.templates  = templates;
 
     // 지점 셀렉트 채우기
@@ -171,7 +168,7 @@ async function initView(initialUid = "", allowedBranchIds = null) {
     }
   } catch (err) {
     console.error("[history-cards] init failed", err);
-    toast.error("교육 이력카드 화면을 불러오지 못했습니다.");
+    toast.error(err?.code === "permission-denied" ? "조회 권한이 없는 직원입니다." : "교육 이력카드 화면을 불러오지 못했습니다.");
   }
 }
 

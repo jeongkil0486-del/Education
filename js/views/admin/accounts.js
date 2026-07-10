@@ -3,7 +3,7 @@
  * 슈퍼관리자가 본사 교육관리자/강사 계정을 생성, 삭제, 권한 변경합니다.
  */
 
-import { usersDB } from "../../core/db.js";
+import { branchesDB, usersDB } from "../../core/db.js";
 import { createManagedAccount, deleteManagedAccount, bulkDeleteManagedAccounts } from "../../core/admin-api.js";
 import { modal } from "../../utils/modal.js";
 import { toast } from "../../utils/toast.js";
@@ -20,6 +20,7 @@ const ROLE_LABELS = {
 const MANAGEABLE_ROLES = ["hq_admin", "instructor"];
 
 let accountList = [];
+let branchList = [];
 
 /** 현재 선택된 UID 집합 */
 let selectedUids = new Set();
@@ -92,11 +93,18 @@ export async function render(container) {
 
 async function loadList() {
   try {
-    const allUsers = await usersDB.listAll();
+    const [allUsers, allBranches] = await Promise.all([
+      usersDB.listAll(),
+      branchesDB.listAll(),
+    ]);
     accountList = allUsers.filter((user) => MANAGEABLE_ROLES.includes(user?.role));
+    branchList = [...allBranches].sort((a, b) =>
+      String(a?.name ?? a?.code ?? "").localeCompare(String(b?.name ?? b?.code ?? ""), "ko")
+    );
   } catch (error) {
     console.warn("[accounts] load failed:", error?.message);
     accountList = [];
+    branchList = [];
   }
 
   // 목록 새로고침 시 선택 초기화
@@ -201,7 +209,7 @@ function renderTable(list) {
               </td>
               <td class="cell--mono">${esc(user?.empNo || uid.slice(0, 8) || "-")}</td>
               <td><span class="chip chip--${roleChipVariant(user?.role)}">${ROLE_LABELS[user?.role] ?? esc(user?.role)}</span></td>
-              <td>${esc(user?.branchName ?? "-")}</td>
+              <td>${renderAssignedBranches(user)}</td>
               <td>
                 <span class="status-dot status-dot--${inactive ? "danger" : "active"}" style="display:inline-block;margin-right:4px"></span>
                 ${inactive ? "비활성" : "활성"}
@@ -357,7 +365,7 @@ function confirmBulkDelete() {
 function openCreateModal() {
   modal.open({
     title: "계정 생성",
-    size: "md",
+    size: "lg",
     body: `
       <div style="display:flex;flex-direction:column;gap:var(--space-4)">
         <div class="form-group">
@@ -377,6 +385,7 @@ function openCreateModal() {
             <input class="form-control" id="f-empno" type="text" placeholder="예: tasedu01" autocapitalize="none" />
           </div>
         </div>
+        ${assignedBranchSelector([], "create")}
         <div class="form-group">
           <label class="form-label form-label--required">임시 비밀번호</label>
           <input class="form-control" id="f-pw" type="text" placeholder="초기 비밀번호" />
@@ -392,6 +401,10 @@ function openCreateModal() {
       { label: "생성", variant: "primary", onClick: submitCreate },
     ],
   });
+
+  const roleEl = document.getElementById("f-role");
+  roleEl?.addEventListener("change", () => toggleAssignedBranchSection(roleEl.value, "create"));
+  toggleAssignedBranchSection(roleEl?.value, "create");
 }
 
 async function submitCreate() {
@@ -399,6 +412,7 @@ async function submitCreate() {
   const name = document.getElementById("f-name")?.value?.trim();
   const empNo = document.getElementById("f-empno")?.value?.trim().toLowerCase();
   const password = document.getElementById("f-pw")?.value?.trim();
+  const assignedBranches = getSelectedAssignedBranches("create");
 
   if (!name) {
     toast.error("이름을 입력해 주세요.");
@@ -420,10 +434,15 @@ async function submitCreate() {
     return;
   }
 
+  if (role === "instructor" && assignedBranches.length === 0) {
+    toast.error("강사의 담당 지점을 1개 이상 선택해 주세요.");
+    return;
+  }
+
   modal.setLoading("생성", true);
 
   try {
-    await createManagedAccount({ role, name, empNo, password });
+    await createManagedAccount({ role, name, empNo, password, assignedBranches });
     toast.success(`${ROLE_LABELS[role] ?? "계정"} 계정이 생성되었습니다.`);
     modal.close();
     await loadList();
@@ -435,17 +454,23 @@ async function submitCreate() {
 }
 
 function openRoleModal(uid, currentRole) {
+  const account = accountList.find((user) => accountKey(user) === uid) ?? {};
+  const currentAssigned = normalizeAssignedBranches(account.assignedBranches);
+
   modal.open({
-    title: "권한 변경",
-    size: "sm",
+    title: "권한 및 담당 지점 변경",
+    size: "lg",
     body: `
-      <div class="form-group">
-        <label class="form-label">권한</label>
-        <select class="form-control" id="f-new-role">
-          ${MANAGEABLE_ROLES.map((role) =>
-            `<option value="${role}" ${role === currentRole ? "selected" : ""}>${ROLE_LABELS[role]}</option>`
-          ).join("")}
-        </select>
+      <div style="display:flex;flex-direction:column;gap:var(--space-4)">
+        <div class="form-group">
+          <label class="form-label">권한</label>
+          <select class="form-control" id="f-new-role">
+            ${MANAGEABLE_ROLES.map((role) =>
+              `<option value="${role}" ${role === currentRole ? "selected" : ""}>${ROLE_LABELS[role]}</option>`
+            ).join("")}
+          </select>
+        </div>
+        ${assignedBranchSelector(currentAssigned, "edit")}
       </div>
     `,
     actions: [
@@ -455,11 +480,20 @@ function openRoleModal(uid, currentRole) {
         variant: "primary",
         onClick: async () => {
           const newRole = document.getElementById("f-new-role")?.value;
-          modal.setLoading("변경", true);
+          const assignedBranches = getSelectedAssignedBranches("edit");
+          if (newRole === "instructor" && assignedBranches.length === 0) {
+            toast.error("강사의 담당 지점을 1개 이상 선택해 주세요.");
+            return;
+          }
 
+          modal.setLoading("변경", true);
           try {
-            await usersDB.update(uid, { role: newRole });
-            toast.success("권한이 변경되었습니다.");
+            await usersDB.update(uid, {
+              role: newRole,
+              assignedBranches: newRole === "instructor" ? assignedBranches : [],
+              updatedAt: Date.now(),
+            });
+            toast.success("권한과 담당 지점이 변경되었습니다.");
             modal.close();
             await loadList();
           } catch (error) {
@@ -471,6 +505,10 @@ function openRoleModal(uid, currentRole) {
       },
     ],
   });
+
+  const roleEl = document.getElementById("f-new-role");
+  roleEl?.addEventListener("change", () => toggleAssignedBranchSection(roleEl.value, "edit"));
+  toggleAssignedBranchSection(roleEl?.value, "edit");
 }
 
 function confirmResetPw() {
@@ -521,6 +559,53 @@ function confirmDelete(uid, name) {
       },
     ],
   });
+}
+
+function assignedBranchSelector(selectedIds = [], mode = "create") {
+  const selected = new Set(normalizeAssignedBranches(selectedIds));
+  return `
+    <div class="form-group" id="assigned-branches-${mode}" style="display:none">
+      <label class="form-label form-label--required">담당 지점</label>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;max-height:240px;overflow:auto;padding:12px;border:1px solid var(--gray-200);border-radius:var(--radius-md)">
+        ${branchList.map((branch) => {
+          const id = branch.id ?? branch.branchId;
+          const label = branch.name ?? branch.code ?? id;
+          return `<label class="check-group" style="margin:0">
+            <input type="checkbox" class="assigned-branch-${mode}" value="${escAttr(id)}" ${selected.has(id) ? "checked" : ""} />
+            <span class="check-group__label">${esc(label)}</span>
+          </label>`;
+        }).join("") || '<div class="form-hint">등록된 지점이 없습니다.</div>'}
+      </div>
+      <div class="form-hint">강사가 조회·관리할 지점을 1개 이상 선택해 주세요. 여러 지점 선택이 가능합니다.</div>
+    </div>`;
+}
+
+function toggleAssignedBranchSection(role, mode) {
+  const section = document.getElementById(`assigned-branches-${mode}`);
+  if (section) section.style.display = role === "instructor" ? "" : "none";
+}
+
+function getSelectedAssignedBranches(mode) {
+  return Array.from(document.querySelectorAll(`.assigned-branch-${mode}:checked`))
+    .map((input) => String(input.value || "").trim())
+    .filter(Boolean);
+}
+
+function normalizeAssignedBranches(value) {
+  if (Array.isArray(value)) return Array.from(new Set(value.map(String).map((v) => v.trim()).filter(Boolean)));
+  if (value && typeof value === "object") return Object.entries(value).filter(([, enabled]) => !!enabled).map(([id]) => id);
+  return [];
+}
+
+function renderAssignedBranches(user) {
+  if (user?.role !== "instructor") return "전체 지점";
+  const ids = normalizeAssignedBranches(user?.assignedBranches);
+  if (!ids.length) return '<span style="color:var(--color-danger)">미지정</span>';
+  const names = ids.map((id) => {
+    const branch = branchList.find((item) => (item.id ?? item.branchId) === id);
+    return branch?.name ?? branch?.code ?? id;
+  });
+  return esc(names.join(", "));
 }
 
 function roleChipVariant(role) {
