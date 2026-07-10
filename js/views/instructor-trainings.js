@@ -34,7 +34,6 @@ import {
   saveTraining,
   /* 신규 Item / Session 관련 */
   ITEM_SUB_TYPE_LABELS,
-  TRAINING_SUBJECT_OPTIONS,
   SESSION_STATUS_LABELS,
   buildSessionStatusChip,
   createTrainingItem,
@@ -263,7 +262,6 @@ function renderItemsTable() {
           <tr>
             <th>교육 항목명</th>
             <th>교육유형</th>
-            <th>세부항목</th>
             <th>초기/보수</th>
             <th>기본 교육시간</th>
             <th>비고</th>
@@ -324,7 +322,6 @@ function itemRow(item) {
         </div>
       </td>
       <td>${esc(item.typeLabel)}</td>
-      <td>${esc(item.subjectName || "–")}</td>
       <td>${esc(item.subTypeLabel || "–")}</td>
       <td>${item.defaultHours ? `${item.defaultHours}시간` : "–"}</td>
       <td style="color:var(--gray-400);font-size:var(--text-xs)">${esc(item.note || "–")}</td>
@@ -337,7 +334,7 @@ function itemRow(item) {
       </td>
     </tr>
     <tr id="session-panel-${item.id}" style="${isExpanded ? "" : "display:none"}">
-      <td colspan="7" style="padding:0;background:var(--gray-50)">
+      <td colspan="6" style="padding:0;background:var(--gray-50)">
         <div id="session-panel-body-${item.id}" style="padding:var(--space-4)">
           <div style="color:var(--gray-400);font-size:var(--text-sm);padding:var(--space-4)">불러오는 중…</div>
         </div>
@@ -485,9 +482,7 @@ function sessionRow(s, item) {
 ────────────────────────────────────────────────────────── */
 function openItemModal(item = null) {
   const label = item ? "수정" : "등록";
-  const initialType = ["job", "legal", "online", "other"].includes(item?.trainingType) ? item.trainingType : "other";
-  const initialSubjectCode = item?.subjectCode ?? "";
-  const initialSubjectName = item?.subjectName ?? item?.title ?? "";
+  const refs  = S.references;
 
   modal.open({
     title: item ? "교육 항목 수정" : "교육 항목 등록",
@@ -496,21 +491,17 @@ function openItemModal(item = null) {
       <div style="display:flex;flex-direction:column;gap:var(--space-5)">
         <div class="form-row">
           <div class="form-group">
+            <label class="form-label form-label--required">교육 항목명</label>
+            <input class="form-control" id="it-title" type="text"
+              value="${escAttr(item?.title ?? "")}" placeholder="예: 신입직원 직무교육" />
+          </div>
+          <div class="form-group">
             <label class="form-label form-label--required">교육유형</label>
             <select class="form-control" id="it-type">
-              ${["job", "legal", "online", "other"].map((t) => `
-                <option value="${t}" ${initialType === t ? "selected" : ""}>${TRAINING_TYPE_LABELS[t]}</option>
+              ${TRAINING_TYPES.map((t) => `
+                <option value="${t}" ${item?.trainingType === t ? "selected" : ""}>${TRAINING_TYPE_LABELS[t]}</option>
               `).join("")}
             </select>
-          </div>
-          <div class="form-group" id="it-fixed-subject-wrap">
-            <label class="form-label form-label--required">교육 세부항목</label>
-            <select class="form-control" id="it-subject-select"></select>
-            <div class="form-hint">직무교육과 법정교육은 지정된 항목 중 하나만 선택할 수 있습니다.</div>
-          </div>
-          <div class="form-group" id="it-free-subject-wrap" style="display:none">
-            <label class="form-label form-label--required">교육 항목명</label>
-            <input class="form-control" id="it-subject-input" type="text" value="${escAttr(initialSubjectName)}" placeholder="온라인 또는 기타 교육 항목 입력" />
           </div>
         </div>
         <div class="form-row">
@@ -518,27 +509,25 @@ function openItemModal(item = null) {
             <label class="form-label">초기/보수</label>
             <select class="form-control" id="it-subtype">
               <option value="">구분 없음</option>
-              <option value="initial" ${item?.subType === "initial" ? "selected" : ""}>초기</option>
+              <option value="initial"   ${item?.subType === "initial"   ? "selected" : ""}>초기</option>
               <option value="recurring" ${item?.subType === "recurring" ? "selected" : ""}>보수</option>
             </select>
           </div>
           <div class="form-group">
             <label class="form-label">기본 교육시간 (시간)</label>
-            <input class="form-control" id="it-hours" type="number" min="0" step="0.5" value="${item?.defaultHours ?? ""}" placeholder="예: 8" />
-          </div>
-          <div class="form-group">
-            <label class="form-label">재교육 주기 (개월)</label>
-            <input class="form-control" id="it-cycle-months" type="number" min="0" step="1" value="${item?.cycleMonths ?? ""}" placeholder="예: 12" />
-            <div class="form-hint">미입력 시 개인 이력에서 주기 미설정으로 표시됩니다.</div>
+            <input class="form-control" id="it-hours" type="number" min="0" step="0.5"
+              value="${item?.defaultHours ?? ""}" placeholder="예: 8" />
           </div>
         </div>
         <div class="form-group">
           <label class="form-label">담당 강사</label>
           <input class="form-control" type="text" value="${escAttr(authStore.name)}" disabled />
+          <div class="form-hint">현재 로그인 계정이 담당 강사로 저장됩니다.</div>
         </div>
         <div class="form-group">
           <label class="form-label">비고</label>
-          <textarea class="form-control" id="it-note" rows="2" placeholder="교육 항목에 대한 메모">${esc(item?.note ?? "")}</textarea>
+          <textarea class="form-control" id="it-note" rows="2"
+            placeholder="교육 항목에 대한 메모">${esc(item?.note ?? "")}</textarea>
         </div>
       </div>`,
     actions: [
@@ -547,34 +536,29 @@ function openItemModal(item = null) {
         label,
         variant: "primary",
         onClick: async () => {
-          const trainingType = document.getElementById("it-type")?.value;
-          const fixed = trainingType === "job" || trainingType === "legal";
-          const subjectCode = fixed ? document.getElementById("it-subject-select")?.value ?? "" : "";
-          const selectedOption = fixed
-            ? (TRAINING_SUBJECT_OPTIONS[trainingType] ?? []).find((option) => option.code === subjectCode)
-            : null;
-          const subjectName = fixed
-            ? selectedOption?.name ?? ""
-            : document.getElementById("it-subject-input")?.value?.trim() ?? "";
-          const title = subjectName;
-          const subType = document.getElementById("it-subtype")?.value;
-          const hours = parseFloat(document.getElementById("it-hours")?.value ?? "") || 0;
-          const cycleMonths = Math.max(0, parseInt(document.getElementById("it-cycle-months")?.value ?? "0", 10) || 0);
-          const note = document.getElementById("it-note")?.value?.trim() ?? "";
+          const title    = document.getElementById("it-title")?.value?.trim();
+          const trainType = document.getElementById("it-type")?.value;
+          const subType  = document.getElementById("it-subtype")?.value;
+          const hours    = parseFloat(document.getElementById("it-hours")?.value ?? "") || 0;
+          const note     = document.getElementById("it-note")?.value?.trim() ?? "";
 
-          if (!trainingType) { toast.error("교육유형을 선택해 주세요."); return; }
-          if (!subjectName) { toast.error("교육 세부항목을 선택하거나 입력해 주세요."); return; }
+          if (!title) { toast.error("교육 항목명을 입력해 주세요."); return; }
+          if (!trainType) { toast.error("교육유형을 선택해 주세요."); return; }
 
           modal.setLoading(label, true);
           try {
             const values = {
-              title, trainingType, subjectCode, subjectName, subType, defaultHours: hours, cycleMonths, note,
+              title, trainingType: trainType, subType, defaultHours: hours, note,
               instructorId: authStore.uid, instructorName: authStore.name,
               companyId: S.references?.company?.id, companyName: S.references?.company?.name,
             };
-            if (item) await updateTrainingItem(item.id, values);
-            else await createTrainingItem(values);
-            toast.success(`교육 항목을 ${item ? "수정" : "등록"}했습니다.`);
+            if (item) {
+              await updateTrainingItem(item.id, values);
+              toast.success("교육 항목을 수정했습니다.");
+            } else {
+              await createTrainingItem(values);
+              toast.success("교육 항목을 등록했습니다.");
+            }
             modal.close();
             await loadAll();
           } catch (err) {
@@ -586,23 +570,6 @@ function openItemModal(item = null) {
       },
     ],
   });
-
-  const typeEl = document.getElementById("it-type");
-  const subjectSelect = document.getElementById("it-subject-select");
-  const updateSubjectControl = () => {
-    const type = typeEl?.value ?? "job";
-    const fixed = type === "job" || type === "legal";
-    const fixedWrap = document.getElementById("it-fixed-subject-wrap");
-    const freeWrap = document.getElementById("it-free-subject-wrap");
-    if (fixedWrap) fixedWrap.style.display = fixed ? "" : "none";
-    if (freeWrap) freeWrap.style.display = fixed ? "none" : "";
-    if (fixed && subjectSelect) {
-      const options = TRAINING_SUBJECT_OPTIONS[type] ?? [];
-      subjectSelect.innerHTML = options.map((option) => `<option value="${option.code}" ${option.code === initialSubjectCode ? "selected" : ""}>${option.name}</option>`).join("");
-    }
-  };
-  typeEl?.addEventListener("change", updateSubjectControl);
-  updateSubjectControl();
 }
 
 

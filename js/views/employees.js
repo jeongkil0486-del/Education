@@ -414,64 +414,108 @@ async function parseHistoryUploadFileInline(event) {
 
     selectedTemplateMeta = { trainingType, subjectCode, subjectName, typeLabel, currentYear: Number(currentYear), previousYear: Number(previousYear), templateVersion };
 
-    // ── 2) 개인교육이력 시트 읽기 (5행 헤더)
+    // ── 2) 개인교육이력 시트 읽기
     const dataSheet = wb.Sheets[wb.SheetNames.find((n) => n !== "_meta") ?? wb.SheetNames[0]];
     const allRows   = XLSX.utils.sheet_to_json(dataSheet, { header: 1, defval: "" });
 
-    // 헤더 행 찾기 (성명이 포함된 행)
-    let headerRowIdx = allRows.findIndex((r) => r.some((c) => String(c).includes("성명")));
-    if (headerRowIdx < 0) headerRowIdx = 4; // fallback: 5번째 행
-    const headers   = allRows[headerRowIdx].map((h) => String(h).trim());
-    const dataRaw   = allRows.slice(headerRowIdx + 1).filter((r) => r.some((c) => String(c ?? "").trim() !== ""));
+    // ★ 헤더 행 탐지: '성명'과 '사번'이 동시에 존재하는 행만 헤더로 판단
+    //   (안내문에 '성명' 글자가 포함되어 있어 단순 includes로는 오탐됨)
+    const normCell = (v) => String(v ?? "").trim();
+    let headerRowIdx = allRows.findIndex((r) => {
+      const cells = r.map(normCell);
+      return cells.includes("성명") && cells.includes("사번");
+    });
+    if (headerRowIdx < 0) headerRowIdx = 4; // fallback
 
-    const nameIdx       = headers.findIndex((h) => h.includes("성명") || h.includes("이름"));
-    const empNoIdx      = headers.findIndex((h) => h.includes("사번"));
-    const joinDateIdx   = headers.findIndex((h) => h.includes("입사일"));
-    const positionIdx   = headers.findIndex((h) => h.includes("직급") || h.includes("직책"));
-    const initialIdx    = headers.findIndex((h) => h.includes("초기"));
-    const lastDateIdx   = headers.findIndex((h) => h.includes("최종"));
-    const prevYearIdx   = headers.findIndex((h) => String(h).includes(String(Number(currentYear) - 1)));
-    const currYearIdx   = headers.findIndex((h) => String(h).includes(String(currentYear)));
-    const noteIdx       = headers.findIndex((h) => h.includes("비고"));
+    const headers = allRows[headerRowIdx].map(normCell);
+
+    // ★ 헤더명 기반 컬럼 인덱스 맵 — 고정 인덱스 사용 금지
+    const col = {
+      name:     headers.indexOf("성명"),
+      empNo:    headers.indexOf("사번"),
+      joinDate: headers.indexOf("입사일"),
+      position: headers.findIndex((h) => h.includes("직급") || h.includes("직책")),
+      initial:  headers.findIndex((h) => h.includes("초기")),
+      lastDate: headers.findIndex((h) => h.includes("최종")),
+      prev:     headers.findIndex((h) => h.includes(String(Number(previousYear)))),
+      curr:     headers.findIndex((h) => h.includes(String(Number(currentYear)))),
+      note:     headers.indexOf("비고"),
+    };
+
+    // ★ 데이터 행: 헤더 다음 행부터, 성명·사번이 모두 비어있으면 건너뜀
+    const dataRaw = allRows.slice(headerRowIdx + 1).filter((r) => {
+      const n = normCell(r[col.name]);
+      const e = normCell(r[col.empNo]);
+      return n !== "" || e !== "";
+    });
+
+    // ★ 사번 정규화: 숫자 사번도 안전하게 문자열로 변환
+    const safeEmpNo = (v) => {
+      if (v === null || v === undefined) return "";
+      // Excel serial 숫자가 아닌 일반 숫자·문자열 모두 처리
+      return String(v).trim();
+    };
+
+    // ★ Excel 날짜 셀 정규화: serial number / JS Date / 문자열 모두 지원
+    const xlDateToYMD = (v) => {
+      if (v === null || v === undefined || v === "") return "";
+      // Excel serial number (일반적으로 40000~50000 범위)
+      if (typeof v === "number" && v > 0 && v < 3000) {
+        // XLSX.SSF.parse_date_code 대신 직접 계산
+        const d = new Date(Math.round((v - 25569) * 86400 * 1000));
+        if (!isNaN(d.getTime())) return formatDateYMD(d.getTime());
+        return "";
+      }
+      // 문자열 또는 큰 숫자(밀리초 타임스탬프)
+      const s = String(v).trim();
+      if (!s) return "";
+      const d = new Date(s);
+      if (!isNaN(d.getTime())) return formatDateYMD(d.getTime());
+      return "";
+    };
 
     // 사번 → 직원 매핑
-    const empByNo = new Map(viewState.employees.map((e) => [String(e.empNo ?? "").trim(), e]));
+    const empByNo = new Map(viewState.employees.map((e) => [safeEmpNo(e.empNo), e]));
 
     pendingHistoryRows = dataRaw.map((row, i) => {
-      const get = (idx) => idx >= 0 ? String(row[idx] ?? "").trim() : "";
-      const name      = get(nameIdx);
-      const empNo     = get(empNoIdx);
-      const initial   = get(initialIdx);
-      const lastDate  = get(lastDateIdx);
-      const prevDate  = get(prevYearIdx);
-      const currDate  = get(currYearIdx);
-      const note      = get(noteIdx);
+      const getStr  = (idx) => idx >= 0 ? normCell(row[idx]) : "";
+      const getRaw  = (idx) => idx >= 0 ? row[idx] ?? "" : "";
 
+      const name     = getStr(col.name);
+      const empNo    = safeEmpNo(getRaw(col.empNo));
+      const joinDate = xlDateToYMD(getRaw(col.joinDate));
+      const position = getStr(col.position);
+      const initial  = getStr(col.initial);
+      const lastDate = getStr(col.lastDate);
+      const prevDate = getStr(col.prev);
+      const currDate = getStr(col.curr);
+      const note     = getStr(col.note);
+
+      // ── 검증 (요구 순서대로)
       const errors = [];
-      if (!empNo) errors.push("사번 누락");
       if (!name)  errors.push("성명 누락");
+      if (!empNo) errors.push("사번 누락");
 
-      const emp = empByNo.get(empNo);
+      const emp = empNo ? empByNo.get(empNo) : null;
       if (empNo && !emp) errors.push("존재하지 않는 사번");
       else if (emp && name && emp.name !== name) errors.push("사번과 성명 불일치");
 
-      // 날짜 파싱 — 쉼표로 여러 날짜 지원
-      const parsedInitial  = parseDateCells(initial,  Number(currentYear) - 2, Number(currentYear) + 1, errors, "초기교육");
-      const parsedPrev     = parseDateCells(prevDate,  Number(previousYear), Number(previousYear), errors, `${previousYear}년`);
-      const parsedCurr     = parseDateCells(currDate,  Number(currentYear),  Number(currentYear),  errors, `${currentYear}년`);
-      // 최종교육일: 검증용, 별도 저장 안 함
-      const parsedLast     = parseDateCell(lastDate);
+      // 날짜 파싱 — 쉼표 구분 여러 날짜 지원
+      const parsedInitial = parseDateCells(initial,  Number(currentYear) - 10, Number(currentYear) + 1, errors, "초기교육");
+      const parsedPrev    = parseDateCells(prevDate,  Number(previousYear), Number(previousYear), errors, `${previousYear}년`);
+      const parsedCurr    = parseDateCells(currDate,  Number(currentYear),  Number(currentYear),  errors, `${currentYear}년`);
+      const parsedLast    = parseDateCell(lastDate);
 
-      // 날짜가 하나도 없으면 건너뜀
+      // 날짜가 하나도 없으면 건너뜀(실패 아님)
       const allDates = [...parsedInitial, ...parsedPrev, ...parsedCurr];
-      const skip     = allDates.length === 0 && !errors.length;
+      const skip     = allDates.length === 0 && errors.length === 0;
 
       return {
-        _rowNum: headerRowIdx + 1 + i + 1 + 1, // 행번호 (1-based, 헤더 이후)
-        _skip: skip,
-        _errors: errors,
-        name, empNo, note,
-        uid: emp?.id ?? emp?.uid ?? "",
+        _rowNum:      headerRowIdx + 1 + i + 2, // 1-based 행번호
+        _skip:        skip,
+        _errors:      errors,
+        name, empNo, joinDate, position, note,
+        uid:          emp?.id ?? emp?.uid ?? "",
         initialDates:  parsedInitial,
         prevYearDates: parsedPrev,
         currYearDates: parsedCurr,
@@ -479,10 +523,11 @@ async function parseHistoryUploadFileInline(event) {
       };
     });
 
-    // 건너뜀 제외 후 통계
+    // ── 통계
     const nonSkipped = pendingHistoryRows.filter((r) => !r._skip);
     const invalid    = nonSkipped.filter((r) => r._errors.length);
     const valid      = nonSkipped.filter((r) => !r._errors.length);
+    const skippedCnt = pendingHistoryRows.filter((r) => r._skip).length;
 
     previewEl.innerHTML = `
       <div style="margin-bottom:var(--space-2)">
@@ -493,16 +538,17 @@ async function parseHistoryUploadFileInline(event) {
         <div style="background:var(--gray-50);border:1px solid var(--gray-200);border-radius:var(--radius-md);padding:var(--space-2) var(--space-4);font-size:var(--text-sm)">전체 <strong>${nonSkipped.length}건</strong></div>
         <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:var(--radius-md);padding:var(--space-2) var(--space-4);font-size:var(--text-sm);color:#15803d">정상 <strong>${valid.length}건</strong></div>
         <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:var(--radius-md);padding:var(--space-2) var(--space-4);font-size:var(--text-sm);color:#c2410c">오류 <strong>${invalid.length}건</strong></div>
-        ${pendingHistoryRows.filter((r) => r._skip).length ? `<div style="background:var(--gray-50);border:1px solid var(--gray-200);border-radius:var(--radius-md);padding:var(--space-2) var(--space-4);font-size:var(--text-sm);color:var(--gray-400)">날짜 없음(건너뜀) <strong>${pendingHistoryRows.filter((r) => r._skip).length}건</strong></div>` : ""}
+        ${skippedCnt ? `<div style="background:var(--gray-50);border:1px solid var(--gray-200);border-radius:var(--radius-md);padding:var(--space-2) var(--space-4);font-size:var(--text-sm);color:var(--gray-400)">날짜 없음(건너뜀) <strong>${skippedCnt}건</strong></div>` : ""}
       </div>
       <div class="table-wrap" style="max-height:360px;overflow-y:auto;border:1px solid var(--gray-200);border-radius:var(--radius-md)">
-        <table class="data-table" style="min-width:700px">
+        <table class="data-table" style="min-width:900px">
           <thead>
             <tr>
               <th>행</th><th>성명</th><th>사번</th>
+              <th>입사일</th><th>직급/직책</th>
               <th>초기교육</th><th>최종교육일</th>
               <th>${previousYear}년</th><th>${currentYear}년</th>
-              <th>검증</th>
+              <th>비고</th><th>검증</th>
             </tr>
           </thead>
           <tbody>
@@ -510,11 +556,14 @@ async function parseHistoryUploadFileInline(event) {
               <tr style="background:${r._errors.length ? "#fff7ed" : r._skip ? "#f9fafb" : ""}">
                 <td style="color:var(--gray-400);text-align:center">${r._rowNum}</td>
                 <td>${escapeHtml(r.name)}</td>
-                <td>${escapeHtml(r.empNo)}</td>
+                <td style="font-family:monospace;font-size:var(--text-xs)">${escapeHtml(r.empNo)}</td>
+                <td style="font-size:var(--text-xs)">${escapeHtml(r.joinDate || "–")}</td>
+                <td style="font-size:var(--text-xs)">${escapeHtml(r.position || "–")}</td>
                 <td style="font-size:var(--text-xs)">${escapeHtml(r.initialDates.join(", ") || "–")}</td>
                 <td style="font-size:var(--text-xs)">${escapeHtml(r.lastDate || "–")}</td>
                 <td style="font-size:var(--text-xs)">${escapeHtml(r.prevYearDates.join(", ") || "–")}</td>
                 <td style="font-size:var(--text-xs)">${escapeHtml(r.currYearDates.join(", ") || "–")}</td>
+                <td style="font-size:var(--text-xs)">${escapeHtml(r.note || "–")}</td>
                 <td>${r._skip
                   ? `<span style="color:var(--gray-400);font-size:var(--text-xs)">건너뜀</span>`
                   : r._errors.length
@@ -535,9 +584,15 @@ async function parseHistoryUploadFileInline(event) {
   }
 }
 
-// 날짜 셀 파싱 — 단일 날짜
+// 날짜 셀 파싱 — 단일 날짜 (Excel serial / 문자열 / 밀리초 모두 지원)
 function parseDateCell(value) {
-  const s = String(value ?? "").trim();
+  if (value === null || value === undefined || value === "") return "";
+  // Excel serial number
+  if (typeof value === "number" && value > 0 && value < 3000) {
+    const d = new Date(Math.round((value - 25569) * 86400 * 1000));
+    return isNaN(d.getTime()) ? "" : formatDateYMD(d.getTime());
+  }
+  const s = String(value).trim();
   if (!s) return "";
   const d = new Date(s);
   if (isNaN(d.getTime())) return "";
@@ -545,8 +600,23 @@ function parseDateCell(value) {
 }
 
 // 날짜 셀 파싱 — 쉼표 구분 복수 날짜, 연도 범위 검증
+// Excel serial number / 문자열 / 밀리초 모두 지원
 function parseDateCells(value, minYear, maxYear, errors, label) {
-  const s = String(value ?? "").trim();
+  if (value === null || value === undefined || value === "") return [];
+
+  // Excel serial number는 쉼표 구분이 없으므로 단독 처리
+  if (typeof value === "number") {
+    const ymd = parseDateCell(value);
+    if (!ymd) { errors.push(`${label} 날짜 형식 오류`); return []; }
+    const year = new Date(ymd).getFullYear();
+    if (year < minYear || year > maxYear) {
+      errors.push(`${label} 연도 오류 (${year}년, ${minYear}~${maxYear}년만 허용)`);
+      return [];
+    }
+    return [ymd];
+  }
+
+  const s = String(value).trim();
   if (!s) return [];
   const parts = s.split(/[,，、]/);
   const results = [];
