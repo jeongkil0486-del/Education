@@ -771,6 +771,12 @@ function normalizeManualHistory(data, employee, actorUid, actorName) {
 
   const cycleMonths = Math.max(0, Number(data?.cycleMonths ?? data?.retrainingCycleMonths ?? 0) || 0);
   const hours = Math.max(0, Number(data?.hours ?? data?.trainingHours ?? 0) || 0);
+
+  // educationStage: initial | previous_year | current_year (Excel 교육항목 양식 업로드용)
+  const educationStage = normalizeText(data?.educationStage);
+  // source: manual | manual_excel
+  const sourceValue = ["manual_excel"].includes(normalizeText(data?.source)) ? "manual_excel" : "manual";
+
   return {
     trainingType,
     subjectCode: normalizeText(data?.subjectCode),
@@ -786,6 +792,8 @@ function normalizeManualHistory(data, employee, actorUid, actorName) {
     subType: normalizeText(data?.subType),
     note: normalizeText(data?.note),
     cycleMonths,
+    educationStage: educationStage || null,
+    source: sourceValue,
     enteredBy: actorUid,
     enteredByName: actorName,
   };
