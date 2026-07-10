@@ -514,6 +514,35 @@ exports.deleteManagedAccount = onCall(OPTS, async (request) => {
   return { uid, empNo: profile.empNo ?? "", role: profile.role ?? "", message: "삭제 완료" };
 });
 
+
+exports.deleteEmployeeHistory = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  await ensureHQAdmin(request.auth.uid);
+
+  const uid = normalizeText(request.data?.uid);
+  const source = normalizeText(request.data?.source);
+  const sessionId = normalizeText(request.data?.sessionId);
+  const trainingId = normalizeText(request.data?.trainingId);
+
+  if (!uid || !["session", "legacy"].includes(source)) {
+    throw new HttpsError("invalid-argument", "삭제할 교육이력 정보가 올바르지 않습니다.");
+  }
+
+  const updates = {};
+  if (source === "session") {
+    if (!sessionId) throw new HttpsError("invalid-argument", "회차 ID가 필요합니다.");
+    updates[`sessionCompletions/${sessionId}/${uid}`] = null;
+    updates[`userSessionCompletions/${uid}/${sessionId}`] = null;
+  } else {
+    if (!trainingId) throw new HttpsError("invalid-argument", "교육 ID가 필요합니다.");
+    updates[`trainingCompletions/${trainingId}/${uid}`] = null;
+    updates[`userCompletions/${uid}/${trainingId}`] = null;
+  }
+
+  await db.ref().update(updates);
+  return { uid, source, sessionId, trainingId, message: "교육이력 삭제 완료" };
+});
+
 async function deleteAuthAndProfile(uid) {
   try {
     await auth.deleteUser(uid);
@@ -533,6 +562,13 @@ async function ensureSuperAdmin(uid) {
   const snap = await db.ref(`users/${uid}/role`).get();
   if (!snap.exists() || snap.val() !== "super_admin") {
     throw new HttpsError("permission-denied", "슈퍼관리자만 실행할 수 있습니다.");
+  }
+}
+
+async function ensureHQAdmin(uid) {
+  const snap = await db.ref(`users/${uid}/role`).get();
+  if (!snap.exists() || snap.val() !== "hq_admin") {
+    throw new HttpsError("permission-denied", "본사 교육관리자만 교육이력을 삭제할 수 있습니다.");
   }
 }
 

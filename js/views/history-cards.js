@@ -2,6 +2,8 @@ import { toast } from "../utils/toast.js";
 import { modal } from "../utils/modal.js";
 import { formatDate } from "../utils/date.js";
 import { buildEmployeeHistoryRowsV2, loadTrainingReferences } from "../services/training-service.js";
+import { authStore, ROLES } from "../core/auth.js";
+import { deleteEmployeeHistory } from "../core/admin-api.js";
 import {
   exportEmployeeHistoryCard,
   getLatestHistoryCardTemplate,
@@ -400,6 +402,7 @@ function renderSections(rows) {
                       <th>결과</th>
                       <th>초기/보수</th>
                       <th>비고</th>
+                      ${authStore.role === ROLES.HQ_ADMIN ? "<th>관리</th>" : ""}
                     </tr>
                   </thead>
                   <tbody>
@@ -411,6 +414,33 @@ function renderSections(rows) {
         </div>
       </div>`;
   }).join("");
+
+  if (authStore.role === ROLES.HQ_ADMIN) {
+    el.querySelectorAll(".hc-delete-history").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!S.selectedEmployeeId) return;
+        const ok = window.confirm("이 직원의 해당 교육이력을 삭제하시겠습니까? 삭제 후 복구할 수 없습니다.");
+        if (!ok) return;
+        try {
+          btn.disabled = true;
+          await deleteEmployeeHistory({
+            uid: S.selectedEmployeeId,
+            source: btn.dataset.source,
+            sessionId: btn.dataset.sessionId || "",
+            trainingId: btn.dataset.trainingId || "",
+          });
+          toast.success("교육이력이 삭제되었습니다.");
+          await loadCard(S.selectedEmployeeId);
+        } catch (err) {
+          console.error("[history-cards] delete history failed", err);
+          toast.error(err?.code === "functions/permission-denied"
+            ? "본사 교육관리자만 교육이력을 삭제할 수 있습니다."
+            : "교육이력 삭제에 실패했습니다.");
+          btn.disabled = false;
+        }
+      });
+    });
+  }
 }
 
 function historyRow(row) {
@@ -431,6 +461,12 @@ function historyRow(row) {
       <td>${result}</td>
       <td>${subType}</td>
       <td>${esc(row.note || "–")}</td>
+      ${authStore.role === ROLES.HQ_ADMIN
+        ? `<td><button type="button" class="btn btn--ghost btn--sm hc-delete-history"
+              data-source="${esc(row._source)}"
+              data-session-id="${esc(row.sessionId ?? "")}"
+              data-training-id="${esc(row.trainingId ?? "")}">삭제</button></td>`
+        : ""}
     </tr>`;
 }
 

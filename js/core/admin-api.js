@@ -7,6 +7,7 @@ const createManagedAccountCallable = httpsCallable(functions, "createManagedAcco
 const updateManagedAccountCallable = httpsCallable(functions, "updateManagedAccount");
 const deleteEmployeeCallable       = httpsCallable(functions, "deleteEmployeeAccount");
 const deleteManagedAccountCallable = httpsCallable(functions, "deleteManagedAccount");
+const deleteEmployeeHistoryCallable = httpsCallable(functions, "deleteEmployeeHistory");
 
 export async function createEmployeeAccounts(payload) {
   const result = await createEmployeesCallable(payload);
@@ -30,6 +31,11 @@ export async function deleteEmployeeAccount(payload) {
 
 export async function deleteManagedAccount(payload) {
   const result = await deleteManagedAccountCallable(payload);
+  return result.data;
+}
+
+export async function deleteEmployeeHistory(payload) {
+  const result = await deleteEmployeeHistoryCallable(payload);
   return result.data;
 }
 

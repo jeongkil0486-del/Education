@@ -26,7 +26,6 @@ import {
   TRAINING_TYPE_LABELS,
   buildStatusChip,
   buildTrainingPayload,
-  getEmployeeSessionHistorySummary,
   closeTraining,
   completeTraining,
   deleteTraining,
@@ -51,6 +50,7 @@ import {
   unassignFromSession,
   getSessionDetail,
   getItemDetail,
+  buildEmployeeHistoryRowsV2,
 } from "../services/training-service.js";
 import { render as renderHistoryCards } from "./history-cards.js";
 import {
@@ -160,14 +160,14 @@ async function loadAll() {
     S.sessionsByItem       = {};
 
     const details = await Promise.all(items.map((item) => getItemDetail(item.id).catch(() => ({ sessions: [] }))));
+    const branchIds = new Set();
     items.forEach((item, index) => {
-      S.sessionsByItem[item.id] = details[index]?.sessions ?? [];
+      (item.branchIds ?? []).forEach((id) => branchIds.add(id));
+      const sessions = details[index]?.sessions ?? [];
+      S.sessionsByItem[item.id] = sessions;
+      sessions.forEach((session) => (session.branchIds ?? []).forEach((id) => branchIds.add(id)));
     });
-    // loadTrainingReferences() already applies the instructor's assignedBranches permission.
-    // Use that filtered branch list as the single source of truth for history-card access.
-    S.allowedBranchIds = (references.branches ?? [])
-      .map((branch) => String(branch.id ?? branch.branchId ?? ""))
-      .filter(Boolean);
+    S.allowedBranchIds = [...branchIds];
 
     renderItemStats();
     renderItemsTable();
@@ -194,7 +194,7 @@ function switchTab(tab) {
     const root = document.getElementById("instructor-history-root");
     if (root) {
       if (!S.allowedBranchIds.length) {
-        root.innerHTML = `<div class="empty-state" style="padding:var(--space-16)"><div class="empty-state__title">조회 가능한 지점이 없습니다.</div><div>담당 지점이 지정되지 않았습니다. 슈퍼관리자에게 담당 지점 설정을 요청하세요.</div></div>`;
+        root.innerHTML = `<div class="empty-state" style="padding:var(--space-16)"><div class="empty-state__title">조회 가능한 지점이 없습니다.</div><div>담당 교육 회차에 직원을 배정하면 해당 지점 직원의 교육이력카드를 조회할 수 있습니다.</div></div>`;
       } else {
         renderHistoryCards(root, { allowedBranchIds: S.allowedBranchIds });
       }
@@ -446,7 +446,7 @@ function sessionRow(s, item) {
     ? `${formatDate(s.startDate)} ~ ${formatDate(s.endDate)}`
     : "–";
   const branches = s.branchNames?.length ? s.branchNames.join(", ") : "전체 지점";
-  const isDone   = s.computedStatus === "completed";
+  const isDone   = s.computedStatus === "completed" || s.status === "completed" || Boolean(s.completedAt);
   const isClosed = s.computedStatus === "closed";
 
   return `
@@ -465,8 +465,10 @@ function sessionRow(s, item) {
             ? `<button class="btn btn--ghost btn--sm btn-session-close"
                 data-sid="${s.id}" title="종료 처리">종료</button>`
             : ""}
-          <button class="btn btn--ghost btn--sm btn-session-edit"
-            data-sid="${s.id}" title="수정">수정</button>
+          ${!isDone
+            ? `<button class="btn btn--ghost btn--sm btn-session-edit"
+                data-sid="${s.id}" title="수정">수정</button>`
+            : ""}
           <button class="btn btn--ghost btn--sm btn-session-delete"
             data-sid="${s.id}" style="color:var(--color-danger)" title="삭제">삭제</button>
         </div>
@@ -528,7 +530,7 @@ function openItemModal(item = null) {
         </div>
       </div>`,
     actions: [
-      { label: "취소", variant: "secondary", onClick: () => { closeEmployeeHistoryOverlay(); modal.close(); } },
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
       {
         label,
         variant: "primary",
@@ -569,98 +571,85 @@ function openItemModal(item = null) {
   });
 }
 
-/* ──────────────────────────────────────────────────────────
-   회차 직원 이력 / 재교육 임박 도우미
-────────────────────────────────────────────────────────── */
-function isWithinNext30Days(timestamp) {
-  const value = Number(timestamp ?? 0);
-  if (!value) return false;
-  const now = new Date();
-  now.setHours(0, 0, 0, 0);
-  const limit = new Date(now);
-  limit.setDate(limit.getDate() + 30);
-  return value >= now.getTime() && value <= limit.getTime();
-}
 
-function readSessionPriorityDate(session = null) {
-  const startValue = document.getElementById("ss-start")?.value;
-  const deadlineValue = document.getElementById("ss-deadline")?.value;
-  const startDate = startValue ? new Date(`${startValue}T00:00:00`).getTime() : Number(session?.startDate ?? 0);
-  const deadline = deadlineValue ? new Date(`${deadlineValue}T00:00:00`).getTime() : Number(session?.deadline ?? 0);
-  return isWithinNext30Days(startDate) || isWithinNext30Days(deadline);
-}
-
-function latestSameItemCompletion(rows, itemId, currentSessionId = "") {
-  return (rows ?? [])
-    .filter((row) => row._source === "session"
-      && String(row.itemId ?? "") === String(itemId ?? "")
-      && String(row.sessionId ?? "") !== String(currentSessionId ?? "")
-      && row.completionStatus === "completed"
-      && row.completedAt)
-    .sort((a, b) => Number(b.completedAt ?? 0) - Number(a.completedAt ?? 0))[0] ?? null;
-}
-
-function closeEmployeeHistoryOverlay() {
-  document.getElementById("session-employee-history-overlay")?.remove();
-}
-
-function openEmployeeHistoryOverlay(employee, item, historyResult) {
-  closeEmployeeHistoryOverlay();
-  const container = document.getElementById("modal-container");
-  if (!container) return;
-
-  const rows = historyResult?.rows ?? [];
-  const completedRows = rows.filter((row) => row.completionStatus === "completed");
-  const sameItem = latestSameItemCompletion(rows, item?.id);
-  const recentRows = [...rows]
-    .sort((a, b) => Number(b.completedAt ?? b.startDate ?? 0) - Number(a.completedAt ?? a.startDate ?? 0))
-    .slice(0, 8);
-
+async function openItemHistoryOverlay(uid, item) {
+  const employee = (S.references?.employees ?? []).find((e) => (e.id ?? e.uid) === uid);
   const overlay = document.createElement("div");
-  overlay.id = "session-employee-history-overlay";
-  overlay.style.cssText = "position:fixed;inset:0;z-index:10020;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;padding:20px";
+  overlay.className = "item-history-overlay";
+  overlay.style.cssText = "position:fixed;inset:0;z-index:10000;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;padding:20px";
   overlay.innerHTML = `
-    <div style="width:min(720px,100%);max-height:85vh;overflow:auto;background:#fff;border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.28)">
+    <div style="width:min(760px,100%);max-height:85vh;overflow:auto;background:#fff;border-radius:14px;box-shadow:0 24px 70px rgba(15,23,42,.25)">
       <div style="display:flex;align-items:center;justify-content:space-between;padding:18px 20px;border-bottom:1px solid var(--gray-200)">
         <div>
-          <div style="font-size:var(--text-lg);font-weight:var(--weight-semibold)">${esc(employee?.name ?? "직원")} 교육이력</div>
-          <div style="margin-top:4px;font-size:var(--text-sm);color:var(--gray-500)">${esc(employee?.empNo ?? "–")} · ${esc(employee?.branchName ?? "–")}</div>
+          <div style="font-weight:var(--weight-semibold);font-size:var(--text-base)">${esc(item?.title ?? "교육 항목")} 이력</div>
+          <div style="font-size:var(--text-sm);color:var(--gray-500);margin-top:3px">${esc(employee?.name ?? "–")} (${esc(employee?.empNo ?? "–")}) · ${esc(employee?.branchName ?? "–")}</div>
         </div>
-        <button type="button" id="session-history-close" class="btn btn--ghost btn--sm">닫기</button>
+        <button type="button" class="btn btn--ghost btn--sm item-history-close">닫기</button>
       </div>
-      <div style="padding:20px;display:flex;flex-direction:column;gap:16px">
-        <div class="dashboard-grid dashboard-grid--compact">
-          <div class="stat-card"><div class="stat-card__label">전체 교육</div><div class="stat-card__value">${rows.length}</div></div>
-          <div class="stat-card"><div class="stat-card__label">수료 교육</div><div class="stat-card__value">${completedRows.length}</div></div>
-          <div class="stat-card"><div class="stat-card__label">동일 교육 최근 수료일</div><div class="stat-card__value" style="font-size:var(--text-base)">${sameItem?.completedAt ? formatDate(sameItem.completedAt) : "–"}</div></div>
-        </div>
-        <div>
-          <div style="font-weight:var(--weight-semibold);margin-bottom:8px">최근 교육이력</div>
-          ${recentRows.length ? `
-            <div class="table-wrap"><table class="data-table" style="font-size:var(--text-sm)">
-              <thead><tr><th>교육과정명</th><th>교육기간</th><th>수료일</th><th>결과</th></tr></thead>
-              <tbody>${recentRows.map((row) => `<tr>
-                <td>${esc(row.title ?? "–")}</td>
-                <td>${row.startDate ? formatDate(row.startDate) : "–"}${row.endDate ? ` ~ ${formatDate(row.endDate)}` : ""}</td>
-                <td>${row.completedAt ? formatDate(row.completedAt) : "–"}</td>
-                <td>${row.completionStatus === "completed" ? "PASS" : "미수료"}</td>
-              </tr>`).join("")}</tbody>
-            </table></div>` : `<div class="empty-state" style="padding:var(--space-8)"><div class="empty-state__title">등록된 교육이력이 없습니다.</div></div>`}
-        </div>
+      <div class="item-history-body" style="padding:20px">
+        <div style="padding:32px;text-align:center;color:var(--gray-400)">교육 이력을 불러오는 중…</div>
       </div>
     </div>`;
-  container.appendChild(overlay);
-  overlay.querySelector("#session-history-close")?.addEventListener("click", closeEmployeeHistoryOverlay);
+  document.body.appendChild(overlay);
+
+  const close = () => overlay.remove();
+  overlay.querySelector(".item-history-close")?.addEventListener("click", close);
   overlay.addEventListener("click", (event) => {
-    if (event.target === overlay) closeEmployeeHistoryOverlay();
+    if (event.target === overlay) close();
   });
+
+  try {
+    const result = await buildEmployeeHistoryRowsV2(uid);
+    const rows = (result?.rows ?? []).filter((row) =>
+      row._source === "session" && String(row.itemId ?? "") === String(item?.id ?? "")
+    );
+    const body = overlay.querySelector(".item-history-body");
+    if (!body) return;
+
+    if (!rows.length) {
+      body.innerHTML = `<div class="empty-state" style="padding:var(--space-10)">
+        <div class="empty-state__title">이 교육 항목의 수료 이력이 없습니다.</div>
+      </div>`;
+      return;
+    }
+
+    body.innerHTML = `
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>교육기간</th>
+              <th>수료일</th>
+              <th>강사</th>
+              <th>결과</th>
+              <th>비고</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map((row) => `
+              <tr>
+                <td>${row.startDate ? formatDate(row.startDate) : "–"}${row.endDate ? ` ~ ${formatDate(row.endDate)}` : ""}</td>
+                <td>${row.completedAt ? formatDate(row.completedAt) : "–"}</td>
+                <td>${esc(row.instructorName ?? "–")}</td>
+                <td>PASS</td>
+                <td>${esc(row.note || "–")}</td>
+              </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>`;
+  } catch (err) {
+    console.error("[instructor-trainings] item history load failed", err);
+    const body = overlay.querySelector(".item-history-body");
+    if (body) body.innerHTML = `<div class="empty-state" style="padding:var(--space-10)">
+      <div class="empty-state__title">교육 이력을 불러오지 못했습니다.</div>
+    </div>`;
+  }
 }
 
 /* ──────────────────────────────────────────────────────────
    회차 모달 (등록/수정 + 직원 즉시 배정)
 ────────────────────────────────────────────────────────── */
 async function openSessionModal(item, session = null) {
-  closeEmployeeHistoryOverlay();
   let existingAssignments = [];
   if (session?.id) {
     try {
@@ -682,14 +671,12 @@ async function openSessionModal(item, session = null) {
   /* 직원 필터 상태 (모달 내부 클로저로 관리) */
   let filterBranchId = "";
   let filterSearch   = "";
-  const originalUids = new Set(existingAssignments.map((a) => String(a.uid ?? "")).filter(Boolean));
+  const originalUids = new Set(existingAssignments.map((a) => a.uid));
   let selectedUids   = new Set(originalUids);
-  const historyCache = new Map();
-  let retrainingUids = new Set();
 
   function getFilteredEmployees() {
     return employees.filter((e) => {
-      const matchBranch = !filterBranchId || String(e.branchId ?? "") === String(filterBranchId);
+      const matchBranch = !filterBranchId || e.branchId === filterBranchId;
       const matchSearch = !filterSearch
         || String(e.name ?? "").toLowerCase().includes(filterSearch)
         || String(e.empNo ?? "").toLowerCase().includes(filterSearch);
@@ -700,97 +687,42 @@ async function openSessionModal(item, session = null) {
   function renderEmployeePicker() {
     const list = document.getElementById("ss-emp-list");
     if (!list) return;
-    const filtered = getFilteredEmployees().sort((a, b) => {
-      const aUid = String(a.id ?? a.uid ?? "");
-      const bUid = String(b.id ?? b.uid ?? "");
-      const priorityDiff = Number(retrainingUids.has(bUid)) - Number(retrainingUids.has(aUid));
-      if (priorityDiff) return priorityDiff;
-      return String(a.name ?? "").localeCompare(String(b.name ?? ""), "ko");
-    });
+    const filtered = getFilteredEmployees();
     if (!filtered.length) {
       list.innerHTML = `<div style="padding:var(--space-4);color:var(--gray-400);font-size:var(--text-sm);text-align:center">해당 조건의 직원이 없습니다.</div>`;
       return;
     }
     list.innerHTML = filtered.map((e) => {
-      const uid = String(e.id ?? e.uid ?? "");
+      const uid = e.id ?? e.uid;
       const checked = selectedUids.has(uid);
-      const isRetraining = retrainingUids.has(uid);
       return `
         <div class="picker-item" style="padding:var(--space-2) var(--space-3);display:flex;align-items:center;gap:var(--space-2)">
-          <label style="display:flex;align-items:center;gap:var(--space-3);flex:1;min-width:0;cursor:pointer">
-            <input type="checkbox" class="ss-emp-cb" value="${escAttr(uid)}" ${checked ? "checked" : ""} />
-            <div class="picker-item__body" style="min-width:0">
-              <div class="picker-item__title" style="font-size:var(--text-sm);display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-                ${esc(e.name ?? "–")}
-                ${isRetraining ? `<span class="chip chip--danger" style="font-size:11px">재교육 임박</span>` : ""}
-              </div>
-              <div class="picker-item__meta">${esc(e.empNo ?? "–")} · ${esc(e.branchName ?? "–")}</div>
-            </div>
+          <input type="checkbox" class="ss-emp-cb" value="${uid}" ${checked ? "checked" : ""} />
+          <label class="picker-item__body" style="flex:1;cursor:pointer">
+            <div class="picker-item__title" style="font-size:var(--text-sm)">${esc(e.name ?? "–")}</div>
+            <div class="picker-item__meta">${esc(e.empNo ?? "–")} · ${esc(e.branchName ?? "–")}</div>
           </label>
-          <button type="button" class="btn btn--ghost btn--sm ss-history-btn" data-uid="${escAttr(uid)}"
-            aria-label="${escAttr(e.name ?? "직원")} 교육이력 보기"
-            style="width:30px;height:30px;min-width:30px;padding:0;border-radius:999px;font-size:18px;line-height:1">+</button>
+          <button type="button" class="btn btn--ghost btn--sm ss-emp-history"
+            data-uid="${uid}" title="이 교육 항목의 이력 보기"
+            style="width:30px;height:30px;padding:0;border-radius:999px;font-size:18px;line-height:1">+</button>
         </div>`;
     }).join("");
 
     list.querySelectorAll(".ss-emp-cb").forEach((cb) => {
       cb.addEventListener("change", () => {
-        const uid = String(cb.value);
-        if (cb.checked) selectedUids.add(uid);
-        else            selectedUids.delete(uid);
+        if (cb.checked) selectedUids.add(cb.value);
+        else            selectedUids.delete(cb.value);
         updateSelCount();
       });
     });
 
-    list.querySelectorAll(".ss-history-btn").forEach((button) => {
-      button.addEventListener("click", async (event) => {
+    list.querySelectorAll(".ss-emp-history").forEach((btn) => {
+      btn.addEventListener("click", async (event) => {
         event.preventDefault();
         event.stopPropagation();
-        const uid = String(button.dataset.uid ?? "");
-        const employee = employees.find((entry) => String(entry.id ?? entry.uid ?? "") === uid);
-        if (!employee) return;
-        button.disabled = true;
-        try {
-          let result = historyCache.get(uid);
-          if (!result) {
-            result = await getEmployeeSessionHistorySummary(uid, item.id, session?.id ?? "");
-            historyCache.set(uid, result);
-          }
-          openEmployeeHistoryOverlay(employee, item, result);
-        } catch (err) {
-          console.error("[instructor-trainings] employee history failed", err);
-          toast.error(err?.message || "직원 교육이력을 불러오지 못했습니다.");
-        } finally {
-          button.disabled = false;
-        }
+        await openItemHistoryOverlay(btn.dataset.uid, item);
       });
     });
-  }
-
-  async function refreshRetrainingPriority() {
-    retrainingUids = new Set();
-    if (!session || !readSessionPriorityDate(session)) {
-      renderEmployeePicker();
-      return;
-    }
-
-    const results = await Promise.all(employees.map(async (employee) => {
-      const uid = String(employee.id ?? employee.uid ?? "");
-      if (!uid) return null;
-      try {
-        let history = historyCache.get(uid);
-        if (!history) {
-          history = await getEmployeeSessionHistorySummary(uid, item.id, session.id);
-          historyCache.set(uid, history);
-        }
-        return history.latestSameItemCompletion ? uid : null;
-      } catch (err) {
-        console.warn("[instructor-trainings] retraining history skipped", uid, err);
-        return null;
-      }
-    }));
-    retrainingUids = new Set(results.filter(Boolean));
-    renderEmployeePicker();
   }
 
   function updateSelCount() {
@@ -875,10 +807,10 @@ async function openSessionModal(item, session = null) {
           if (deadline < endDate)  { toast.error("수료기한은 종료일과 같거나 이후여야 합니다."); return; }
 
           /* 선택된 직원 branchIds 자동 집계 (지점 저장용) */
-          const selectedEmployees = employees.filter((e) => selectedUids.has(String(e.id ?? e.uid ?? "")));
+          const selectedEmployees = employees.filter((e) => selectedUids.has(e.id ?? e.uid));
           const branchIds   = [...new Set(selectedEmployees.map((e) => e.branchId).filter(Boolean))];
           const branchNames = branchIds.map((bid) =>
-            branches.find((b) => String(b.id ?? b.branchId ?? "") === String(bid))?.name ?? bid
+            branches.find((b) => b.id === bid)?.name ?? bid
           );
 
           modal.setLoading(label, true);
@@ -903,15 +835,8 @@ async function openSessionModal(item, session = null) {
               await assignEmployeesToSession(sessionObj, [...selectedUids], refs);
             } else {
               if (toAdd.length) await assignEmployeesToSession(sessionObj, toAdd, refs);
-              if (toRemove.length) await Promise.all(toRemove.map((uid) => unassignFromSession(sessionId, uid)));
+              for (const uid of toRemove) await unassignFromSession(sessionId, uid);
             }
-
-            // Confirm the two assignment indexes were synchronized before closing.
-            const savedDetail = await getSessionDetail(sessionId);
-            const savedUids = new Set((savedDetail?.assignments ?? []).map((assignment) => String(assignment.uid ?? "")));
-            const mismatch = savedUids.size !== selectedUids.size
-              || [...selectedUids].some((uid) => !savedUids.has(String(uid)));
-            if (mismatch) throw new Error("배정 직원 저장 결과가 일치하지 않습니다. 다시 시도해 주세요.");
 
             /* 모든 처리 완료 후 단일 알림 */
             const msg = session
@@ -919,7 +844,6 @@ async function openSessionModal(item, session = null) {
               : `회차를 추가했습니다.${selectedUids.size ? ` (${selectedUids.size}명 배정)` : ""}`;
             toast.success(msg);
 
-            closeEmployeeHistoryOverlay();
             modal.close();
             await loadAndRenderSessions(item.id);
           } catch (err) {
@@ -935,11 +859,6 @@ async function openSessionModal(item, session = null) {
   /* 모달 열린 후 이벤트 바인딩 (requestAnimationFrame으로 DOM 렌더 보장) */
   requestAnimationFrame(() => {
     renderEmployeePicker();
-    updateSelCount();
-    refreshRetrainingPriority();
-
-    document.getElementById("ss-start")?.addEventListener("change", refreshRetrainingPriority);
-    document.getElementById("ss-deadline")?.addEventListener("change", refreshRetrainingPriority);
 
     document.getElementById("ss-filter-branch")?.addEventListener("change", (e) => {
       filterBranchId = e.target.value;
@@ -950,12 +869,12 @@ async function openSessionModal(item, session = null) {
       renderEmployeePicker();
     });
     document.getElementById("ss-select-all")?.addEventListener("click", () => {
-      getFilteredEmployees().forEach((e) => selectedUids.add(String(e.id ?? e.uid ?? "")));
+      getFilteredEmployees().forEach((e) => selectedUids.add(e.id ?? e.uid));
       renderEmployeePicker();
       updateSelCount();
     });
     document.getElementById("ss-clear-all")?.addEventListener("click", () => {
-      getFilteredEmployees().forEach((e) => selectedUids.delete(String(e.id ?? e.uid ?? "")));
+      getFilteredEmployees().forEach((e) => selectedUids.delete(e.id ?? e.uid));
       renderEmployeePicker();
       updateSelCount();
     });
