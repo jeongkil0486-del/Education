@@ -8,6 +8,13 @@ import {
   exportEmployeeHistoryCard,
 } from "../services/history-card-export.js";
 import { importHistoryExcelData } from "../core/admin-api.js";
+import {
+  analyzeExcel,
+  validateAndPreview,
+  renderDetailedPreview,
+  getImportableRows,
+  STATUS as IMPORT_STATUS,
+} from "../services/excel-import-engine.js";
 
 /* ──────────────────────────────────────────────────────────
    교육유형 → 섹션 매핑
@@ -521,7 +528,7 @@ function openManualHistoryModal(row = null) {
 
 
 /* ──────────────────────────────────────────────────────────
-   기존 교육이력 가져오기 (Excel → 세부 필드 보완)
+   기존 교육이력 가져오기  (Excel Import Engine v2.0)
 ────────────────────────────────────────────────────────── */
 function openImportExcelModal() {
   modal.open({
@@ -571,11 +578,35 @@ function openImportExcelModal() {
           const statusEl = document.getElementById("import-parse-status");
           if (statusEl) statusEl.textContent = "파일 분석 중...";
           try {
-            const parsed = await parseHistoryExcel(file);
-            window._importParsed = parsed;
-            renderImportPreview(parsed);
-            if (statusEl) statusEl.textContent = `분석 완료: ${parsed.rows.length}개 이력 발견`;
+            // ── § 1-4: Reader → Normalizer → TemplateDetector → Mapper
+            const analyzed = await analyzeExcel(file);
+
+            // ── § 5: Validator (lookups는 서버에서 가져오지 않고 클라이언트에서 빈 맵으로 skip;
+            //          실제 매칭은 importHistoryExcelData 서버 함수에서 수행)
+            //          단, 미리보기용으로 기본 validated rows 생성 (직원 매칭 없이)
+            const preview = { summary: { total: analyzed.rows.length, new: 0, fill: 0, duplicate: 0, error: 0 }, rows: analyzed.rows };
+            let newCount = 0, errorCount = 0;
+            for (const r of analyzed.rows) {
+              if (!r.completedAt) errorCount++;
+              else newCount++;
+            }
+            preview.summary.new = newCount;
+            preview.summary.error = errorCount;
+
+            window._importAnalyzed = analyzed;
+
+            // ── § 6: 상세 미리보기 렌더
+            const previewEl = document.getElementById("import-preview");
+            const contentEl = document.getElementById("import-preview-content");
+            if (previewEl) previewEl.style.display = "block";
+            if (contentEl) renderDetailedPreview(contentEl, preview);
+
+            const parserInfo = analyzed.parsersUsed?.join(", ") ?? "";
+            if (statusEl) statusEl.textContent =
+              `분석 완료: ${analyzed.rows.length}개 이력 발견` +
+              (parserInfo ? ` [${parserInfo}]` : "");
           } catch (err) {
+            console.error("[history-cards] analyzeExcel failed", err);
             if (statusEl) statusEl.textContent = `분석 실패: ${err.message}`;
             toast.error("파일을 분석하지 못했습니다.");
           }
@@ -585,13 +616,32 @@ function openImportExcelModal() {
         label: "저장",
         variant: "primary",
         onClick: async () => {
-          const parsed = window._importParsed;
-          if (!parsed?.rows?.length) { toast.warning("먼저 파일을 분석해 주세요."); return; }
+          const analyzed = window._importAnalyzed;
+          if (!analyzed?.rows?.length) { toast.warning("먼저 파일을 분석해 주세요."); return; }
           const mode = document.querySelector("input[name='import-mode']:checked")?.value ?? "fill";
+
+          // ── § 7: Import (Validator 통과분만 서버로 전송)
+          //   서버의 importHistoryExcelData가 직원 매칭 + 중복 방지를 최종 수행
+          const payload = analyzed.rows.map((r) => ({
+            empNo:          r.empNo,
+            employeeName:   r.employeeName,
+            trainingType:   r.trainingType,
+            courseName:     r.courseName,
+            subjectName:    r.subjectName,
+            instructorName: r.instructor,
+            trainingHours:  r.hours,
+            startDate:      r.startDate,
+            endDate:        r.endDate,
+            completedAt:    r.completedAt,
+            result:         r.result,
+            educationStage: r.initialOrRecurrent,
+            subType:        r.initialOrRecurrent,
+            note:           r.note,
+          })).filter((r) => r.completedAt || r.courseName); // 최소 조건
 
           modal.setLoading("저장", true);
           try {
-            const result = await importHistoryExcelData({ rows: parsed.rows, mode });
+            const result = await importHistoryExcelData({ rows: payload, mode });
             toast.success([
               `직원 매칭: ${result.matchedEmployees}명`,
               `기존 이력 보완: ${result.updatedCount}건`,
@@ -599,8 +649,7 @@ function openImportExcelModal() {
               `중복 건너뜀: ${result.skippedCount}건`,
             ].join(" · "));
             modal.close();
-            delete window._importParsed;
-            // 현재 선택 직원 이력 재조회
+            delete window._importAnalyzed;
             if (S.selectedEmployeeId) await loadCard(S.selectedEmployeeId);
           } catch (err) {
             console.error("[history-cards] importHistoryExcelData failed", err);
@@ -614,7 +663,8 @@ function openImportExcelModal() {
 }
 
 /* ──────────────────────────────────────────────────────────
-   Excel 파싱 (법정/직무 시트)
+   Excel 파싱 → excel-import-engine.js 로 이전됨 (v2.0)
+   아래 함수들은 더 이상 사용되지 않으며, Engine이 대체합니다.
 ────────────────────────────────────────────────────────── */
 async function parseHistoryExcel(file) {
   const XLSX = await loadXlsx();
