@@ -349,9 +349,10 @@ function renderSummary(emp, rows) {
   const overdueCnt = activeDueRows.filter((r) => r.dueStatus === "overdue").length;
 
   el.innerHTML = [
-    { label: "총 교육 건수",    value: totalCount,                          isDate: false },
-    { label: "수료 건수",       value: completedCnt,                        isDate: false },
-    { label: "진행중",          value: inProgressCnt,                       isDate: false },
+    { label: "총 교육 과정 수",  value: new Set(rows.map((r) => groupKey(r))).size, isDate: false },
+    { label: "총 이력 건수",     value: totalCount,                                  isDate: false },
+    { label: "수료 건수",        value: completedCnt,                               isDate: false },
+    { label: "진행중",           value: inProgressCnt,                              isDate: false },
     { label: "미수료",          value: failCnt,                             isDate: false },
     { label: "최근 교육일",     value: lastDate ? formatDate(lastDate) : "–", isDate: true },
     { label: "다음 교육 예정일", value: nextDate ? formatDate(nextDate) : "–", isDate: true },
@@ -396,51 +397,85 @@ function renderProfile(emp) {
 /* ──────────────────────────────────────────────────────────
    교육유형별 섹션 렌더링
 ────────────────────────────────────────────────────────── */
+/* ──────────────────────────────────────────────────────────
+   그룹화 조회  (교육과정 단위)
+   DB는 그대로 / 화면만 course 단위로 묶어서 표시
+────────────────────────────────────────────────────────── */
+
+/**
+ * 그룹 키: 직원 + 교육유형섹션 + 교육과정명 + 초기/보수
+ * 동일 키 → 하나의 그룹 (Accordion)
+ */
+function groupKey(row) {
+  const norm = (s) => String(s ?? "").trim().toLowerCase();
+  return `${getSectionKey(row)}||${norm(row.courseName ?? row.title)}||${norm(row.subType ?? "")}`;
+}
+
+/**
+ * rows → 그룹 배열
+ * 그룹 대표: 수료일 최신 row
+ */
+function groupRows(rows) {
+  const map = new Map();
+  for (const row of rows) {
+    const k = groupKey(row);
+    if (!map.has(k)) map.set(k, []);
+    map.get(k).push(row);
+  }
+  const groups = [];
+  for (const [, members] of map) {
+    // 수료일 내림차순 정렬 → 첫 번째가 최신
+    const sorted = [...members].sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0));
+    const rep = sorted[0]; // 대표 행
+    groups.push({ rep, members: sorted });
+  }
+  return groups;
+}
+
 function renderSections(rows) {
   const el = document.getElementById("hc-sections");
   if (!el) return;
 
+  // 섹션별 그룹 구성
   const sectionMap = {};
-  for (const row of rows) {
-    const key = getSectionKey(row);
-    if (!sectionMap[key]) sectionMap[key] = [];
-    sectionMap[key].push(row);
-  }
+  for (const key of SECTION_ORDER) sectionMap[key] = [];
+  for (const row of rows) sectionMap[getSectionKey(row)]?.push(row);
 
-  el.innerHTML = SECTION_ORDER.map((key) => {
-    const sRows = sectionMap[key] ?? [];
+  el.innerHTML = SECTION_ORDER.map((secKey) => {
+    const sRows   = sectionMap[secKey] ?? [];
+    const groups  = groupRows(sRows);
+    const isAdmin = authStore.role === ROLES.HQ_ADMIN;
+
     return `
       <div class="card" style="margin-bottom:var(--space-4)">
         <div class="card__header" style="background:var(--gray-50);border-bottom:1px solid var(--gray-200)">
           <div class="card__title" style="font-size:var(--text-sm)">
-            ${esc(SECTION_LABELS[key])}
-            <span class="chip chip--info" style="margin-left:var(--space-2)">${sRows.length}건</span>
+            ${esc(SECTION_LABELS[secKey])}
+            <span class="chip chip--info" style="margin-left:var(--space-2)">${groups.length}과정</span>
           </div>
         </div>
         <div class="card__body" style="padding:0">
-          ${sRows.length === 0
+          ${groups.length === 0
             ? `<div style="padding:var(--space-6);text-align:center;color:var(--gray-400);font-size:var(--text-sm)">이력 없음</div>`
             : `<div class="table-wrap">
-                <table class="hc-section-table">
+                <table class="hc-section-table" style="min-width:900px">
                   <thead>
                     <tr>
+                      <th style="width:28px"></th>
                       <th>교육과정명</th>
-                      <th>교육과목</th>
                       <th>강사</th>
                       <th>교육시간</th>
                       <th>교육기간</th>
-                      <th>수료일</th>
-                      <th>결과</th>
+                      <th>최신 수료일</th>
                       <th>초기/보수</th>
                       <th>다음 예정일</th>
                       <th>남은 일수</th>
                       <th>상태</th>
                       <th>비고</th>
-                      ${authStore.role === ROLES.HQ_ADMIN ? "<th>관리</th>" : ""}
                     </tr>
                   </thead>
                   <tbody>
-                    ${sRows.map((row) => historyRow(row)).join("")}
+                    ${groups.map((g, gi) => courseGroupRows(g, gi, secKey, isAdmin)).join("")}
                   </tbody>
                 </table>
               </div>`
@@ -449,6 +484,20 @@ function renderSections(rows) {
       </div>`;
   }).join("");
 
+  // Accordion 토글 이벤트
+  el.querySelectorAll(".hc-group-toggle").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const gid   = btn.dataset.gid;
+      const icon  = btn.querySelector(".hc-toggle-icon");
+      el.querySelectorAll(`[data-group-detail="${gid}"]`).forEach((tr) => {
+        const hidden = tr.style.display === "none";
+        tr.style.display = hidden ? "" : "none";
+      });
+      if (icon) icon.textContent = icon.textContent === "▶" ? "▼" : "▶";
+    });
+  });
+
+  // 수정 버튼
   if (authStore.role === ROLES.HQ_ADMIN) {
     el.querySelectorAll(".hc-edit-history").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -456,19 +505,20 @@ function renderSections(rows) {
         if (row) openManualHistoryModal(row);
       });
     });
+    // 삭제 버튼
     el.querySelectorAll(".hc-delete-history").forEach((btn) => {
       btn.addEventListener("click", async () => {
         if (!S.selectedEmployeeId) return;
-        const ok = window.confirm("이 직원의 해당 교육이력을 삭제하시겠습니까? 삭제 후 복구할 수 없습니다.");
+        const ok = window.confirm("이 교육이력을 삭제하시겠습니까? 삭제 후 복구할 수 없습니다.");
         if (!ok) return;
         try {
           btn.disabled = true;
           await deleteEmployeeHistory({
-            uid: S.selectedEmployeeId,
-            source: btn.dataset.source,
-            sessionId: btn.dataset.sessionId || "",
+            uid:        S.selectedEmployeeId,
+            source:     btn.dataset.source,
+            sessionId:  btn.dataset.sessionId  || "",
             trainingId: btn.dataset.trainingId || "",
-            historyId: btn.dataset.historyId || "",
+            historyId:  btn.dataset.historyId  || "",
           });
           toast.success("교육이력이 삭제되었습니다.");
           await loadCard(S.selectedEmployeeId);
@@ -484,19 +534,103 @@ function renderSections(rows) {
   }
 }
 
-function historyRow(row) {
-  const period = (row.startDate && row.endDate) ? `${formatDate(row.startDate)} ~ ${formatDate(row.endDate)}` : (row.startDate ? formatDate(row.startDate) : "–");
-  const result = row.completionStatus === "completed" ? (row.result || "PASS") : "–";
-  const subType = row.trainingType === "job" ? (row.subType === "initial" ? "초기" : row.subType === "recurring" ? "보수" : "–") : "–";
-  const days = row.daysRemaining === null || row.daysRemaining === undefined ? "–" : row.daysRemaining < 0 ? `${Math.abs(row.daysRemaining)}일 초과` : `${row.daysRemaining}일`;
-  const tone = row.dueStatus === "overdue" ? "danger" : row.dueStatus === "soon" ? "warning" : row.dueStatus === "normal" ? "success" : "neutral";
-  const canEditManual = authStore.role === ROLES.HQ_ADMIN && row._source === "manual";
-  return `<tr>
-    <td>${esc(row.courseName ?? row.title)}</td><td>${esc(row.subjectName ?? "–")}</td><td>${esc(row.instructorName)}</td><td>${row.hours ? `${row.hours}시간` : "–"}</td>
-    <td style="white-space:nowrap">${period}</td><td style="white-space:nowrap">${row.completedAt ? formatDate(row.completedAt) : "–"}</td><td>${esc(result)}</td><td>${subType}</td>
-    <td style="white-space:nowrap">${row.nextDueDate ? formatDate(row.nextDueDate) : "–"}</td><td style="white-space:nowrap">${days}</td><td><span class="chip chip--${tone}">${esc(row.dueStatusLabel ?? DUE_STATUS_LABELS[row.dueStatus] ?? "–")}</span></td><td>${esc(row.note || "–")}</td>
-    ${authStore.role === ROLES.HQ_ADMIN ? `<td><div style="display:flex;gap:4px">${canEditManual ? `<button type="button" class="btn btn--ghost btn--sm hc-edit-history" data-history-id="${esc(row.historyId ?? "")}">수정</button>` : ""}<button type="button" class="btn btn--ghost btn--sm hc-delete-history" data-source="${esc(row._source)}" data-session-id="${esc(row.sessionId ?? "")}" data-training-id="${esc(row.trainingId ?? "")}" data-history-id="${esc(row.historyId ?? "")}">삭제</button></div></td>` : ""}
-  </tr>`;
+/**
+ * 그룹 대표 행 + 펼침 상세 행 생성
+ */
+function courseGroupRows(group, gi, secKey, isAdmin) {
+  const { rep, members } = group;
+  const gid = `g_${secKey}_${gi}`;
+
+  // 대표 행 정보 (최신 수료일 기준)
+  const period  = rep.startDate
+    ? (rep.endDate ? `${formatDate(rep.startDate)} ~ ${formatDate(rep.endDate)}` : formatDate(rep.startDate))
+    : "–";
+  const subType = _stageLabel(rep.subType);
+  const days    = rep.daysRemaining == null ? "–"
+                : rep.daysRemaining < 0 ? `${Math.abs(rep.daysRemaining)}일 초과`
+                : `${rep.daysRemaining}일`;
+  const tone    = rep.dueStatus === "overdue" ? "danger"
+                : rep.dueStatus === "soon"    ? "warning"
+                : rep.dueStatus === "normal"  ? "success" : "neutral";
+  const subjCount = members.length > 1 ? `<span style="color:var(--gray-400);font-size:11px;margin-left:4px">(${members.length}건)</span>` : "";
+
+  // ── 대표 행
+  const repRow = `
+    <tr style="cursor:pointer" class="hc-group-toggle" data-gid="${gid}">
+      <td style="text-align:center;padding:0 4px">
+        <span class="hc-toggle-icon" style="font-size:10px;color:var(--gray-400)">▶</span>
+      </td>
+      <td><strong>${esc(rep.courseName ?? rep.title)}</strong>${subjCount}</td>
+      <td>${esc(rep.instructorName ?? "–")}</td>
+      <td>${rep.hours ? `${rep.hours}시간` : "–"}</td>
+      <td style="white-space:nowrap">${period}</td>
+      <td style="white-space:nowrap">${rep.completedAt ? formatDate(rep.completedAt) : "–"}</td>
+      <td>${subType}</td>
+      <td style="white-space:nowrap">${rep.nextDueDate ? formatDate(rep.nextDueDate) : "–"}</td>
+      <td style="white-space:nowrap">${days}</td>
+      <td><span class="chip chip--${tone}">${esc(rep.dueStatusLabel ?? DUE_STATUS_LABELS[rep.dueStatus] ?? "–")}</span></td>
+      <td>${esc(rep.note || "–")}</td>
+    </tr>`;
+
+  // ── 펼침 상세 (기본 숨김)
+  const detailRows = members.map((m) => {
+    const mPeriod = m.startDate
+      ? (m.endDate ? `${formatDate(m.startDate)} ~ ${formatDate(m.endDate)}` : formatDate(m.startDate))
+      : "–";
+    const canEditManual = isAdmin && m._source === "manual";
+    const adminBtns = isAdmin
+      ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">
+           ${canEditManual ? `<button type="button" class="btn btn--ghost btn--sm hc-edit-history" data-history-id="${esc(m.historyId ?? "")}">수정</button>` : ""}
+           <button type="button" class="btn btn--ghost btn--sm hc-delete-history"
+             data-source="${esc(m._source)}"
+             data-session-id="${esc(m.sessionId ?? "")}"
+             data-training-id="${esc(m.trainingId ?? "")}"
+             data-history-id="${esc(m.historyId ?? "")}">삭제</button>
+         </div>`
+      : "";
+
+    return `
+      <tr data-group-detail="${gid}" style="display:none;background:var(--gray-50)">
+        <td style="border-left:3px solid var(--blue-400,#60a5fa)"></td>
+        <td colspan="10" style="padding:var(--space-2) var(--space-3)">
+          <div style="display:flex;flex-wrap:wrap;gap:var(--space-4);font-size:var(--text-sm)">
+            <div>
+              <span style="color:var(--gray-500);font-size:11px">수료일</span><br/>
+              <strong>${m.completedAt ? formatDate(m.completedAt) : "–"}</strong>
+            </div>
+            <div>
+              <span style="color:var(--gray-500);font-size:11px">교육기간</span><br/>${mPeriod}
+            </div>
+            <div>
+              <span style="color:var(--gray-500);font-size:11px">강사</span><br/>${esc(m.instructorName ?? "–")}
+            </div>
+            <div>
+              <span style="color:var(--gray-500);font-size:11px">시간</span><br/>${m.hours ? `${m.hours}시간` : "–"}
+            </div>
+            <div>
+              <span style="color:var(--gray-500);font-size:11px">초기/보수</span><br/>${_stageLabel(m.subType)}
+            </div>
+            <div>
+              <span style="color:var(--gray-500);font-size:11px">결과</span><br/>${esc(m.result || (m.completionStatus === "completed" ? "PASS" : "–"))}
+            </div>
+            ${m.subjectName && m.subjectName !== (m.courseName ?? m.title)
+              ? `<div><span style="color:var(--gray-500);font-size:11px">교육과목</span><br/>${esc(m.subjectName)}</div>`
+              : ""}
+            ${m.note ? `<div><span style="color:var(--gray-500);font-size:11px">비고</span><br/>${esc(m.note)}</div>` : ""}
+          </div>
+          ${adminBtns}
+        </td>
+      </tr>`;
+  }).join("");
+
+  return repRow + detailRows;
+}
+
+function _stageLabel(subType) {
+  if (!subType) return "–";
+  if (subType === "initial")   return "초기";
+  if (subType === "recurring" || subType === "recurrent") return "보수";
+  return esc(subType);
 }
 
 function toInputDate(value) {

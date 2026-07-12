@@ -637,6 +637,19 @@
   background: var(--gray-50);
 }
 
+/* 그룹 대표 행 */
+.hc-wrap .hc-section-table .hc-group-toggle:hover {
+  background: var(--blue-50, #eff6ff);
+}
+.hc-wrap .hc-section-table .hc-group-toggle td {
+  user-select: none;
+}
+
+/* 펼침 상세 행 */
+.hc-wrap .hc-section-table tr[data-group-detail] td {
+  border-top: none;
+}
+
 @media (max-width: 1100px) {
   .detail-layout {
     grid-template-columns: 1fr;
