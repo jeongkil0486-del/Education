@@ -448,15 +448,19 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
     const effectiveCycle = globalCycleMonths || itemCycle || Number(lastRec?.cycleMonths ?? 0) || 0;
 
     // applyDueMetadata 적용
+    const initialOnly = Boolean(initialDate && lastDate && initialDate === lastDate);
     const dueRow = lastDate ? applyDueMetadata([{
       completedAt: new Date(lastDate).getTime(),
       cycleMonths: effectiveCycle,
+      subType: initialOnly ? "initial" : "recurrent",
     }])[0] : null;
 
     // daysRemaining 기반 직접 상태 결정
     let dueStatus, dueStatusLabel, daysRemaining, nextDueDate;
     if (!lastDate) {
       dueStatus = "none"; dueStatusLabel = "미이수"; daysRemaining = null; nextDueDate = null;
+    } else if (initialOnly) {
+      dueStatus = "not_applicable"; dueStatusLabel = "주기 미적용"; daysRemaining = null; nextDueDate = null;
     } else if (!effectiveCycle) {
       dueStatus = "unconfigured"; dueStatusLabel = "주기 미설정"; daysRemaining = null; nextDueDate = null;
     } else {

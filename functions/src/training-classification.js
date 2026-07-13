@@ -73,6 +73,20 @@ function standardCourse(courseName, trainingType) {
 function classifyTraining(input = {}) {
   const rawCourseName = text(input.courseName || input.title || input.subjectName);
   const rawTrainingType = normalizeTrainingType(input.trainingType);
+  if (input.classificationOverride === true && rawTrainingType) {
+    const subType = normalizeStage(input.subType, input.educationStage, input.initialOrRecurrent);
+    const canonicalCourseName = text(input.canonicalCourseName || rawCourseName);
+    return {
+      canonicalCourseName,
+      canonicalCourseKey: text(input.canonicalCourseKey) || `${rawTrainingType}_${key(canonicalCourseName) || "moved"}`,
+      trainingType: rawTrainingType,
+      subType,
+      sectionKey: text(input.sectionKey) || (rawTrainingType === "job"
+        ? subType === "initial" ? "job_initial" : "job_recurring"
+        : rawTrainingType),
+      stageSource: "override",
+    };
+  }
   const standard = standardCourse(rawCourseName, rawTrainingType);
   const explicitStage = normalizeStage(input.subType, input.educationStage, input.educationType, input.initialOrRecurrent, input.trainingPhase);
   const subType = standard.subType || explicitStage;

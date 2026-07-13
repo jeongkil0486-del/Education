@@ -9,7 +9,7 @@ import {
   DUE_STATUS_LABELS,
 } from "../services/training-service.js";
 import { authStore, ROLES } from "../core/auth.js";
-import { deleteEmployeeHistory, upsertManualTrainingHistory, resetSelectedManualTrainingHistories } from "../core/admin-api.js";
+import { deleteEmployeeHistory, upsertManualTrainingHistory, resetSelectedManualTrainingHistories, moveEmployeeHistoryCourse } from "../core/admin-api.js";
 import {
   exportEmployeeHistoryCard,
 } from "../services/history-card-export.js";
@@ -58,9 +58,12 @@ let S = {
   items:              [],
   dueStatusFilter:    "",
 };
+const MOVABLE_SECTION_KEYS = new Set(["job_initial", "job_recurring", "legal", "online", "other"]);
 const historyCardSortBySection = Object.fromEntries(
   SECTION_ORDER.map((sectionKey) => [sectionKey, { key: null, direction: "none" }])
 );
+const historyMoveGroups = new Map();
+let activeHistoryMoveId = "";
 
 /* ──────────────────────────────────────────────────────────
    render
@@ -550,6 +553,7 @@ function sortableHistoryCardHeader(sectionKey, key, label) {
 function renderSections(rows) {
   const el = document.getElementById("hc-sections");
   if (!el) return;
+  historyMoveGroups.clear();
 
   // 섹션별 그룹 구성
   const sectionMap = {};
@@ -562,7 +566,7 @@ function renderSections(rows) {
     const isAdmin = authStore.role === ROLES.HQ_ADMIN;
 
     return `
-      <div class="card" style="margin-bottom:var(--space-4)">
+      <div class="card hc-section-card" data-hc-drop-section="${esc(secKey)}" style="margin-bottom:var(--space-4);transition:outline-color .15s,background-color .15s">
         <div class="card__header" style="background:var(--gray-50);border-bottom:1px solid var(--gray-200)">
           <div class="card__title" style="font-size:var(--text-sm)">
             ${esc(SECTION_LABELS[secKey])}
@@ -601,7 +605,8 @@ function renderSections(rows) {
 
   // Accordion 토글 이벤트 — 1단계: 과정
   el.querySelectorAll(".hc-group-toggle").forEach((btn) => {
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", (event) => {
+      if (event.target.closest(".hc-course-move-handle")) return;
       const gid  = btn.dataset.gid;
       const icon = btn.querySelector(".hc-toggle-icon");
       const isOpen = icon?.textContent === "▼";
@@ -643,6 +648,57 @@ function renderSections(rows) {
     });
   });
 
+  if (authStore.role === ROLES.HQ_ADMIN) {
+    const clearDropHighlights = () => {
+      el.querySelectorAll(".hc-section-card").forEach((card) => {
+        card.style.outline = "";
+        card.style.backgroundColor = "";
+      });
+    };
+    el.querySelectorAll(".hc-course-move-handle").forEach((handle) => {
+      handle.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openMoveCourseModal(handle.dataset.moveId);
+      });
+      handle.addEventListener("dragstart", (event) => {
+        event.stopPropagation();
+        activeHistoryMoveId = handle.dataset.moveId ?? "";
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", activeHistoryMoveId);
+      });
+      handle.addEventListener("dragend", () => {
+        activeHistoryMoveId = "";
+        clearDropHighlights();
+      });
+    });
+    el.querySelectorAll(".hc-section-card").forEach((card) => {
+      card.addEventListener("dragover", (event) => {
+        const targetSection = card.dataset.hcDropSection;
+        const group = historyMoveGroups.get(activeHistoryMoveId);
+        if (!MOVABLE_SECTION_KEYS.has(targetSection) || !group || group.sourceSection === targetSection) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        clearDropHighlights();
+        card.style.outline = "2px dashed var(--brand-500,#3b82f6)";
+        card.style.backgroundColor = "var(--brand-50,#eff6ff)";
+      });
+      card.addEventListener("dragleave", (event) => {
+        if (!card.contains(event.relatedTarget)) {
+          card.style.outline = "";
+          card.style.backgroundColor = "";
+        }
+      });
+      card.addEventListener("drop", (event) => {
+        event.preventDefault();
+        const moveId = event.dataTransfer?.getData("text/plain") || activeHistoryMoveId;
+        const targetSection = card.dataset.hcDropSection;
+        activeHistoryMoveId = "";
+        clearDropHighlights();
+        if (moveId && MOVABLE_SECTION_KEYS.has(targetSection)) openMoveCourseModal(moveId, targetSection);
+      });
+    });
+  }
+
   // 수정 버튼
   if (authStore.role === ROLES.HQ_ADMIN) {
     el.querySelectorAll(".hc-edit-history").forEach((btn) => {
@@ -680,6 +736,65 @@ function renderSections(rows) {
   }
 }
 
+function openMoveCourseModal(moveId, preferredTarget = "") {
+  if (authStore.role !== ROLES.HQ_ADMIN || !S.selectedEmployeeId) return;
+  const group = historyMoveGroups.get(moveId);
+  if (!group) {
+    toast.error("이동할 과정을 찾을 수 없습니다.");
+    return;
+  }
+  const targets = [...MOVABLE_SECTION_KEYS].filter((sectionKey) => sectionKey !== group.sourceSection);
+  const selectedTarget = targets.includes(preferredTarget) ? preferredTarget : targets[0];
+  const courseName = group.rep.courseName ?? group.rep.title ?? "과정";
+  modal.open({
+    title: "교육과정 이동",
+    body: `<div style="display:flex;flex-direction:column;gap:var(--space-4)">
+      <div><strong>'${esc(courseName)}'</strong> 과정을 <strong>'${esc(SECTION_LABELS[group.sourceSection])}'</strong>에서 다른 섹션으로 이동합니다.</div>
+      <div class="form-group"><label class="form-label form-label--required">이동할 섹션</label>
+        <select class="form-control" id="hc-move-target">
+          ${targets.map((sectionKey) => `<option value="${esc(sectionKey)}" ${sectionKey === selectedTarget ? "selected" : ""}>${esc(SECTION_LABELS[sectionKey])}</option>`).join("")}
+        </select>
+      </div>
+      <div style="padding:var(--space-3);background:var(--gray-50);border-radius:var(--radius-md);font-size:var(--text-sm)">
+        이 과정에 포함된 <strong>${group.members.length}개 세부 이력</strong>의 교육유형이 함께 변경됩니다. 세부 과목과 강사·시간·기간·수료일·결과·비고는 유지됩니다.
+      </div>
+    </div>`,
+    actions: [
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      { label: "이동", variant: "primary", onClick: async () => {
+        const targetSection = document.getElementById("hc-move-target")?.value ?? "";
+        if (!MOVABLE_SECTION_KEYS.has(targetSection) || targetSection === group.sourceSection) {
+          toast.error("다른 이동 대상 섹션을 선택해 주세요.");
+          return;
+        }
+        const records = group.members.map((row) => ({
+          source: row._source,
+          historyId: row.historyId ?? "",
+          sessionId: row.sessionId ?? "",
+          trainingId: row.trainingId ?? "",
+        }));
+        modal.setLoading("이동", true);
+        try {
+          const result = await moveEmployeeHistoryCourse({
+            uid: S.selectedEmployeeId,
+            courseName,
+            sourceSection: group.sourceSection,
+            targetSection,
+            records,
+          });
+          toast.success(result?.message || `${group.members.length}건의 교육이력을 이동했습니다.`);
+          modal.close();
+          await loadCard(S.selectedEmployeeId);
+        } catch (err) {
+          console.error("[history-cards] move course failed", err);
+          toast.error(err?.message || "교육과정 이동에 실패했습니다.");
+          modal.setLoading("이동", false);
+        }
+      } },
+    ],
+  });
+}
+
 /**
  * 그룹 대표 행 + 펼침 상세 행 생성
  */
@@ -688,7 +803,9 @@ function renderSections(rows) {
  */
 function fmtDateDot(ms) {
   if (!ms) return "–";
-  const d = new Date(Number(ms));
+  const numeric = Number(ms);
+  const d = new Date(Number.isFinite(numeric) ? numeric : ms);
+  if (Number.isNaN(d.getTime())) return "–";
   return `${d.getFullYear()}.${String(d.getMonth()+1).padStart(2,"0")}.${String(d.getDate()).padStart(2,"0")}.`;
 }
 
@@ -697,8 +814,24 @@ function fmtDateDot(ms) {
  */
 function dateKey(ms) {
   if (!ms) return "";
-  const d = new Date(Number(ms));
+  const numeric = Number(ms);
+  const d = new Date(Number.isFinite(numeric) ? numeric : ms);
+  if (Number.isNaN(d.getTime())) return "";
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+
+function historyDateValue(row) {
+  return [row?.completedAt, row?.endDate, row?.startDate]
+    .find((value) => value !== null && value !== undefined && value !== "" && value !== 0) ?? null;
+}
+
+function countCourseOccurrences(members) {
+  const keys = new Set();
+  members.forEach((member, index) => {
+    const key = dateKey(historyDateValue(member));
+    keys.add(key || `missing:${index}`);
+  });
+  return keys.size;
 }
 
 /**
@@ -707,15 +840,16 @@ function dateKey(ms) {
  */
 function groupByDate(members) {
   const map = new Map();
-  for (const m of members) {
-    const dk = dateKey(m.completedAt);
+  members.forEach((m, index) => {
+    const dateValue = historyDateValue(m);
+    const dk = dateKey(dateValue) || `missing:${index}`;
     if (!map.has(dk)) map.set(dk, []);
     map.get(dk).push(m);
-  }
+  });
   return [...map.entries()]
     .sort(([a], [b]) => b.localeCompare(a))   // 최신 먼저
     .map(([dk, items]) => ({
-      dateLabel: items[0]?.completedAt ? fmtDateDot(items[0].completedAt) : dk,
+      dateLabel: historyDateValue(items[0]) ? fmtDateDot(historyDateValue(items[0])) : "날짜 미상",
       dk,
       items,
     }));
@@ -746,6 +880,8 @@ function dateSummary(items) {
 function courseGroupRows(group, gi, secKey, isAdmin) {
   const { rep, members } = group;
   const gid = `g_${secKey}_${gi}`;
+  const moveId = `${secKey}:${gi}`;
+  if (isAdmin) historyMoveGroups.set(moveId, { sourceSection: secKey, rep, members });
 
   // ── 대표 행 정보
   const period = rep.startDate
@@ -758,14 +894,14 @@ function courseGroupRows(group, gi, secKey, isAdmin) {
   const tone    = rep.dueStatus === "overdue" ? "danger"
                 : rep.dueStatus === "soon"    ? "warning"
                 : rep.dueStatus === "normal"  ? "success" : "neutral";
-  const subjCount = members.length > 1
-    ? `<span style="color:var(--gray-400);font-size:11px;margin-left:4px">(${members.length}건)</span>`
-    : "";
+  const occurrenceCount = countCourseOccurrences(members);
+  const subjCount = `<span style="color:var(--gray-400);font-size:11px;margin-left:4px">(${occurrenceCount}건)</span>`;
 
   // ── 1단계: 과정 대표 행
   const repRow = `
     <tr style="cursor:pointer" class="hc-group-toggle" data-gid="${gid}">
       <td style="text-align:center;padding:0 4px">
+        ${isAdmin ? `<button type="button" class="hc-course-move-handle" draggable="true" data-move-id="${esc(moveId)}" aria-label="과정 이동" title="끌어서 섹션 이동 · 클릭하면 이동 메뉴" style="border:0;background:transparent;color:var(--gray-400);cursor:grab;padding:4px 2px;font-size:13px;line-height:1">⋮⋮</button>` : ""}
         <span class="hc-toggle-icon" style="font-size:10px;color:var(--gray-400)">▶</span>
       </td>
       <td><strong>${esc(rep.courseName ?? rep.title)}</strong>${subjCount}</td>

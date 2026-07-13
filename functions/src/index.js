@@ -849,6 +849,127 @@ exports.deleteEmployeeHistory = onCall(OPTS, async (request) => {
   return { uid, source, sessionId, trainingId, historyId, message: "교육이력 삭제 완료" };
 });
 
+const HISTORY_MOVE_TARGETS = {
+  job_initial: { trainingType: "job", subType: "initial", courseName: "직무초기교육", canonicalCourseKey: "job_initial" },
+  job_recurring: { trainingType: "job", subType: "recurrent", courseName: "직무보수교육", canonicalCourseKey: "job_recurrent" },
+  legal: { trainingType: "legal", subType: "" },
+  online: { trainingType: "online", subType: "" },
+  other: { trainingType: "other", subType: "" },
+};
+
+function historyMoveCourseKey(trainingType, courseName) {
+  const nameKey = normalizeText(courseName)
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^a-z0-9가-힣]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return `${trainingType}_${nameKey || "moved"}`;
+}
+
+exports.moveEmployeeHistoryCourse = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await ensureHQAdminProfile(request.auth.uid);
+  const uid = normalizeText(request.data?.uid);
+  const sourceSection = normalizeText(request.data?.sourceSection);
+  const targetSection = normalizeText(request.data?.targetSection);
+  const requestedCourseName = normalizeText(request.data?.courseName);
+  const records = Array.isArray(request.data?.records) ? request.data.records : [];
+  const target = HISTORY_MOVE_TARGETS[targetSection];
+
+  if (!uid || !target || !records.length ||
+      !["job_initial", "job_recurring", "legal", "online", "external", "other"].includes(sourceSection) ||
+      sourceSection === targetSection) {
+    throw new HttpsError("invalid-argument", "직원, 대상 섹션 및 이동할 이력이 필요합니다.");
+  }
+  if (records.length > 500) {
+    throw new HttpsError("invalid-argument", "한 번에 최대 500건까지 이동할 수 있습니다.");
+  }
+
+  const employeeSnap = await db.ref(`users/${uid}`).get();
+  if (!employeeSnap.exists() || employeeSnap.val()?.role !== "employee") {
+    throw new HttpsError("not-found", "직원 정보를 찾을 수 없습니다.");
+  }
+  assertSameCompany(actor, employeeSnap.val());
+
+  const uniqueRecords = [];
+  const seen = new Set();
+  for (const raw of records) {
+    const source = normalizeText(raw?.source).toLowerCase();
+    const id = source === "manual"
+      ? normalizeText(raw?.historyId)
+      : source === "session"
+        ? normalizeText(raw?.sessionId)
+        : source === "legacy"
+          ? normalizeText(raw?.trainingId)
+          : "";
+    if (!id || !["manual", "session", "legacy"].includes(source)) {
+      throw new HttpsError("invalid-argument", "이동할 이력 식별자가 올바르지 않습니다.");
+    }
+    const identity = `${source}:${id}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    uniqueRecords.push({ source, id });
+  }
+
+  const loaded = await Promise.all(uniqueRecords.map(async ({ source, id }) => {
+    const paths = source === "manual"
+      ? [`manualTrainingHistories/${id}`, `userManualTrainingHistories/${uid}/${id}`]
+      : source === "session"
+        ? [`sessionCompletions/${id}/${uid}`, `userSessionCompletions/${uid}/${id}`]
+        : [`trainingCompletions/${id}/${uid}`, `userCompletions/${uid}/${id}`];
+    const [primarySnap, mirrorSnap] = await Promise.all(paths.map((path) => db.ref(path).get()));
+    const record = primarySnap.exists() ? primarySnap.val() : mirrorSnap.exists() ? mirrorSnap.val() : null;
+    if (!record) throw new HttpsError("not-found", `이동할 ${source} 이력을 찾을 수 없습니다.`);
+    if (record.uid && normalizeText(record.uid) !== uid) {
+      throw new HttpsError("permission-denied", "다른 직원의 이력은 이동할 수 없습니다.");
+    }
+    return { source, id, paths, record };
+  }));
+
+  const updates = {};
+  const sourceCounts = { manual: 0, session: 0, legacy: 0 };
+  const now = Date.now();
+  for (const entry of loaded) {
+    const originalCourseName = requestedCourseName || normalizeText(
+      entry.record.courseName || entry.record.title || entry.record.trainingTitle || entry.record.subjectName
+    );
+    const courseName = target.courseName || originalCourseName;
+    const canonicalCourseKey = target.canonicalCourseKey || historyMoveCourseKey(target.trainingType, courseName);
+    const patch = {
+      trainingType: target.trainingType,
+      subType: target.subType,
+      educationStage: target.subType,
+      initialOrRecurrent: target.subType,
+      sectionKey: targetSection,
+      courseName,
+      title: courseName,
+      canonicalCourseName: courseName,
+      canonicalCourseKey,
+      classificationOverride: true,
+      classificationOverrideAt: now,
+      classificationOverrideBy: request.auth.uid,
+      updatedAt: now,
+      updatedBy: request.auth.uid,
+      updatedByName: actor.name ?? "",
+    };
+    const updatedRecord = { ...entry.record, ...patch };
+    if (entry.source === "manual") updatedRecord.dedupeKey = buildManualHistoryDedupeKey(updatedRecord);
+    for (const path of entry.paths) updates[path] = updatedRecord;
+    sourceCounts[entry.source] += 1;
+  }
+
+  await db.ref().update(updates);
+  return {
+    uid,
+    sourceSection,
+    targetSection,
+    updatedCount: loaded.length,
+    firebasePathCount: Object.keys(updates).length,
+    sourceCounts,
+    message: `${loaded.length}건의 교육이력을 이동했습니다.`,
+  };
+});
+
 
 exports.updateEmployeeManagementProfile = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);

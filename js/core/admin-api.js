@@ -15,6 +15,7 @@ const updateEmployeeManagementProfileCallable  = httpsCallable(functions, "updat
 const resetSelectedManualTrainingHistoriesCallable = httpsCallable(functions, "resetSelectedManualTrainingHistories");
 const saveEducationCycleConfigCallable         = httpsCallable(functions, "saveEducationCycleConfig");
 const replaceEmployeeManualTrainingHistoriesCallable = httpsCallable(functions, "replaceEmployeeManualTrainingHistories");
+const moveEmployeeHistoryCourseCallable = httpsCallable(functions, "moveEmployeeHistoryCourse");
 
 export async function createEmployeeAccounts(payload) {
   const result = await createEmployeesCallable(payload);
@@ -150,6 +151,11 @@ export async function saveEducationCycleConfig(payload) {
  */
 export async function replaceEmployeeManualTrainingHistories(payload) {
   const result = await replaceEmployeeManualTrainingHistoriesCallable(payload);
+  return result.data;
+}
+
+export async function moveEmployeeHistoryCourse(payload) {
+  const result = await moveEmployeeHistoryCourseCallable(payload);
   return result.data;
 }
 

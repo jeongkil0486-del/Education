@@ -127,6 +127,7 @@ export const DUE_STATUS_LABELS = {
   normal: "정상",
   soon: "재교육 임박",
   overdue: "기한 초과",
+  not_applicable: "주기 미적용",
   unconfigured: "주기 미설정",
   history: "과거 이력",
 };
@@ -1059,6 +1060,22 @@ export async function getItemDetail(itemId) {
 ────────────────────────────────────────────────────────── */
 export function applyDueMetadata(rows, now = Date.now()) {
   return rows.map((row) => {
+    const stage = normalizeTrainingSubType(
+      row.subType,
+      row.educationStage,
+      row.initialOrRecurrent,
+      row.educationType
+    );
+    if (stage === "initial") {
+      return {
+        ...row,
+        dueStatus: "not_applicable",
+        dueStatusLabel: DUE_STATUS_LABELS.not_applicable,
+        nextDueDate: null,
+        daysRemaining: null,
+      };
+    }
+
     // 수료일이 없으면 상태 계산 불가
     if (!row.completedAt) {
       return {
@@ -1130,6 +1147,15 @@ function historyCanonicalCourse(row) {
   const courseName = String(row.courseName ?? row.title ?? row.subjectName ?? "").trim();
   const courseKey = courseName.normalize("NFKC").toLowerCase().replace(/[^a-z0-9가-힣]+/g, "");
   const trainingType = normalizeTrainingType(row.trainingType);
+  if (row.classificationOverride && ["job", "legal", "online", "other"].includes(trainingType)) {
+    const stage = normalizeTrainingSubType(row.subType, row.educationStage, row.initialOrRecurrent);
+    return {
+      name: String(row.canonicalCourseName ?? courseName).trim(),
+      key: row.canonicalCourseKey || `${trainingType}_${courseKey || "moved"}`,
+      type: trainingType,
+      stage,
+    };
+  }
   const isJob = trainingType === "job" || /직무|initial|recurrent|recurr|refresher/.test(courseKey);
   const match = (values) => values.includes(courseKey);
   if (isJob && match(["직무초기교육", "직무초기", "초기직무", "초기", "입문", "입문교육", "initial"])) return { name: "직무초기교육", key: "job_initial", type: "job", stage: "initial" };
@@ -1261,7 +1287,7 @@ export async function buildEmployeeHistoryRowsV2(uid) {
     const training   = trainingMap.get(trainingId) ?? {};
     const assignment = assignmentMap.get(trainingId) ?? {};
     const completion = completionMap.get(trainingId) ?? {};
-    const trainingType = normalizeTrainingType(training.trainingType);
+    const trainingType = normalizeTrainingType(completion.trainingType ?? training.trainingType);
 
     return {
       _source:         "legacy",         // 기존 trainings 기반임을 표시
@@ -1269,27 +1295,31 @@ export async function buildEmployeeHistoryRowsV2(uid) {
       trainingId,
       sessionId:       null,
       historyId:       null,
-      subjectCode:     training.subjectCode ?? "",
-      subjectName:     training.subjectName ?? training.title ?? assignment.trainingTitle ?? "",
-      courseName:      training.courseName ?? training.title ?? assignment.trainingTitle ?? "",
-      hours:           Number(training.hours ?? training.defaultHours ?? 0),
-      cycleMonths:     Math.max(0, Number(training.cycleMonths ?? 0) || 0),
+      classificationOverride: completion.classificationOverride === true,
+      canonicalCourseName: completion.canonicalCourseName ?? "",
+      canonicalCourseKey: completion.canonicalCourseKey ?? "",
+      sectionKey:       completion.sectionKey ?? "",
+      subjectCode:     completion.subjectCode ?? training.subjectCode ?? "",
+      subjectName:     completion.subjectName ?? training.subjectName ?? training.title ?? assignment.trainingTitle ?? "",
+      courseName:      completion.courseName ?? training.courseName ?? training.title ?? assignment.trainingTitle ?? "",
+      hours:           Number(completion.hours ?? training.hours ?? training.defaultHours ?? 0),
+      cycleMonths:     Math.max(0, Number(completion.cycleMonths ?? training.cycleMonths ?? 0) || 0),
       employeeName:    user?.name ?? "-",
       empNo:           user?.empNo ?? "-",
       companyName:     user?.companyName ?? training.companyName ?? "-",
       branchName:      user?.branchName ?? assignment.branchName ?? "-",
-      title:           training.title ?? assignment.trainingTitle ?? "-",
+      title:           completion.title ?? training.title ?? assignment.trainingTitle ?? "-",
       trainingType,
       trainingTypeLabel: getTrainingTypeLabel(trainingType),
-      subType:         training.subType ?? "",
+      subType:         completion.subType ?? completion.educationStage ?? training.subType ?? "",
       assignedAt:      assignment.assignedAt ?? null,
-      startDate:       training.startDate ?? null,
-      endDate:         training.endDate   ?? null,
+      startDate:       completion.startDate ?? training.startDate ?? null,
+      endDate:         completion.endDate ?? training.endDate ?? null,
       completedAt:     completion.completedAt ?? null,
       signedAt:        completion.signedAt ?? null,
       signatureUrl:    completion.signatureUrl ?? "",
       completionStatus: completion.status ?? assignment.status ?? "pending",
-      instructorName:  training.instructorName ?? "-",
+      instructorName:  completion.instructorName ?? training.instructorName ?? "-",
       deadline:        assignment.deadline ?? training.deadline ?? null,
       note:            completion.note ?? "",
     };
@@ -1305,6 +1335,10 @@ export async function buildEmployeeHistoryRowsV2(uid) {
       sessionId:       sc.sessionId,
       itemId:          sc.itemId ?? "",
       historyId:       null,
+      classificationOverride: sc.classificationOverride === true,
+      canonicalCourseName: sc.canonicalCourseName ?? "",
+      canonicalCourseKey: sc.canonicalCourseKey ?? "",
+      sectionKey:       sc.sectionKey ?? "",
       subjectCode:     sc.subjectCode ?? "",
       subjectName:     sc.subjectName ?? sc.trainingTitle ?? "",
       courseName:      sc.courseName ?? sc.trainingTitle ?? "",
