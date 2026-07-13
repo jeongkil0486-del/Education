@@ -1170,6 +1170,7 @@ function assertSameCompany(actor, employee) {
 
 function normalizeTrainingTypeValue(value) {
   const raw = normalizeText(value).toLowerCase();
+  if (!raw) return "";   // 빈 값은 "" 반환 — 필터 없음으로 처리
   const map = {
     job: "job", "직무교육": "job", "직무 교육": "job",
     legal: "legal", "법정교육": "legal", "법정 교육": "legal",

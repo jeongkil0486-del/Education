@@ -56,7 +56,8 @@ export const DUE_STATUS_LABELS = {
 
 const LEGACY_TRAINING_TYPE_MAP = {
   initial: "job",
-  recurring: "legal",
+  recurring: "job",    // "recurring"은 직무보수 — 이전 "legal" 오매핑 수정
+  recurrent: "job",    // 동의어 추가
   external: "external",
   online: "online",
   other: "other",
