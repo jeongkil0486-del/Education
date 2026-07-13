@@ -200,6 +200,15 @@ function normPeriod(v) {
   if (!v) return { startDate: null, endDate: null };
   const s = String(v).trim();
 
+  // 줄바꿈/범위/쉼표로 나열된 모든 완전한 날짜를 수집한다.
+  const dates = Array.from(s.matchAll(/(\d{4})[.\-/\s]+(\d{1,2})[.\-/\s]+(\d{1,2})/g))
+    .map((m) => normDate(`${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`))
+    .filter(Boolean)
+    .sort((a, b) => a - b);
+  if (dates.length) {
+    return { startDate: dates[0], endDate: dates.length > 1 ? dates[dates.length - 1] : null };
+  }
+
   // YYYY.MM.DD\nYYYY.MM.DD 또는 YYYY.MM.DD~YYYY.MM.DD (전체 연도)
   const m0 = s.match(
     /(\d{4})[.\-\/\s]+(\d{1,2})[.\-\/\s]+(\d{1,2})\s*[~–\-\n\/]\s*(\d{4})[.\-\/\s]+(\d{1,2})[.\-\/\s]+(\d{1,2})/
@@ -234,7 +243,9 @@ function normName(v) {
 // ── 사번 정규화 (탭·공백 제거)
 function normEmpNo(v) {
   if (!v) return "";
-  return String(v).replace(/[\t\s]/g, "").toUpperCase();
+  return String(v).normalize("NFKC")
+    .replace(/[\s\u00a0\u200b-\u200d\u2060\ufeff]/g, "")
+    .toUpperCase();
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -497,6 +508,7 @@ function _parseBlock(sheet, headerRow, dataEnd, trainingType, { splitSubjects = 
 
     for (const subjectName of subjects) {
       rows.push({
+        sourceRowNumber: r + 1,
         employeeName: empInfo.name,
         empNo:        empInfo.empNo,
         trainingType,
@@ -606,6 +618,7 @@ function _parseTAS(sheet, trainingType) {
 
     const subjectName = subjectRaw != null ? String(subjectRaw).trim() : "";
     rows.push({
+      sourceRowNumber: r + 1,
       employeeName: empInfo.name,
       empNo:        empInfo.empNo,
       trainingType,
@@ -803,9 +816,15 @@ export async function analyzeExcel(file) {
 
   const allRows    = [];
   const parsersUsed = [];
+  const parserDiagnostics = [];
 
   for (const sheetRaw of sheetRaws) {
     const parser = detectParser(sheetRaw);
+    const headerRow = findHeaderRow(sheetRaw);
+    const candidates = PARSERS.map((candidate) => ({
+      id: candidate.id,
+      matched: Boolean(candidate.detect(sheetRaw)),
+    }));
     if (!parsersUsed.includes(parser.name)) parsersUsed.push(parser.name);
 
     // 시트 이름에서 교육유형 판별
@@ -819,6 +838,24 @@ export async function analyzeExcel(file) {
     } else {
       rows = parser.parse(sheetRaw, trainingType);
     }
+    const colMap = headerRow >= 0 ? buildColMap(sheetRaw, headerRow) : {};
+    const importTracePrefix = `${Date.now().toString(36)}-${sheetRaw.sheetName}`;
+    rows = rows.map((row, index) => ({
+      ...row,
+      sourceRowNumber: row.sourceRowNumber ?? (headerRow + index + 2),
+      sourceSheetName: sheetRaw.sheetName,
+      importTraceId: `${importTracePrefix}-${index + 1}`,
+    }));
+    parserDiagnostics.push({
+      sheetName: sheetRaw.sheetName,
+      detectedTemplate: parser.id,
+      finalParser: parser.id,
+      candidates,
+      headerRow: headerRow >= 0 ? headerRow + 1 : null,
+      dataStartRow: headerRow >= 0 ? headerRow + 2 : null,
+      columnMapping: colMap,
+      parsedCount: rows.length,
+    });
     allRows.push(...rows);
   }
 
@@ -830,7 +867,8 @@ export async function analyzeExcel(file) {
     if (info.name || info.empNo) { empInfo = info; break; }
   }
 
-  return { empInfo, rows: allRows, parsersUsed, fileName: file.name };
+  console.info("[excel-import-engine] parser diagnostics", parserDiagnostics);
+  return { empInfo, rows: allRows, parsersUsed, parserDiagnostics, fileName: file.name };
 }
 
 export function validateAndPreview(rows, lookups) {

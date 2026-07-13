@@ -896,7 +896,23 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
   const subjectCode = normalizeText(request.data?.subjectCode);
   const subjectName = normalizeText(request.data?.subjectName);
   const title = normalizeText(request.data?.title || request.data?.courseName);
-  const sourceFilter = normalizeText(request.data?.source || request.data?.historySource).toLowerCase();
+  const ALLOWED_RESET_SOURCES = new Set(["manual", "manual_excel", "history_excel"]);
+  const RESET_SCOPE_SOURCES = {
+    manual: ["manual"],
+    excel: ["manual_excel", "history_excel"],
+    all: ["manual", "manual_excel", "history_excel"],
+  };
+  const scope = normalizeText(request.data?.scope).toLowerCase();
+  const requestedSourceValues = normalizeStringArray(request.data?.sources)
+    .concat(normalizeText(request.data?.source || request.data?.historySource))
+    .map((value) => normalizeText(value).toLowerCase())
+    .filter(Boolean);
+  const requestedSources = Array.from(new Set(
+    (requestedSourceValues.length ? requestedSourceValues : (RESET_SCOPE_SOURCES[scope] ?? []))
+  ));
+  if (requestedSources.some((source) => !ALLOWED_RESET_SOURCES.has(source))) {
+    throw new HttpsError("invalid-argument", "허용되지 않은 개인이력 source가 포함되어 있습니다.");
+  }
   const allowAllForUser = Boolean(request.data?.resetAllForUser || request.data?.resetAll || request.data?.all);
 
   const targetHistoryIds = Array.from(new Set([singleHistoryId, ...historyIds].filter(Boolean)));
@@ -909,12 +925,13 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
   const updates = {};
   const deletedHistoryIds = [];
   const deletedByUid = {};
+  const deletedSourceById = {};
 
   const shouldDeleteRecord = (record) => {
     if (!record) return false;
     const recordSource = normalizeText(record.source).toLowerCase();
-    if (recordSource && !["manual", "manual_excel", "history_excel"].includes(recordSource)) return false;
-    if (sourceFilter && recordSource !== sourceFilter) return false;
+    if (!ALLOWED_RESET_SOURCES.has(recordSource)) return false;
+    if (requestedSources.length && !requestedSources.includes(recordSource)) return false;
     if (trainingType && normalizeTrainingTypeValue(record.trainingType) !== trainingType) return false;
     if (subjectCode && normalizeText(record.subjectCode) !== subjectCode) return false;
     if (subjectName && normalizeText(record.subjectName) !== subjectName) return false;
@@ -945,6 +962,7 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
       updates[`manualTrainingHistories/${historyId}`] = null;
       updates[`userManualTrainingHistories/${record.uid}/${historyId}`] = null;
       deletedHistoryIds.push(historyId);
+      deletedSourceById[historyId] = normalizeText(record.source).toLowerCase();
       deletedByUid[record.uid] = (deletedByUid[record.uid] ?? 0) + 1;
     }
   }
@@ -962,7 +980,7 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
       assertSameCompany(actor, employee);
 
       const records = userHistorySnaps[index].val() ?? {};
-      const hasFilter = Boolean(targetHistoryIds.length || trainingType || subjectCode || subjectName || title || sourceFilter);
+      const hasFilter = Boolean(targetHistoryIds.length || trainingType || subjectCode || subjectName || title || requestedSources.length);
       if (!hasFilter && !allowAllForUser) {
         throw new HttpsError("invalid-argument", "선택 초기화 기능은 교육 항목 또는 이력 선택이 필요합니다.");
       }
@@ -974,6 +992,7 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
         updates[`manualTrainingHistories/${historyId}`] = null;
         updates[`userManualTrainingHistories/${targetUid}/${historyId}`] = null;
         deletedHistoryIds.push(historyId);
+        deletedSourceById[historyId] = normalizeText(record.source).toLowerCase();
         deletedByUid[targetUid] = (deletedByUid[targetUid] ?? 0) + 1;
       }
     }
@@ -984,8 +1003,45 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
     await db.ref().update(updates);
   }
 
+  const deletedSourceCounts = { manual: 0, manual_excel: 0, history_excel: 0 };
+  for (const historyId of uniqueDeletedHistoryIds) {
+    const source = deletedSourceById[historyId];
+    if (source in deletedSourceCounts) deletedSourceCounts[source] += 1;
+  }
+
+  const firstUid = targetUids[0] || "";
+  const firstEmployee = firstUid ? (await db.ref(`users/${firstUid}`).get()).val() : null;
+  const countUidRecords = (value, uidValue) => {
+    if (!value || typeof value !== "object") return 0;
+    let count = normalizeText(value.uid || value.employeeUid || value.userUid) === uidValue ? 1 : 0;
+    for (const child of Object.values(value)) {
+      if (child && typeof child === "object") count += countUidRecords(child, uidValue);
+    }
+    return count;
+  };
+  let preservedCompletionCount = 0;
+  if (firstUid) {
+    const completionSnaps = await Promise.all([
+      db.ref("sessionCompletions").get(),
+      db.ref(`userSessionCompletions/${firstUid}`).get(),
+      db.ref("trainingCompletions").get(),
+      db.ref(`userCompletions/${firstUid}`).get(),
+    ]);
+    preservedCompletionCount = countUidRecords(completionSnaps[0].val(), firstUid)
+      + Object.keys(completionSnaps[1].val() ?? {}).length
+      + countUidRecords(completionSnaps[2].val(), firstUid)
+      + Object.keys(completionSnaps[3].val() ?? {}).length;
+  }
   return {
+    employeeUid: firstUid,
+    employeeName: firstEmployee?.name ?? "",
+    scope: scope || (requestedSources.length === 3 ? "all" : "custom"),
+    requestedSources,
     deletedCount: uniqueDeletedHistoryIds.length,
+    deletedManualCount: deletedSourceCounts.manual,
+    deletedManualExcelCount: deletedSourceCounts.manual_excel,
+    deletedHistoryExcelCount: deletedSourceCounts.history_excel,
+    preservedCompletionCount,
     deletedHistoryIds: uniqueDeletedHistoryIds,
     deletedByUid,
     message: uniqueDeletedHistoryIds.length
@@ -1536,10 +1592,14 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
   const usersSnap = await db.ref("users").get();
   const allUsers  = Object.entries(usersSnap.val() ?? {}).map(([uid, u]) => ({ uid, ...u }));
   // empNo: 탭·공백 완전 제거 후 대소문자 무시
+  const normalizeImportEmpNo = (value) => String(value ?? "")
+    .normalize("NFKC")
+    .replace(/[\s\u00a0\u200b-\u200d\u2060\ufeff]/g, "")
+    .toUpperCase();
   const empByNo   = new Map(
     allUsers
       .filter((u) => u.empNo)
-      .map((u) => [String(u.empNo).replace(/[\t\s]/g, "").toLowerCase(), u])
+      .map((u) => [normalizeImportEmpNo(u.empNo).toLowerCase(), u])
   );
   const empByName = new Map();
   for (const u of allUsers) {
@@ -1562,6 +1622,7 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
   let skippedInvalidCount   = 0;
   let unmatchedEmpCount     = 0;
   let matchedExistingCount  = 0;
+  let matchedRecordCount    = 0;
   const errors      = [];
   const parsedCount = rows.length;
 
@@ -1570,7 +1631,7 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
 
   for (const row of rows) {
     // empNo: 탭·공백 완전 제거 (\tT259144 같은 패턴 처리)
-    const empNoRaw   = String(row.empNo ?? row.employeeEmpNo ?? "").replace(/[\t\s]/g, "").toUpperCase();
+    const empNoRaw   = normalizeImportEmpNo(row.empNo ?? row.employeeEmpNo ?? "");
     const empNameRaw = String(row.employeeName ?? row.name ?? "").replace(/\s+/g, " ").trim();
     const trainingType = normalizeTrainingTypeValue(row.trainingType ?? "job");
     const courseName   = normalizeText(row.courseName ?? row.subjectName ?? "");
@@ -1610,18 +1671,19 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
     }
 
     matchedEmpUids.add(employee.uid);
+    matchedRecordCount++;
 
     // 기존 이력 매칭: trainingType + (courseName|subjectName) + completedAt
     const normalize = (s) => String(s ?? "").toLowerCase().replace(/[\s\(\)\[\]·]/g, "");
-    const matchKey  = `${normalize(trainingType)}|${normalize(courseName || subjectName)}|${completedAt}`;
-
     const existingRec = manualAll.find((r) => {
       if (r.uid !== employee.uid) return false;
       const rType  = normalize(r.trainingType ?? "");
       const rCourse = normalize(r.courseName ?? r.title ?? r.subjectName ?? "");
+      const rSubject = normalize(r.subjectCode ?? r.subjectName ?? r.courseName ?? r.title ?? "");
       const rDate  = Number(r.completedAt ?? 0);
       return rType === normalize(trainingType) &&
-             (rCourse === normalize(courseName) || rCourse === normalize(subjectName)) &&
+             rCourse === normalize(courseName || subjectName) &&
+             rSubject === normalize(row.subjectCode || subjectName || courseName) &&
              rDate === completedAt;
     });
 
@@ -1685,6 +1747,9 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
         subType:       detailFields.subType   || "",
         educationStage: detailFields.educationStage || "",
         note:          detailFields.note || "",
+        sourceRowNumber: row.sourceRowNumber ?? null,
+        sourceSheetName: normalizeText(row.sourceSheetName),
+        importTraceId: normalizeText(row.importTraceId),
         cycleMonths:   0,
         source:        "history_excel",
         createdAt:     Date.now(),
@@ -1715,10 +1780,16 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
     parsedCount,
     validCount,
     matchedEmployeeCount: matchedEmpUids.size,
+    matchedRecordCount,
     unmatchedEmployeeCount: unmatchedEmpCount,
     matchedExistingCount,
     updatedCount,
     createdCount,
+    duplicateCount: skippedDuplicateCount,
+    invalidCount: skippedInvalidCount,
+    savedCount: createdCount + updatedCount,
+    firebasePathCount: Object.keys(updates).length,
+    uniqueFirebasePathCount: new Set(Object.keys(updates)).size,
     skippedDuplicateCount,
     skippedInvalidCount,
     // 하위 호환 필드

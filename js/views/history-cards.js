@@ -961,6 +961,9 @@ function openImportExcelModal() {
               educationStage: r.initialOrRecurrent ?? "",
               subType:        r.initialOrRecurrent ?? "",
               note:           String(r.note ?? "").trim(),
+              sourceRowNumber: r.sourceRowNumber ?? null,
+              sourceSheetName: r.sourceSheetName ?? "",
+              importTraceId:   r.importTraceId ?? "",
             }));
 
           if (!payload.length) {
@@ -969,6 +972,12 @@ function openImportExcelModal() {
           }
           modal.setLoading("저장", true);
           try {
+            console.info("[history-cards] import payload", {
+              parsedCount: analyzed.rows.length,
+              validCount: payload.length,
+              selectedEmployeeUid: S.selectedEmployeeId,
+              records: payload,
+            });
             const result = await importHistoryExcelData({ rows: payload, mode });
 
             // 상세 결과 구성
@@ -1333,22 +1342,18 @@ function openResetAllHistoryModal() {
         <p style="margin-bottom:var(--space-3);font-weight:var(--weight-semibold);color:var(--red-600,#dc2626)">
           ⚠ 주의: 이 작업은 되돌릴 수 없습니다.
         </p>
-        <p style="margin-bottom:var(--space-3)">
-          <strong>${empName}</strong> (${empNo})의 수동 등록 및 Excel 가져오기 교육이력을 모두 삭제합니다.
-        </p>
+        <p style="margin-bottom:var(--space-3)"><strong>${empName}</strong> (${empNo})의 삭제 범위를 선택하세요.</p>
         <div style="background:var(--gray-50);border-radius:var(--radius-md);padding:var(--space-3);margin-bottom:var(--space-3);font-size:var(--text-sm)">
-          <div style="font-weight:var(--weight-semibold);margin-bottom:var(--space-2)">삭제 대상</div>
-          <ul style="margin:0;padding-left:var(--space-4);color:var(--gray-700)">
-            <li>manual (수동 등록 이력)</li>
-            <li>manual_excel (Excel 업로드 이력)</li>
-            <li>history_excel (기존 이력 가져오기)</li>
-          </ul>
+          <div style="font-weight:var(--weight-semibold);margin-bottom:var(--space-2)">삭제 범위 (단일 선택)</div>
+          <label style="display:block;margin:8px 0"><input type="radio" name="history-reset-scope" value="manual"> 수동 등록 이력만 <small>(manual)</small></label>
+          <label style="display:block;margin:8px 0"><input type="radio" name="history-reset-scope" value="excel"> Excel로 가져온 이력만 <small>(manual_excel, history_excel)</small></label>
+          <label style="display:block;margin:8px 0"><input type="radio" name="history-reset-scope" value="all" checked> 수동 등록 + Excel 가져오기 모두</label>
         </div>
         <div style="background:var(--green-50,#f0fdf4);border-radius:var(--radius-md);padding:var(--space-3);font-size:var(--text-sm)">
           <div style="font-weight:var(--weight-semibold);margin-bottom:var(--space-2);color:var(--green-700,#15803d)">삭제 제외 (유지)</div>
           <ul style="margin:0;padding-left:var(--space-4);color:var(--gray-700)">
-            <li>교육 회차 완료 이력 (sessionCompletions)</li>
-            <li>교육 수료 이력 (trainingCompletions)</li>
+            <li>교육 회차 완료 이력 4종은 삭제되지 않습니다.</li>
+            <li>선택한 직원 외 다른 직원 이력은 유지됩니다.</li>
           </ul>
         </div>
       </div>`,
@@ -1358,17 +1363,21 @@ function openResetAllHistoryModal() {
         label: "전체 초기화",
         variant: "primary",
         onClick: async () => {
+          const scope = document.querySelector('input[name="history-reset-scope"]:checked')?.value;
+          if (!scope) { toast.warning("삭제 범위를 선택해 주세요."); return; }
+          const scopeLabels = { manual: "수동 등록 이력만", excel: "Excel로 가져온 이력만", all: "수동 등록과 Excel 이력 모두" };
+          if (!window.confirm(`${emp.name ?? "선택 직원"} (${emp.empNo ?? "–"})\n삭제 범위: ${scopeLabels[scope]}\n\n계속하시겠습니까?`)) return;
           modal.setLoading("전체 초기화", true);
           try {
             const result = await resetSelectedManualTrainingHistories({
               uids: [S.selectedEmployeeId],
               resetAllForUser: true,
-              trainingType: "",
+              scope,
             });
             const count = result.deletedCount ?? 0;
             if (count > 0) {
               toast.success(
-                `${empName}의 개인이력 ${count}건을 초기화했습니다. 회차 완료 이력은 유지되었습니다.`
+                `${emp.name ?? "선택 직원"}의 ${scopeLabels[scope]} ${count}건을 초기화했습니다. 회차 완료 이력은 유지되었습니다.`
               );
             } else {
               toast.info("초기화할 개인이력이 없습니다.");

@@ -129,8 +129,8 @@ export async function updateEmployeeManagementProfile(payload) {
 }
 
 /**
- * 선택 직원의 Excel 업로드 이력 초기화 (HQ_ADMIN 전용)
- * source==="manual_excel" + 선택 교육항목 이력만 삭제
+ * 선택 직원의 개인 이력 초기화 (HQ_ADMIN 전용)
+ * scope: manual | excel | all. 회차 완료 이력은 서버 화이트리스트 밖이라 삭제되지 않는다.
  */
 export async function resetSelectedManualTrainingHistories(payload) {
   const result = await resetSelectedManualTrainingHistoriesCallable(payload);
