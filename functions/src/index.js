@@ -927,9 +927,18 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
   const deletedByUid = {};
   const deletedSourceById = {};
 
+  // 두 미러 경로가 과거 오류/부분 저장으로 서로 어긋나도 초기화가 누락되지 않게
+  // source와 uid를 양쪽 레코드에서 복구한다.
+  const inferResetSource = (record) => {
+    const explicit = normalizeText(record?.source).toLowerCase();
+    if (ALLOWED_RESET_SOURCES.has(explicit)) return explicit;
+    if (record?.importTraceId || record?.sourceSheetName || record?.sourceRowNumber != null) return "history_excel";
+    return explicit;
+  };
+
   const shouldDeleteRecord = (record) => {
     if (!record) return false;
-    const recordSource = normalizeText(record.source).toLowerCase();
+    const recordSource = inferResetSource(record);
     if (!ALLOWED_RESET_SOURCES.has(recordSource)) return false;
     if (requestedSources.length && !requestedSources.includes(recordSource)) return false;
     if (trainingType && normalizeTrainingTypeValue(record.trainingType) !== trainingType) return false;
@@ -970,6 +979,8 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
   if (targetUids.length) {
     const employeeSnaps = await Promise.all(targetUids.map((targetUid) => db.ref(`users/${targetUid}`).get()));
     const userHistorySnaps = await Promise.all(targetUids.map((targetUid) => db.ref(`userManualTrainingHistories/${targetUid}`).get()));
+    const rootHistorySnap = await db.ref("manualTrainingHistories").get();
+    const rootRecords = rootHistorySnap.val() ?? {};
 
     for (let index = 0; index < targetUids.length; index += 1) {
       const targetUid = targetUids[index];
@@ -979,7 +990,13 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
       const employee = { uid: targetUid, ...employeeSnap.val() };
       assertSameCompany(actor, employee);
 
-      const records = userHistorySnaps[index].val() ?? {};
+      const records = { ...(userHistorySnaps[index].val() ?? {}) };
+      // user 미러에 없는 루트 레코드도 uid 기준으로 함께 검사한다.
+      for (const [historyId, record] of Object.entries(rootRecords)) {
+        if (normalizeText(record?.uid || record?.employeeUid || record?.userUid) === targetUid) {
+          records[historyId] = { ...(records[historyId] ?? {}), ...record };
+        }
+      }
       const hasFilter = Boolean(targetHistoryIds.length || trainingType || subjectCode || subjectName || title || requestedSources.length);
       if (!hasFilter && !allowAllForUser) {
         throw new HttpsError("invalid-argument", "선택 초기화 기능은 교육 항목 또는 이력 선택이 필요합니다.");
@@ -992,7 +1009,7 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
         updates[`manualTrainingHistories/${historyId}`] = null;
         updates[`userManualTrainingHistories/${targetUid}/${historyId}`] = null;
         deletedHistoryIds.push(historyId);
-        deletedSourceById[historyId] = normalizeText(record.source).toLowerCase();
+        deletedSourceById[historyId] = inferResetSource(record);
         deletedByUid[targetUid] = (deletedByUid[targetUid] ?? 0) + 1;
       }
     }
@@ -1020,6 +1037,21 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
     return count;
   };
   let preservedCompletionCount = 0;
+  let beforeCount = 0;
+  let afterCount = 0;
+  if (firstUid) {
+    const [beforeRoot, beforeUser] = await Promise.all([
+      db.ref("manualTrainingHistories").get(),
+      db.ref(`userManualTrainingHistories/${firstUid}`).get(),
+    ]);
+    const rootForUid = Object.values(beforeRoot.val() ?? {}).filter((record) =>
+      normalizeText(record?.uid || record?.employeeUid || record?.userUid) === firstUid && shouldDeleteRecord(record)
+    ).length;
+    const userForUid = Object.values(beforeUser.val() ?? {}).filter(shouldDeleteRecord).length;
+    // 삭제 후 남은 대상 건수. beforeCount는 실제 삭제 건수 + 잔존 건수로 복원한다.
+    afterCount = Math.max(rootForUid, userForUid);
+    beforeCount = uniqueDeletedHistoryIds.length + afterCount;
+  }
   if (firstUid) {
     const completionSnaps = await Promise.all([
       db.ref("sessionCompletions").get(),
@@ -1037,11 +1069,15 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
     employeeName: firstEmployee?.name ?? "",
     scope: scope || (requestedSources.length === 3 ? "all" : "custom"),
     requestedSources,
+    beforeCount,
     deletedCount: uniqueDeletedHistoryIds.length,
     deletedManualCount: deletedSourceCounts.manual,
     deletedManualExcelCount: deletedSourceCounts.manual_excel,
     deletedHistoryExcelCount: deletedSourceCounts.history_excel,
     preservedCompletionCount,
+    afterCount,
+    deletedPathsCount: Object.keys(updates).length,
+    deletedPaths: Object.keys(updates),
     deletedHistoryIds: uniqueDeletedHistoryIds,
     deletedByUid,
     message: uniqueDeletedHistoryIds.length

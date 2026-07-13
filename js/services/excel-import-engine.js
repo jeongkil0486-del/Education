@@ -71,6 +71,10 @@ function rawCell(sheet, r, c) {
   return sheet.cells[key] ?? null;
 }
 
+function hasCellValue(value) {
+  return value != null && String(value).trim() !== "";
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // § 2.  NORMALIZER
 // ═══════════════════════════════════════════════════════════════════
@@ -457,27 +461,27 @@ function _parseBlock(sheet, headerRow, dataEnd, trainingType, { splitSubjects = 
     const noteRaw      = get("note");
 
     // ── 과정명 상속
-    const courseName = courseRaw != null
+    const courseName = hasCellValue(courseRaw)
       ? String(courseRaw).replace(/\n/g, " ").trim()
       : inherit.courseName;
-    if (courseRaw != null) inherit.courseName = courseName;
+    if (hasCellValue(courseRaw)) inherit.courseName = courseName;
 
     // ── 나머지 상속
-    const instructor  = instructorRaw  != null ? String(instructorRaw).replace(/\n/g, ", ").trim() : inherit.instructor;
-    const hoursVal    = hoursRaw       != null ? hoursRaw : inherit.hours;
-    const period      = periodRaw      != null ? String(periodRaw)  : inherit.period;
-    const completedAt = completedRaw   != null ? completedRaw       : inherit.completedAt;
-    const result      = resultRaw      != null ? String(resultRaw)  : inherit.result;
-    const stage       = stageRaw       != null ? String(stageRaw)   : inherit.stage;
-    const note        = noteRaw        != null ? String(noteRaw)    : inherit.note;
+    const instructor  = hasCellValue(instructorRaw) ? String(instructorRaw).replace(/\n/g, ", ").trim() : inherit.instructor;
+    const hoursVal    = hasCellValue(hoursRaw) ? hoursRaw : inherit.hours;
+    const period      = hasCellValue(periodRaw) ? String(periodRaw) : inherit.period;
+    const completedAt = hasCellValue(completedRaw) ? completedRaw : inherit.completedAt;
+    const result      = hasCellValue(resultRaw) ? String(resultRaw) : inherit.result;
+    const stage       = hasCellValue(stageRaw) ? String(stageRaw) : inherit.stage;
+    const note        = hasCellValue(noteRaw) ? String(noteRaw) : inherit.note;
 
-    if (instructorRaw  != null) inherit.instructor  = instructor;
-    if (hoursRaw       != null) inherit.hours       = hoursRaw;
-    if (periodRaw      != null) inherit.period      = period;
-    if (completedRaw   != null) inherit.completedAt = completedRaw;
-    if (resultRaw      != null) inherit.result      = result;
-    if (stageRaw       != null) inherit.stage       = stage;
-    if (noteRaw        != null) inherit.note        = note;
+    if (hasCellValue(instructorRaw)) inherit.instructor = instructor;
+    if (hasCellValue(hoursRaw)) inherit.hours = hoursRaw;
+    if (hasCellValue(periodRaw)) inherit.period = period;
+    if (hasCellValue(completedRaw)) inherit.completedAt = completedRaw;
+    if (hasCellValue(resultRaw)) inherit.result = result;
+    if (hasCellValue(stageRaw)) inherit.stage = stage;
+    if (hasCellValue(noteRaw)) inherit.note = note;
 
     if (!courseName && !subjectRaw) continue;
 
@@ -842,6 +846,11 @@ export async function analyzeExcel(file) {
     const importTracePrefix = `${Date.now().toString(36)}-${sheetRaw.sheetName}`;
     rows = rows.map((row, index) => ({
       ...row,
+      // 구분 열이 없는 시트도 시트/섹션 구조로 초기·보수를 보존한다.
+      initialOrRecurrent: row.initialOrRecurrent ?? (
+        trainingType === "job" && /보수|정기|갱신/.test(sheetRaw.sheetName) ? "recurrent" :
+        trainingType === "job" && /초기|입문/.test(sheetRaw.sheetName) ? "initial" : null
+      ),
       sourceRowNumber: row.sourceRowNumber ?? (headerRow + index + 2),
       sourceSheetName: sheetRaw.sheetName,
       importTraceId: `${importTracePrefix}-${index + 1}`,

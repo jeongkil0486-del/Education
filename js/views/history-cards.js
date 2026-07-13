@@ -1377,10 +1377,10 @@ function openResetAllHistoryModal() {
             const count = result.deletedCount ?? 0;
             if (count > 0) {
               toast.success(
-                `${emp.name ?? "선택 직원"}의 ${scopeLabels[scope]} ${count}건을 초기화했습니다. 회차 완료 이력은 유지되었습니다.`
+                `${emp.name ?? "선택 직원"}의 ${scopeLabels[scope]} ${count}건을 초기화했습니다. (삭제 전 ${result.beforeCount ?? count}건 → 삭제 후 ${result.afterCount ?? 0}건, DB 경로 ${result.deletedPathsCount ?? 0}개) 회차 완료 ${result.preservedCompletionCount ?? 0}건은 유지되었습니다.`
               );
             } else {
-              toast.info("초기화할 개인이력이 없습니다.");
+              toast.info(`삭제 대상이 없습니다. (삭제 전 ${result.beforeCount ?? 0}건, 삭제 후 ${result.afterCount ?? 0}건)`);
             }
             modal.close();
             await loadCard(S.selectedEmployeeId);
