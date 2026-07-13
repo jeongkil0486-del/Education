@@ -645,6 +645,14 @@
   user-select: none;
 }
 
+/* 날짜 그룹 헤더 행 */
+.hc-wrap .hc-section-table .hc-date-toggle:hover {
+  background: var(--blue-100, #dbeafe);
+}
+.hc-wrap .hc-section-table .hc-date-toggle td {
+  user-select: none;
+}
+
 /* 펼침 상세 행 */
 .hc-wrap .hc-section-table tr[data-group-detail] td {
   border-top: none;
