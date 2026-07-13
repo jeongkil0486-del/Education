@@ -1134,11 +1134,11 @@ function historyCanonicalCourse(row) {
   const match = (values) => values.includes(courseKey);
   if (isJob && match(["직무초기교육", "직무초기", "초기직무", "초기", "입문", "입문교육", "initial"])) return { name: "직무초기교육", key: "job_initial", type: "job", stage: "initial" };
   if (isJob && match(["직무보수교육", "직무보수", "보수", "보수교육", "정기", "정기교육", "갱신", "갱신교육", "재교육", "recurrent", "recurring", "refresher"])) return { name: "직무보수교육", key: "job_recurrent", type: "job", stage: "recurrent" };
-  if (match(["sms", "safetymanagementsystem", "안전관리시스템"])) return { name: "SMS", key: "legal_sms", type: "legal", stage: "" };
+  if (match(["sms", "sms교육", "safetymanagementsystem", "안전관리시스템", "안전관리시스템교육"])) return { name: "SMS", key: "legal_sms", type: "legal", stage: "" };
   if (match(["항공보안", "항공보안교육", "aviationsecurity", "보안교육"])) return { name: "항공보안", key: "legal_security", type: "legal", stage: "" };
   if (match(["사내강사", "사내강사양성과정", "instructortraining"])) return { name: "사내강사", key: "job_instructor", type: "job", stage: "" };
   if (match(["운항관리", "운항관리사", "운항통제", "flightdispatch"])) return { name: "운항관리", key: "job_operations", type: "job", stage: "" };
-  if (match(["위험물", "dangerousgoods", "dg"])) return { name: "위험물", key: "legal_dangerous_goods", type: "legal", stage: "" };
+  if (match(["위험물", "위험물규정", "위험물교육", "dangerousgoods", "dangerousgoodsregulation", "dangerousgoodsregulations", "dg", "dgr"])) return { name: "위험물", key: "legal_dangerous_goods", type: "legal", stage: "" };
   if (match(["wb", "weightbalance"])) return { name: "W&B", key: "job_wb", type: "job", stage: "" };
   const key = row.canonicalCourseKey || (trainingType === "job" && ["직무", "직무교육"].includes(courseKey) ? "job_duty" : `${trainingType}_${courseKey || "default"}`);
   return { name: row.canonicalCourseName || courseName, key, type: trainingType, stage: "" };
@@ -1150,14 +1150,22 @@ function applyHistoryClassification(rows) {
     const explicitStage = normalizeTrainingSubType(
       row.subType, row.educationStage, row.educationType, row.initialOrRecurrent, row.trainingPhase
     );
+    const stage = canonical.stage || explicitStage;
+    const isGenericJobCourse = canonical.type === "job" && canonical.key === "job_duty";
+    const canonicalName = isGenericJobCourse && stage
+      ? stage === "initial" ? "직무초기교육" : "직무보수교육"
+      : canonical.name;
+    const canonicalKey = isGenericJobCourse && stage
+      ? stage === "initial" ? "job_initial" : "job_recurrent"
+      : canonical.key;
     return {
       ...row,
       trainingType: canonical.type,
-      courseName: canonical.name || row.courseName,
-      title: canonical.name || row.title,
-      canonicalCourseName: canonical.name,
-      canonicalCourseKey: canonical.key,
-      subType: canonical.stage || explicitStage,
+      courseName: canonicalName || row.courseName,
+      title: canonicalName || row.title,
+      canonicalCourseName: canonicalName,
+      canonicalCourseKey: canonicalKey,
+      subType: stage,
     };
   });
   const byItem = new Map();
@@ -1171,6 +1179,12 @@ function applyHistoryClassification(rows) {
     const firstDate = Math.min(...records.map((row) => Number(row.completedAt)).filter(Number.isFinite));
     for (const row of records) {
       if (!row.subType) row.subType = Number(row.completedAt) === firstDate ? "initial" : "recurrent";
+      if (row.canonicalCourseKey === "job_duty") {
+        row.canonicalCourseName = row.subType === "initial" ? "직무초기교육" : "직무보수교육";
+        row.canonicalCourseKey = row.subType === "initial" ? "job_initial" : "job_recurrent";
+        row.courseName = row.canonicalCourseName;
+        row.title = row.canonicalCourseName;
+      }
     }
   }
   return classified;

@@ -37,7 +37,7 @@ function standardCourse(courseName, trainingType) {
   if (isJob && matches(["직무보수교육", "직무보수", "보수", "보수교육", "정기", "정기교육", "갱신", "갱신교육", "재교육", "recurrent", "recurring", "refresher"])) {
     return { canonicalCourseName: "직무보수교육", canonicalCourseKey: "job_recurrent", trainingType: "job", subType: "recurrent", sectionKey: "job_recurring", stageSource: "canonical" };
   }
-  if (matches(["sms", "safetymanagementsystem", "안전관리시스템"])) {
+  if (matches(["sms", "sms교육", "safetymanagementsystem", "안전관리시스템", "안전관리시스템교육"])) {
     return { canonicalCourseName: "SMS", canonicalCourseKey: "legal_sms", trainingType: "legal", subType: "", sectionKey: "legal", stageSource: "" };
   }
   if (matches(["항공보안", "항공보안교육", "aviationsecurity", "보안교육"])) {
@@ -49,7 +49,7 @@ function standardCourse(courseName, trainingType) {
   if (matches(["운항관리", "운항관리사", "운항통제", "flightdispatch"])) {
     return { canonicalCourseName: "운항관리", canonicalCourseKey: "job_operations", trainingType: "job", subType: "", sectionKey: "job_recurring", stageSource: "" };
   }
-  if (matches(["위험물", "dangerousgoods", "dg"])) {
+  if (matches(["위험물", "위험물규정", "위험물교육", "dangerousgoods", "dangerousgoodsregulation", "dangerousgoodsregulations", "dg", "dgr"])) {
     return { canonicalCourseName: "위험물", canonicalCourseKey: "legal_dangerous_goods", trainingType: "legal", subType: "", sectionKey: "legal", stageSource: "" };
   }
   if (matches(["wb", "weightbalance"])) {
@@ -77,12 +77,19 @@ function classifyTraining(input = {}) {
   const explicitStage = normalizeStage(input.subType, input.educationStage, input.educationType, input.initialOrRecurrent, input.trainingPhase);
   const subType = standard.subType || explicitStage;
   const trainingType = standard.trainingType || rawTrainingType || "other";
+  const isGenericJobCourse = trainingType === "job" && standard.canonicalCourseKey === "job_duty";
+  const canonicalCourseName = isGenericJobCourse && subType
+    ? subType === "initial" ? "직무초기교육" : "직무보수교육"
+    : standard.canonicalCourseName || rawCourseName;
+  const canonicalCourseKey = isGenericJobCourse && subType
+    ? subType === "initial" ? "job_initial" : "job_recurrent"
+    : standard.canonicalCourseKey;
   const sectionKey = trainingType === "job"
     ? subType === "initial" ? "job_initial" : subType === "recurrent" ? "job_recurring" : "job_recurring"
     : trainingType;
   return {
-    canonicalCourseName: standard.canonicalCourseName || rawCourseName,
-    canonicalCourseKey: standard.canonicalCourseKey,
+    canonicalCourseName,
+    canonicalCourseKey,
     trainingType,
     subType,
     sectionKey,
@@ -120,16 +127,33 @@ function reconcileHistoryRecords(records = []) {
       record.subType = Number(record.completedAt) === firstDate ? "initial" : "recurrent";
       record.educationStage = record.subType;
       record.sectionKey = record.subType === "initial" ? "job_initial" : "job_recurring";
+      record.canonicalCourseName = record.subType === "initial" ? "직무초기교육" : "직무보수교육";
+      record.canonicalCourseKey = record.subType === "initial" ? "job_initial" : "job_recurrent";
+      record.courseName = record.canonicalCourseName;
+      record.title = record.canonicalCourseName;
       record.stageSource = "inferred";
     }
   }
-  return classified.map((record) => ({
-    ...record,
-    educationStage: record.subType || text(record.educationStage),
-    sectionKey: record.trainingType === "job"
-      ? record.subType === "initial" ? "job_initial" : "job_recurring"
-      : record.sectionKey,
-  }));
+  return classified.map((record) => {
+    const isGenericJobCourse = record.trainingType === "job" && record.canonicalCourseKey === "job_duty";
+    const canonicalCourseName = isGenericJobCourse && record.subType
+      ? record.subType === "initial" ? "직무초기교육" : "직무보수교육"
+      : record.canonicalCourseName;
+    const canonicalCourseKey = isGenericJobCourse && record.subType
+      ? record.subType === "initial" ? "job_initial" : "job_recurrent"
+      : record.canonicalCourseKey;
+    return {
+      ...record,
+      canonicalCourseName,
+      canonicalCourseKey,
+      courseName: canonicalCourseName || record.courseName,
+      title: canonicalCourseName || record.title,
+      educationStage: record.subType || text(record.educationStage),
+      sectionKey: record.trainingType === "job"
+        ? record.subType === "initial" ? "job_initial" : "job_recurring"
+        : record.sectionKey,
+    };
+  });
 }
 
 module.exports = { classifyTraining, normalizeStage, normalizeTrainingType, reconcileHistoryRecords };
