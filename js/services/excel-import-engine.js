@@ -955,7 +955,7 @@ export function renderDetailedPreview(container, preview) {
   const stageLabel = { initial: "초기", recurrent: "보수" };
   const { summary, rows } = preview;
   const originalRows = rows.map((row, originalIndex) => ({ row, originalIndex }));
-  let sortState = { key: "", direction: "none" };
+  let sortState = { column: null, direction: null };
   const columns = [
     { key: "status", label: "처리", value: (r) => r._status },
     { key: "employeeName", label: "직원명", value: (r) => r._employee?.name ?? r.employeeName },
@@ -974,16 +974,22 @@ export function renderDetailedPreview(container, preview) {
   ];
 
   const cycleSort = (key) => {
-    if (sortState.key !== key || sortState.direction === "none") sortState = { key, direction: "asc" };
-    else if (sortState.direction === "asc") sortState = { key, direction: "desc" };
-    else sortState = { key: "", direction: "none" };
+    const previousDirection = sortState.column === key ? sortState.direction : null;
+    const nextDirection = previousDirection === null ? "asc" : previousDirection === "asc" ? "desc" : null;
+    sortState = { column: nextDirection ? key : null, direction: nextDirection };
+    console.info("[excel-preview-sort] header clicked", {
+      column: key,
+      previousDirection,
+      nextDirection,
+      rowCount: rows.length,
+    });
     renderTable();
   };
 
   const renderTable = () => {
-    const selectedColumn = columns.find((column) => column.key === sortState.key);
+    const selectedColumn = columns.find((column) => column.key === sortState.column);
     const displayedRows = [...originalRows];
-    if (selectedColumn && sortState.direction !== "none") {
+    if (selectedColumn && sortState.direction) {
       const direction = sortState.direction === "asc" ? 1 : -1;
       displayedRows.sort((a, b) => {
         const av = selectedColumn.value(a.row);
@@ -996,7 +1002,7 @@ export function renderDetailedPreview(container, preview) {
     }
 
     const header = (column) => {
-      const active = sortState.key === column.key && sortState.direction !== "none";
+      const active = sortState.column === column.key && Boolean(sortState.direction);
       const icon = active ? (sortState.direction === "asc" ? "▲" : "▼") : "";
       const ariaSort = !active ? "none" : sortState.direction === "asc" ? "ascending" : "descending";
       return `<th data-preview-sort="${column.key}" tabindex="0" aria-sort="${ariaSort}" style="cursor:pointer;user-select:none;white-space:nowrap" title="클릭: 오름차순 → 내림차순 → 원래 순서">${column.label}${icon ? ` <span aria-hidden="true" style="font-size:10px">${icon}</span>` : ""}</th>`;
@@ -1031,14 +1037,24 @@ export function renderDetailedPreview(container, preview) {
         </table>
       </div>`;
 
-    container.querySelectorAll("[data-preview-sort]").forEach((th) => {
-      const activate = () => cycleSort(th.dataset.previewSort);
-      th.addEventListener("click", activate);
-      th.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(); }
-      });
-    });
   };
+
+  if (container._excelPreviewSortClick) container.removeEventListener("click", container._excelPreviewSortClick);
+  if (container._excelPreviewSortKeydown) container.removeEventListener("keydown", container._excelPreviewSortKeydown);
+  container._excelPreviewSortClick = (event) => {
+    const header = event.target.closest?.("th[data-preview-sort]");
+    if (!header || !container.contains(header)) return;
+    cycleSort(header.dataset.previewSort);
+  };
+  container._excelPreviewSortKeydown = (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const header = event.target.closest?.("th[data-preview-sort]");
+    if (!header || !container.contains(header)) return;
+    event.preventDefault();
+    cycleSort(header.dataset.previewSort);
+  };
+  container.addEventListener("click", container._excelPreviewSortClick);
+  container.addEventListener("keydown", container._excelPreviewSortKeydown);
 
   renderTable();
 }

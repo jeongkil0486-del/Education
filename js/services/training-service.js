@@ -1,5 +1,5 @@
 import { authStore, ROLES } from "../core/auth.js";
-import { cycleMonthEnd } from "../utils/date.js";
+import { calendarDayDifference, cycleMonthEnd } from "../utils/date.js";
 import {
   assignmentsDB,
   branchesDB,
@@ -46,6 +46,80 @@ export const TRAINING_SUBJECT_OPTIONS = {
     { code: "legal_dangerous_goods", name: "위험물" },
   ],
 };
+
+const STANDARD_SUBJECT_ALIASES = {
+  legal: {
+    sms: { code: "legal_sms", name: "SMS" },
+    safetymanagementsystem: { code: "legal_sms", name: "SMS" },
+    안전관리시스템: { code: "legal_sms", name: "SMS" },
+    항공보안: { code: "legal_security", name: "항공보안" },
+    항공보안교육: { code: "legal_security", name: "항공보안" },
+    aviationsecurity: { code: "legal_security", name: "항공보안" },
+    위험물: { code: "legal_dangerous_goods", name: "위험물" },
+    위험물규정: { code: "legal_dangerous_goods", name: "위험물" },
+    dangerousgoods: { code: "legal_dangerous_goods", name: "위험물" },
+    dangerousgoodsregulation: { code: "legal_dangerous_goods", name: "위험물" },
+    dangerousgoodsregulations: { code: "legal_dangerous_goods", name: "위험물" },
+  },
+};
+
+function normalizeSelectableSubject(value) {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9가-힣]+/g, "");
+}
+
+/**
+ * 주기 설정/수동 등록에서 공통으로 쓰는 표준 교육항목 목록입니다.
+ * 개인 이력은 데이터 출처로 사용하지 않으며, 표준 항목과 trainingItems 마스터만 병합합니다.
+ */
+export function buildSelectableTrainingItems(items = []) {
+  const byNormalizedKey = new Map();
+  const intermediateNames = new Set(["직무", "직무교육", "job", "법정", "법정교육", "legal"]);
+
+  const add = (candidate, standard = false) => {
+    const trainingType = normalizeTrainingType(candidate.trainingType);
+    const rawName = String(candidate.subjectName ?? candidate.title ?? "").normalize("NFKC").trim();
+    const rawNameKey = normalizeSelectableSubject(rawName);
+    const alias = STANDARD_SUBJECT_ALIASES[trainingType]?.[rawNameKey] ?? null;
+    if (!rawNameKey || intermediateNames.has(rawNameKey)) return;
+    if (!standard && !alias && rawNameKey.length < 3) return;
+
+    const displayName = alias?.name ?? rawName.replace(/\s+/g, " ");
+    const subjectCode = alias?.code ?? String(candidate.subjectCode ?? candidate.id ?? "").trim();
+    // 표시명이 같은 마스터 항목은 내부 코드가 달라도 하나의 선택지로 취급합니다.
+    // 알려진 별칭만 canonical code를 사용해 한글/영문 명칭까지 같은 항목으로 통합합니다.
+    const subjectKey = normalizeSelectableSubject(alias?.code ?? displayName) || rawNameKey;
+    const normalizedKey = `${trainingType}__${subjectKey}`;
+    const next = {
+      itemId: candidate.itemId ?? candidate.id ?? "",
+      trainingType,
+      subType: normalizeTrainingSubType(candidate.subType),
+      subjectCode,
+      subjectName: displayName,
+      displayName,
+      normalizedKey,
+    };
+    const existing = byNormalizedKey.get(normalizedKey);
+    byNormalizedKey.set(normalizedKey, existing
+      ? { ...existing, itemId: existing.itemId || next.itemId, subType: existing.subType || next.subType }
+      : next);
+  };
+
+  for (const [trainingType, subjects] of Object.entries(TRAINING_SUBJECT_OPTIONS)) {
+    for (const subject of subjects) {
+      if (subject.code === "job_duty") continue;
+      add({ trainingType, subjectCode: subject.code, subjectName: subject.name }, true);
+    }
+  }
+  for (const item of items) add(item, false);
+
+  return [...byNormalizedKey.values()].sort((a, b) =>
+    a.trainingType.localeCompare(b.trainingType) || a.displayName.localeCompare(b.displayName, "ko", { sensitivity: "base" })
+  );
+}
 
 export const DUE_STATUS_LABELS = {
   normal: "정상",
@@ -1019,8 +1093,7 @@ export function applyDueMetadata(rows, now = Date.now()) {
     }
 
     // 남은 일수 (음수 = 초과)
-    const diffMs = nextDueDate - now;
-    const daysRemaining = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+    const daysRemaining = calendarDayDifference(nextDueDate, now);
 
     let dueStatus;
     if (daysRemaining < 0) {

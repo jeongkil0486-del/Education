@@ -5,7 +5,7 @@ import {
   buildEmployeeHistoryRowsV2,
   loadTrainingReferences,
   listManagedItems,
-  TRAINING_SUBJECT_OPTIONS,
+  buildSelectableTrainingItems,
   DUE_STATUS_LABELS,
 } from "../services/training-service.js";
 import { authStore, ROLES } from "../core/auth.js";
@@ -865,29 +865,14 @@ function manualCategoryForRow(row) {
 function getManualSelectableItems(category, row) {
   const trainingType = category.startsWith("job_") ? "job" : category;
   const categoryStage = category === "job_initial" ? "initial" : category === "job_recurrent" ? "recurrent" : "";
-  const items = [];
-
-  for (const item of S.items.filter((entry) => entry.trainingType === trainingType)) {
-    const itemStage = normalizeManualStage(item.subType);
-    if (categoryStage && itemStage && itemStage !== categoryStage) continue;
-    items.push({
-      itemId: item.id ?? "",
-      subjectCode: item.subjectCode ?? "",
-      subjectName: item.subjectName ?? item.title ?? "",
-      courseName: item.title ?? item.subjectName ?? "",
-      subType: itemStage || categoryStage,
-    });
-  }
-
-  for (const subject of TRAINING_SUBJECT_OPTIONS[trainingType] ?? []) {
-    items.push({
-      itemId: "",
-      subjectCode: subject.code ?? "",
-      subjectName: subject.name ?? "",
-      courseName: subject.name ?? "",
-      subType: categoryStage,
-    });
-  }
+  const items = buildSelectableTrainingItems(S.items)
+    .filter((item) => item.trainingType === trainingType)
+    .filter((item) => !categoryStage || !item.subType || item.subType === categoryStage)
+    .map((item) => ({
+      ...item,
+      courseName: item.displayName,
+      subType: item.subType || categoryStage,
+    }));
 
   if (row && ["job", "legal"].includes(trainingType)) {
     items.push({

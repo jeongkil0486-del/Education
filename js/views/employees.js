@@ -16,6 +16,7 @@ import {
   applyDueMetadata,
   TRAINING_SUBJECT_OPTIONS,
   TRAINING_TYPE_LABELS,
+  buildSelectableTrainingItems,
   normalizeTrainingType,
 } from "../services/training-service.js";
 import {
@@ -273,29 +274,11 @@ export async function render(container) {
    교육 옵션 목록 빌드
 ═══════════════════════════════════════════════════════ */
 function buildTrainingOptions(items) {
-  const optionsByValue = new Map();
-  const addOption = (option) => optionsByValue.set(option.value, option);
-  for (const s of TRAINING_SUBJECT_OPTIONS.job ?? []) {
-    addOption({ value: `job|${s.code}`, label: `직무교육 - ${s.name}`, trainingType: "job", subjectCode: s.code, subjectName: s.name });
-  }
-  for (const s of TRAINING_SUBJECT_OPTIONS.legal ?? []) {
-    addOption({ value: `legal|${s.code}`, label: `법정교육 - ${s.name}`, trainingType: "legal", subjectCode: s.code, subjectName: s.name });
-  }
-  for (const item of items) {
-    const trainingType = normalizeTrainingType(item.trainingType);
-    const sn = item.subjectName ?? item.title ?? "";
-    if (!sn) continue;
-    const value = `${trainingType}|${item.subjectCode || item.id}`;
-    addOption({
-      value,
-      label: `${TRAINING_TYPE_LABELS[trainingType] ?? "기타"} - ${sn}`,
-      trainingType,
-      subjectCode: item.subjectCode || item.id,
-      subjectName: sn,
-      itemId: item.id,
-    });
-  }
-  return [...optionsByValue.values()].sort((a, b) => a.label.localeCompare(b.label, "ko"));
+  return buildSelectableTrainingItems(items).map((item) => ({
+    ...item,
+    value: `${item.trainingType}|${item.subjectCode || item.itemId || item.normalizedKey}`,
+    label: `${TRAINING_TYPE_LABELS[item.trainingType] ?? "기타"} - ${item.displayName}`,
+  }));
 }
 
 function parseTrainingValue(val) {
@@ -1538,7 +1521,7 @@ const _SN_MIN = 60, _SN_MAX = 2958465;
 
 function formatDateYMD(ms) {
   const d = new Date(typeof ms === "number" ? ms : Number(ms));
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 }
 
 function _rawToYmd(v) {

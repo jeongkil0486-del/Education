@@ -50,8 +50,18 @@ export function cycleMonthEnd(completedAt, cycleMonths) {
     completedDate.getFullYear(),
     completedDate.getMonth() + months + 1,
     0,
-    0, 0, 0, 0
+    12, 0, 0, 0
   ).getTime();
+}
+
+/** 시간대를 제거한 로컬 달력 날짜 기준으로 target-base 일수를 계산합니다. */
+export function calendarDayDifference(targetAt, baseAt = Date.now()) {
+  const target = new Date(Number(targetAt));
+  const base = new Date(Number(baseAt));
+  if (Number.isNaN(target.getTime()) || Number.isNaN(base.getTime())) return null;
+  const targetDay = Date.UTC(target.getFullYear(), target.getMonth(), target.getDate());
+  const baseDay = Date.UTC(base.getFullYear(), base.getMonth(), base.getDate());
+  return Math.round((targetDay - baseDay) / 86400000);
 }
 
 export function isOverdue(ts) {
