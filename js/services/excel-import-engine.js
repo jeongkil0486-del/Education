@@ -706,6 +706,7 @@ function _resolveResultAndStage(rawResult, rawStage) {
     initialOrRecurrent: finalStage  ?? null,
   };
 }
+/**
  * @returns {{ empInfo, rows, parserUsed, fileName }}
  */
 export async function analyzeExcel(file) {
