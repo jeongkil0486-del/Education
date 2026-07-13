@@ -308,8 +308,7 @@ async function runLedgerQuery() {
     // 재교육 주기 설정 조회
     let cycleMonths = 0;
     try {
-      const educationKey = buildEducationKey(trainingMeta);
-      const config       = effectiveCompanyId ? await educationCycleConfigsDB.get(effectiveCompanyId, educationKey) : null;
+      const config = await loadEducationCycleConfig(effectiveCompanyId, trainingMeta);
       cycleMonths = Number(config?.cycleMonths ?? 0) || 0;
       // trainingItem 자체 cycleMonths도 폴백
       if (!cycleMonths && trainingMeta?.itemId) {
@@ -1064,7 +1063,7 @@ async function openCycleConfigModal() {
     const companyId = getEffectiveCompanyId(trainingMeta, null);
     let currentCycle = 0;
     try {
-      const config = companyId ? await educationCycleConfigsDB.get(companyId, buildEducationKey(trainingMeta)) : null;
+      const config = await loadEducationCycleConfig(companyId, trainingMeta);
       currentCycle = Number(config?.cycleMonths ?? 0) || 0;
       if (!currentCycle && trainingMeta.itemId) {
         currentCycle = Number(viewState.items.find((item) => item.id === trainingMeta.itemId)?.cycleMonths ?? 0) || 0;
@@ -1100,6 +1099,18 @@ function buildEducationKey(meta) {
     .replace(/[^a-z0-9가-힣]+/g, "_")
     .replace(/^_+|_+$/g, "");
   return `${typeKey}__${subjectKey || "default"}`;
+}
+
+async function loadEducationCycleConfig(companyId, meta) {
+  if (!companyId) return null;
+  const primaryKey = buildEducationKey(meta);
+  const keys = [primaryKey];
+  if (primaryKey === "job__job_duty") keys.push("job__직무교육");
+  for (const key of keys) {
+    const config = await educationCycleConfigsDB.get(companyId, key);
+    if (config) return config;
+  }
+  return null;
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -1415,11 +1426,10 @@ async function submitHistoryUploadInline() {
 
   // 해당 교육의 기본 주기 포함
   const trainingMeta = parseTrainingValue(`${trainingType}|${subjectCode}`);
-  const educationKey = buildEducationKey(trainingMeta ?? { trainingType, subjectCode, subjectName });
   const effectiveCompanyId = getEffectiveCompanyId(trainingMeta, getSelectedBranch());
   let defaultCycle   = 0;
   try {
-    const cfg = effectiveCompanyId ? await educationCycleConfigsDB.get(effectiveCompanyId, educationKey) : null;
+    const cfg = await loadEducationCycleConfig(effectiveCompanyId, trainingMeta ?? { trainingType, subjectCode, subjectName });
     defaultCycle = Number(cfg?.cycleMonths ?? 0) || 0;
   } catch (e) { /* 무시 */ }
 

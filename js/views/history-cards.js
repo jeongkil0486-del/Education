@@ -473,11 +473,58 @@ function groupRows(rows) {
   return groups;
 }
 
+const HISTORY_CARD_SORT_COLUMNS = {
+  courseName:     { type: "string", value: (rep) => rep.courseName ?? rep.title },
+  instructorName: { type: "string", value: (rep) => rep.instructorName },
+  hours:          { type: "number", value: (rep) => Number(rep.hours) > 0 ? Number(rep.hours) : null },
+  period:         { type: "range",  value: (rep) => [rep.startDate, rep.endDate] },
+  completedAt:    { type: "date",   value: (rep) => rep.completedAt },
+  subType:        { type: "string", value: (rep) => getStageLabel(rep) },
+  nextDueDate:    { type: "date",   value: (rep) => rep.nextDueDate },
+  daysRemaining:  { type: "number", value: (rep) => rep.daysRemaining },
+  status:         { type: "string", value: (rep) => rep.dueStatusLabel ?? DUE_STATUS_LABELS[rep.dueStatus] },
+  note:           { type: "string", value: (rep) => rep.note },
+};
+
+function isMissingSortValue(value, type) {
+  if (type === "string") {
+    const text = String(value ?? "").trim();
+    return !text || text === "-" || text === "–" || text === "미설정";
+  }
+  if (value == null || value === "") return true;
+  const number = Number(value);
+  return !Number.isFinite(number) || (type === "date" && number <= 0);
+}
+
+function compareHistoryValues(a, b, type, direction) {
+  if (type === "range") {
+    const left = Array.isArray(a) ? a : [];
+    const right = Array.isArray(b) ? b : [];
+    const startComparison = compareHistoryValues(left[0], right[0], "date", direction);
+    if (startComparison || isMissingSortValue(left[0], "date")) return startComparison;
+    return compareHistoryValues(left[1], right[1], "date", direction);
+  }
+  const aMissing = isMissingSortValue(a, type);
+  const bMissing = isMissingSortValue(b, type);
+  if (aMissing || bMissing) return aMissing === bMissing ? 0 : aMissing ? 1 : -1;
+  const comparison = type === "string"
+    ? String(a).localeCompare(String(b), "ko", { numeric: true, sensitivity: "base" })
+    : Number(a) - Number(b);
+  return direction === "asc" ? comparison : -comparison;
+}
+
 function sortCourseGroups(groups) {
-  if (historyCardSort.key !== "courseName" || historyCardSort.direction === "none") return groups;
-  const direction = historyCardSort.direction === "asc" ? 1 : -1;
-  return [...groups].sort((a, b) => direction * String(a.rep.courseName ?? a.rep.title ?? "")
-    .localeCompare(String(b.rep.courseName ?? b.rep.title ?? ""), "ko", { numeric: true, sensitivity: "base" }));
+  const column = HISTORY_CARD_SORT_COLUMNS[historyCardSort.key];
+  if (!column || historyCardSort.direction === "none") return groups;
+  return groups
+    .map((group, originalIndex) => ({ group, originalIndex }))
+    .sort((a, b) => compareHistoryValues(
+      column.value(a.group.rep),
+      column.value(b.group.rep),
+      column.type,
+      historyCardSort.direction
+    ) || a.originalIndex - b.originalIndex)
+    .map(({ group }) => group);
 }
 
 function cycleHistoryCardSort(key) {
@@ -525,15 +572,15 @@ function renderSections(rows) {
                     <tr>
                       <th style="width:28px"></th>
                       ${sortableHistoryCardHeader("courseName", "교육과정명")}
-                      <th>강사</th>
-                      <th>교육시간</th>
-                      <th>교육기간</th>
-                      <th>최신 수료일</th>
-                      <th>초기/보수</th>
-                      <th>다음 예정일</th>
-                      <th>남은 일수</th>
-                      <th>상태</th>
-                      <th>비고</th>
+                      ${sortableHistoryCardHeader("instructorName", "강사")}
+                      ${sortableHistoryCardHeader("hours", "교육시간")}
+                      ${sortableHistoryCardHeader("period", "교육기간")}
+                      ${sortableHistoryCardHeader("completedAt", "최신 수료일")}
+                      ${sortableHistoryCardHeader("subType", "초기/보수")}
+                      ${sortableHistoryCardHeader("nextDueDate", "다음 예정일")}
+                      ${sortableHistoryCardHeader("daysRemaining", "남은 일수")}
+                      ${sortableHistoryCardHeader("status", "상태")}
+                      ${sortableHistoryCardHeader("note", "비고")}
                     </tr>
                   </thead>
                   <tbody>

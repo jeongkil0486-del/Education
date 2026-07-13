@@ -35,7 +35,7 @@ export const TRAINING_TYPE_LABELS = {
 
 export const TRAINING_SUBJECT_OPTIONS = {
   job: [
-    { code: "job_duty", name: "직무교육" },
+    { code: "job_duty", name: "직무" },
     { code: "job_operations", name: "운항관리" },
     { code: "job_instructor", name: "사내강사" },
     { code: "job_wb", name: "W&B" },
@@ -48,6 +48,10 @@ export const TRAINING_SUBJECT_OPTIONS = {
 };
 
 const STANDARD_SUBJECT_ALIASES = {
+  job: {
+    직무: { code: "job_duty", name: "직무" },
+    직무교육: { code: "job_duty", name: "직무" },
+  },
   legal: {
     sms: { code: "legal_sms", name: "SMS" },
     safetymanagementsystem: { code: "legal_sms", name: "SMS" },
@@ -1113,11 +1117,12 @@ export function applyDueMetadata(rows, now = Date.now()) {
 }
 
 function normalizeCycleMatchValue(value) {
-  return String(value ?? "")
+  const normalized = String(value ?? "")
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9가-힣]+/g, "_")
     .replace(/^_+|_+$/g, "");
+  return normalized === "직무" || normalized === "직무교육" ? "job_duty" : normalized;
 }
 
 /** 교육항목별 회사 공통 주기를 이력 복사본에 적용합니다. */
