@@ -126,8 +126,12 @@ function detectSheetTrainingType(sheetName) {
 }
 
 function inferTrainingType(baseType, courseName, subjectName, sheetName) {
+  // 과정/과목의 명시적 분류가 시트명에서 얻은 기본값보다 우선한다.
+  const rowContext = [courseName, subjectName].map((value) => norm(value)).join("|");
+  if (rowContext.includes("직무")) return "job";
+  if (rowContext.includes("법정")) return "legal";
   if (baseType === "legal" || baseType === "job") return baseType;
-  const context = [courseName, subjectName, sheetName].map((value) => norm(value)).join("|");
+  const context = [rowContext, norm(sheetName)].join("|");
   if (context.includes("법정")) return "legal";
   if (/직무|보수|정기|갱신|재교육|초기|입문/.test(context)) return "job";
   return baseType || "other";
@@ -310,9 +314,16 @@ function findSectionHeaders(sheet) {
   for (let r = 0; r <= sheet.maxRow; r++) {
     const v = String(rawCell(sheet, r, 0) ?? rawCell(sheet, r, 1) ?? "").trim();
     const n = norm(v);
-    if (n.includes("법정교육"))                    sections.push({ row: r, type: "legal" });
-    else if (n.includes("직무교육") || n.includes("보수교육") || n.includes("사내교육"))
-                                                    sections.push({ row: r, type: "job" });
+    let type = "";
+    if (n.includes("법정교육")) type = "legal";
+    else if (n.includes("직무교육") || n.includes("보수교육") || n.includes("사내교육")) type = "job";
+    if (!type) continue;
+
+    // 실제 과정명(예: 직무초기교육/직무보수교육)을 섹션 제목으로 오탐하지 않는다.
+    // 진짜 섹션 제목이라면 바로 아래 5행 안에 별도의 컬럼 헤더가 있어야 한다.
+    const headerRow = findHeaderRow(sheet, r, Math.min(r + 5, sheet.maxRow));
+    if (headerRow < r) continue;
+    sections.push({ row: r, type, headerRow });
   }
   return sections;
 }
@@ -454,6 +465,67 @@ function buildColMap(sheet, headerRow) {
   return colMap;
 }
 
+const BLOCK_COMMON_FIELDS = [
+  "instructor", "hours", "period", "completedAt", "result", "result2", "stage", "note",
+];
+
+function blockComparable(field, value) {
+  if (!hasCellValue(value)) return "";
+  if (field === "stage") return normStage(value) ?? "";
+  if (field === "result" || field === "result2") {
+    return normResult(value) ?? normStage(value) ?? "";
+  }
+  return norm(value);
+}
+
+/**
+ * 과정 블록을 먼저 찾고, 블록 어느 행에 있든 하나뿐인 공통값을 대표값으로 만든다.
+ * 병합되지 않은 stage/result 셀이 블록 마지막 행에만 있어도 앞선 과목에 역방향 적용된다.
+ */
+function buildCourseBlockContexts(sheet, headerRow, dataEnd, colMap) {
+  const blocks = [];
+  let active = null;
+
+  for (let r = headerRow + 1; r <= dataEnd; r++) {
+    const courseCol = colMap.courseName;
+    const courseRaw = courseCol !== undefined ? rawCell(sheet, r, courseCol) : null;
+    const explicitCourseName = hasCellValue(courseRaw)
+      ? String(courseRaw).replace(/\n/g, " ").trim()
+      : "";
+
+    if (explicitCourseName && (!active || norm(explicitCourseName) !== norm(active.courseName))) {
+      if (active) active.endRow = r - 1;
+      active = { startRow: r, endRow: dataEnd, courseName: explicitCourseName, common: {} };
+      blocks.push(active);
+    }
+  }
+
+  const byRow = new Map();
+  for (const block of blocks) {
+    const subjectCol = colMap.subjectName;
+    block.hasSubjectRows = subjectCol !== undefined && Array.from(
+      { length: block.endRow - block.startRow + 1 },
+      (_, index) => block.startRow + index
+    ).some((r) => hasCellValue(rawCell(sheet, r, subjectCol)));
+    for (const field of BLOCK_COMMON_FIELDS) {
+      const col = colMap[field];
+      if (col === undefined) continue;
+      const candidates = [];
+      const distinct = new Set();
+      for (let r = block.startRow; r <= block.endRow; r++) {
+        const value = rawCell(sheet, r, col);
+        const comparable = blockComparable(field, value);
+        if (!comparable) continue;
+        candidates.push(value);
+        distinct.add(comparable);
+      }
+      if (distinct.size === 1 && candidates.length) block.common[field] = candidates[0];
+    }
+    for (let r = block.startRow; r <= block.endRow; r++) byRow.set(r, block);
+  }
+  return byRow;
+}
+
 /**
  * 표준 블록 파싱
  * dataStart: 데이터 시작 행(0-based), dataEnd: 종료 행
@@ -465,6 +537,7 @@ function _parseBlock(sheet, headerRow, dataEnd, trainingType, { splitSubjects = 
   const colMap  = buildColMap(sheet, headerRow);
   const empInfo = detectEmpInfo(sheet, headerRow);
   const rows    = [];
+  const blockContexts = buildCourseBlockContexts(sheet, headerRow, dataEnd, colMap);
 
   const inherit = {
     courseName: "", instructor: "", hours: null, period: "",
@@ -488,12 +561,13 @@ function _parseBlock(sheet, headerRow, dataEnd, trainingType, { splitSubjects = 
     const result2Raw   = get("result2");
     const stageRaw     = get("stage");
     const noteRaw      = get("note");
+    const block = blockContexts.get(r) ?? null;
 
     const explicitCourseName = hasCellValue(courseRaw)
       ? String(courseRaw).replace(/\n/g, " ").trim()
       : "";
-    const startsNewCourse = explicitCourseName && inherit.courseName &&
-      norm(explicitCourseName) !== norm(inherit.courseName);
+    const startsNewCourse = block?.startRow === r || (explicitCourseName && inherit.courseName &&
+      norm(explicitCourseName) !== norm(inherit.courseName));
     if (startsNewCourse) {
       // 과정 블록이 바뀌면 이전 과정의 초기/보수·강사·날짜가 새 과정으로 새지 않게 한다.
       Object.assign(inherit, {
@@ -503,19 +577,25 @@ function _parseBlock(sheet, headerRow, dataEnd, trainingType, { splitSubjects = 
     }
 
     // ── 과정명 상속
-    const courseName = explicitCourseName
-      ? explicitCourseName
-      : inherit.courseName;
-    if (hasCellValue(courseRaw)) inherit.courseName = courseName;
+    const resolvedCourseName = explicitCourseName || block?.courseName || inherit.courseName;
+    if (resolvedCourseName) inherit.courseName = resolvedCourseName;
 
     // ── 나머지 상속
-    const instructor  = hasCellValue(instructorRaw) ? String(instructorRaw).replace(/\n/g, ", ").trim() : inherit.instructor;
-    const hoursVal    = hasCellValue(hoursRaw) ? hoursRaw : inherit.hours;
-    const period      = hasCellValue(periodRaw) ? String(periodRaw) : inherit.period;
-    const completedAt = hasCellValue(completedRaw) ? completedRaw : inherit.completedAt;
-    const result      = hasCellValue(resultRaw) ? String(resultRaw) : inherit.result;
-    const stage       = hasCellValue(stageRaw) ? String(stageRaw) : inherit.stage;
-    const note        = hasCellValue(noteRaw) ? String(noteRaw) : inherit.note;
+    const instructorValue = hasCellValue(instructorRaw) ? instructorRaw : block?.common.instructor;
+    const hoursValue      = hasCellValue(hoursRaw) ? hoursRaw : block?.common.hours;
+    const periodValue     = hasCellValue(periodRaw) ? periodRaw : block?.common.period;
+    const completedValue  = hasCellValue(completedRaw) ? completedRaw : block?.common.completedAt;
+    const resultValue     = hasCellValue(resultRaw) ? resultRaw : block?.common.result;
+    const stageValue      = hasCellValue(stageRaw) ? stageRaw : block?.common.stage;
+    const noteValue       = hasCellValue(noteRaw) ? noteRaw : block?.common.note;
+    const result2Value    = hasCellValue(result2Raw) ? result2Raw : block?.common.result2;
+    const instructor  = hasCellValue(instructorValue) ? String(instructorValue).replace(/\n/g, ", ").trim() : inherit.instructor;
+    const hoursVal    = hasCellValue(hoursValue) ? hoursValue : inherit.hours;
+    const period      = hasCellValue(periodValue) ? String(periodValue) : inherit.period;
+    const completedAt = hasCellValue(completedValue) ? completedValue : inherit.completedAt;
+    const result      = hasCellValue(resultValue) ? String(resultValue) : inherit.result;
+    const stage       = hasCellValue(stageValue) ? String(stageValue) : inherit.stage;
+    const note        = hasCellValue(noteValue) ? String(noteValue) : inherit.note;
 
     if (hasCellValue(instructorRaw)) inherit.instructor = instructor;
     if (hasCellValue(hoursRaw)) inherit.hours = hoursRaw;
@@ -525,7 +605,7 @@ function _parseBlock(sheet, headerRow, dataEnd, trainingType, { splitSubjects = 
     if (hasCellValue(stageRaw)) inherit.stage = stage;
     if (hasCellValue(noteRaw)) inherit.note = note;
 
-    if (!courseName && !subjectRaw) continue;
+    if (!resolvedCourseName && !subjectRaw) continue;
 
     const { startDate, endDate } = normPeriod(period);
     const completedMs = normDate(completedAt);
@@ -533,8 +613,8 @@ function _parseBlock(sheet, headerRow, dataEnd, trainingType, { splitSubjects = 
     // result2(교육이수) 처리: stage 열에 보수예정, result2 열에 이수 같은 구조
     let rawResultFinal = result;
     let rawStageFinal  = stage;
-    if (result2Raw != null) {
-      const r2 = String(result2Raw).trim();
+    if (result2Value != null) {
+      const r2 = String(result2Value).trim();
       // result2가 result 값이면 result로 사용
       if (normResult(r2)) rawResultFinal = r2;
       // result2가 stage 값이면 stage로 사용 (보완)
@@ -548,15 +628,17 @@ function _parseBlock(sheet, headerRow, dataEnd, trainingType, { splitSubjects = 
         ? raw.split(/\n/).map((s) => s.trim()).filter(Boolean)
         : [raw.trim()].filter(Boolean);
     }
+    // 블록 공통값만 기록된 보조 행은 세부 과목 이력으로 만들지 않는다.
+    if (!hasCellValue(subjectRaw) && block?.hasSubjectRows) continue;
     if (!subjects.length) subjects = [""];
 
-    if (!courseName && subjects.every((s) => !s) && !completedMs) continue;
+    if (!resolvedCourseName && subjects.every((s) => !s) && !completedMs) continue;
 
     for (const subjectName of subjects) {
       const resolved = resolveResultStage(rawResultFinal, rawStageFinal);
       const initialOrRecurrent = resolved.initialOrRecurrent ?? inferStage(
         rawStageFinal,
-        courseName,
+        resolvedCourseName,
         subjectName,
         sheet.sheetName
       );
@@ -564,9 +646,9 @@ function _parseBlock(sheet, headerRow, dataEnd, trainingType, { splitSubjects = 
         sourceRowNumber: r + 1,
         employeeName: empInfo.name,
         empNo:        empInfo.empNo,
-        trainingType: inferTrainingType(trainingType, courseName, subjectName, sheet.sheetName),
-        courseName:   courseName || subjectName,
-        subjectName:  subjectName || courseName,
+        trainingType: inferTrainingType(trainingType, resolvedCourseName, subjectName, sheet.sheetName),
+        courseName:   resolvedCourseName || subjectName,
+        subjectName:  subjectName || resolvedCourseName,
         instructor,
         hours:        normHours(hoursVal),
         startDate,
@@ -575,6 +657,12 @@ function _parseBlock(sheet, headerRow, dataEnd, trainingType, { splitSubjects = 
         result: resolved.result,
         initialOrRecurrent,
         note:         String(note).replace(/\n/g, " ").trim(),
+        sourceBlockStartRow: block ? block.startRow + 1 : r + 1,
+        sourceBlockEndRow: block ? block.endRow + 1 : r + 1,
+        rawCourseName: explicitCourseName || block?.courseName || "",
+        rawStage: hasCellValue(stageRaw) ? String(stageRaw) : String(block?.common.stage ?? ""),
+        rawPeriod: hasCellValue(periodRaw) ? String(periodRaw) : String(block?.common.period ?? ""),
+        rawCompletedAt: hasCellValue(completedRaw) ? completedRaw : block?.common.completedAt ?? null,
       });
     }
   }
@@ -614,6 +702,10 @@ function _parseTAS(sheet, trainingType) {
       if (completedAtCol >= 0) break;
     }
   }
+  const blockContexts = buildCourseBlockContexts(sheet, hr, sheet.maxRow, {
+    ...colMap,
+    ...(completedAtCol >= 0 ? { completedAt: completedAtCol } : {}),
+  });
 
   const inherit = {
     courseName: "", instructor: "", hours: null, period: "",
@@ -635,12 +727,13 @@ function _parseTAS(sheet, trainingType) {
     const stageRaw     = get("stage");
     const result2Raw   = get("result2");
     const noteRaw      = get("note");
+    const block = blockContexts.get(r) ?? null;
 
     const explicitCourseName = hasCellValue(courseRaw)
       ? String(courseRaw).replace(/\n/g, " ").trim()
       : "";
-    const startsNewCourse = explicitCourseName && inherit.courseName &&
-      norm(explicitCourseName) !== norm(inherit.courseName);
+    const startsNewCourse = block?.startRow === r || (explicitCourseName && inherit.courseName &&
+      norm(explicitCourseName) !== norm(inherit.courseName));
     if (startsNewCourse) {
       Object.assign(inherit, {
         instructor: "", hours: null, period: "", completedAt: null,
@@ -648,17 +741,22 @@ function _parseTAS(sheet, trainingType) {
       });
     }
 
-    const courseName = explicitCourseName
-      ? explicitCourseName
-      : inherit.courseName;
-    if (courseRaw != null) inherit.courseName = courseName;
+    const courseName = explicitCourseName || block?.courseName || inherit.courseName;
+    if (courseName) inherit.courseName = courseName;
 
-    const instructor  = instructorRaw  != null ? String(instructorRaw).replace(/\n/g, ", ").trim() : inherit.instructor;
-    const hoursVal    = hoursRaw       != null ? hoursRaw : inherit.hours;
-    const period      = periodRaw      != null ? String(periodRaw)  : inherit.period;
-    const completedAt = completedRaw   != null ? completedRaw       : inherit.completedAt;
-    const stage       = stageRaw       != null ? String(stageRaw)   : inherit.stage;
-    const note        = noteRaw        != null ? String(noteRaw)    : inherit.note;
+    const instructorValue = hasCellValue(instructorRaw) ? instructorRaw : block?.common.instructor;
+    const hoursValue      = hasCellValue(hoursRaw) ? hoursRaw : block?.common.hours;
+    const periodValue     = hasCellValue(periodRaw) ? periodRaw : block?.common.period;
+    const completedValue  = hasCellValue(completedRaw) ? completedRaw : block?.common.completedAt;
+    const stageValue      = hasCellValue(stageRaw) ? stageRaw : block?.common.stage;
+    const noteValue       = hasCellValue(noteRaw) ? noteRaw : block?.common.note;
+    const result2Value    = hasCellValue(result2Raw) ? result2Raw : block?.common.result2;
+    const instructor  = hasCellValue(instructorValue) ? String(instructorValue).replace(/\n/g, ", ").trim() : inherit.instructor;
+    const hoursVal    = hasCellValue(hoursValue) ? hoursValue : inherit.hours;
+    const period      = hasCellValue(periodValue) ? String(periodValue) : inherit.period;
+    const completedAt = hasCellValue(completedValue) ? completedValue : inherit.completedAt;
+    const stage       = hasCellValue(stageValue) ? String(stageValue) : inherit.stage;
+    const note        = hasCellValue(noteValue) ? String(noteValue) : inherit.note;
 
     if (instructorRaw  != null) inherit.instructor  = instructor;
     if (hoursRaw       != null) inherit.hours       = hoursRaw;
@@ -668,12 +766,13 @@ function _parseTAS(sheet, trainingType) {
     if (noteRaw        != null) inherit.note        = note;
 
     if (!courseName && !subjectRaw) continue;
+    if (!hasCellValue(subjectRaw) && block?.hasSubjectRows) continue;
 
     // TAS에서 result는 "이수"(교육이수 열), stage는 "초기"(보수예정 열)
     let rawResult = "PASS";
     let rawStage  = stage;
-    if (result2Raw != null) {
-      const r2 = String(result2Raw).trim();
+    if (result2Value != null) {
+      const r2 = String(result2Value).trim();
       if (normResult(r2)) rawResult = r2;
     }
 
@@ -705,6 +804,12 @@ function _parseTAS(sheet, trainingType) {
       result: resolved.result,
       initialOrRecurrent,
       note:         String(note).replace(/\n/g, " ").trim(),
+      sourceBlockStartRow: block ? block.startRow + 1 : r + 1,
+      sourceBlockEndRow: block ? block.endRow + 1 : r + 1,
+      rawCourseName: explicitCourseName || block?.courseName || "",
+      rawStage: hasCellValue(stageRaw) ? String(stageRaw) : String(block?.common.stage ?? ""),
+      rawPeriod: hasCellValue(periodRaw) ? String(periodRaw) : String(block?.common.period ?? ""),
+      rawCompletedAt: hasCellValue(completedRaw) ? completedRaw : block?.common.completedAt ?? null,
     });
   }
 
@@ -736,7 +841,7 @@ function _parseSheet1(sheet) {
     const secEnd  = nextSec ? nextSec.row - 1 : sheet.maxRow;
 
     // 섹션 내 헤더 행 탐지
-    const hr = findHeaderRow(sheet, sec.row, sec.row + 5);
+    const hr = sec.headerRow ?? findHeaderRow(sheet, sec.row, sec.row + 5);
     if (hr < 0) continue;
 
     const blockRows = _parseBlock(sheet, hr, secEnd, sec.type, { splitSubjects: false });
@@ -974,10 +1079,21 @@ export async function analyzeExcel(file) {
     .map((row) => ({
       sourceSheetName: row.sourceSheetName,
       sourceRowNumber: row.sourceRowNumber,
+      sourceBlockStartRow: row.sourceBlockStartRow,
+      sourceBlockEndRow: row.sourceBlockEndRow,
+      rawCourseName: row.rawCourseName,
+      rawStage: row.rawStage,
+      rawPeriod: row.rawPeriod,
+      rawCompletedAt: row.rawCompletedAt,
       courseName: row.courseName,
       subjectName: row.subjectName,
       trainingType: row.trainingType,
       initialOrRecurrent: row.initialOrRecurrent,
+      instructor: row.instructor,
+      hours: row.hours,
+      startDate: row.startDate,
+      endDate: row.endDate,
+      result: row.result,
       completedAt: row.completedAt,
       importTraceId: row.importTraceId,
     })));
@@ -993,6 +1109,22 @@ export function validateAndPreview(rows, lookups) {
     duplicate: validated.filter((r) => r._status === STATUS.DUPLICATE).length,
     error:     validated.filter((r) => r._status === STATUS.ERROR).length,
   };
+  console.info("[excel-import-engine] recurrent preview trace", validated
+    .filter((row) => row.trainingType === "job" && row.initialOrRecurrent === "recurrent")
+    .slice(0, 10)
+    .map((row) => ({
+      sourceSheetName: row.sourceSheetName,
+      sourceRowNumber: row.sourceRowNumber,
+      sourceBlockStartRow: row.sourceBlockStartRow,
+      sourceBlockEndRow: row.sourceBlockEndRow,
+      courseName: row.courseName,
+      subjectName: row.subjectName,
+      trainingType: row.trainingType,
+      subType: row.initialOrRecurrent,
+      validatorStatus: row._status,
+      validatorDetail: row._statusDetail,
+      importTraceId: row.importTraceId,
+    })));
   return { summary, rows: validated };
 }
 

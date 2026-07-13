@@ -965,8 +965,14 @@ function openImportExcelModal() {
               subType:        r.initialOrRecurrent ?? "",
               note:           String(r.note ?? "").trim(),
               sourceRowNumber: r.sourceRowNumber ?? null,
+              sourceBlockStartRow: r.sourceBlockStartRow ?? r.sourceRowNumber ?? null,
+              sourceBlockEndRow: r.sourceBlockEndRow ?? r.sourceRowNumber ?? null,
               sourceSheetName: r.sourceSheetName ?? "",
               importTraceId:   r.importTraceId ?? "",
+              rawCourseName:   r.rawCourseName ?? "",
+              rawStage:        r.rawStage ?? "",
+              rawPeriod:       r.rawPeriod ?? "",
+              rawCompletedAt:  r.rawCompletedAt ?? null,
             }));
 
           if (!payload.length) {

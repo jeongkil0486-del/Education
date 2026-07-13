@@ -1226,11 +1226,14 @@ function normalizeHistoryStage(...values) {
 }
 
 function normalizeHistoryImportType(row) {
-  const explicit = normalizeTrainingTypeValue(row?.trainingType);
-  if (explicit && explicit !== "other") return explicit;
-  const context = [row?.courseName, row?.subjectName, row?.sourceSheetName]
+  const rowContext = [row?.courseName, row?.subjectName]
     .map((value) => normalizeText(value).toLowerCase())
     .join("|");
+  if (/직무/.test(rowContext)) return "job";
+  if (/법정/.test(rowContext)) return "legal";
+  const explicit = normalizeTrainingTypeValue(row?.trainingType);
+  if (explicit && explicit !== "other") return explicit;
+  const context = `${rowContext}|${normalizeText(row?.sourceSheetName).toLowerCase()}`;
   if (/법정/.test(context)) return "legal";
   if (/직무|보수|정기|갱신|재교육|초기|입문/.test(context)) return "job";
   return explicit || "other";
@@ -1874,12 +1877,22 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
             action: "updated",
             sourceSheetName: normalizeText(row.sourceSheetName),
             sourceRowNumber: row.sourceRowNumber ?? null,
+            sourceBlockStartRow: row.sourceBlockStartRow ?? null,
+            sourceBlockEndRow: row.sourceBlockEndRow ?? null,
             importTraceId: normalizeText(row.importTraceId),
+            rawCourseName: normalizeText(row.rawCourseName),
+            rawStage: normalizeText(row.rawStage),
+            rawPeriod: normalizeText(row.rawPeriod),
+            rawCompletedAt: row.rawCompletedAt ?? null,
             courseName,
             subjectName,
             trainingType,
             subType: normalizedStage,
-            savedPath: `manualTrainingHistories/${existingRec._id}`,
+            dedupeKey: correctedRecord.dedupeKey,
+            savedPaths: [
+              `manualTrainingHistories/${existingRec._id}`,
+              `userManualTrainingHistories/${employee.uid}/${existingRec._id}`,
+            ],
           });
         }
         updatedCount++;
@@ -1915,6 +1928,8 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
         educationStage: detailFields.educationStage || "",
         note:          detailFields.note || "",
         sourceRowNumber: row.sourceRowNumber ?? null,
+        sourceBlockStartRow: row.sourceBlockStartRow ?? null,
+        sourceBlockEndRow: row.sourceBlockEndRow ?? null,
         sourceSheetName: normalizeText(row.sourceSheetName),
         importTraceId: normalizeText(row.importTraceId),
         cycleMonths:   0,
@@ -1939,12 +1954,22 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
           action: "created",
           sourceSheetName: record.sourceSheetName,
           sourceRowNumber: record.sourceRowNumber,
+          sourceBlockStartRow: record.sourceBlockStartRow,
+          sourceBlockEndRow: record.sourceBlockEndRow,
           importTraceId: record.importTraceId,
+          rawCourseName: normalizeText(row.rawCourseName),
+          rawStage: normalizeText(row.rawStage),
+          rawPeriod: normalizeText(row.rawPeriod),
+          rawCompletedAt: row.rawCompletedAt ?? null,
           courseName: record.courseName,
           subjectName: record.subjectName,
           trainingType: record.trainingType,
           subType: record.subType,
-          savedPath: `manualTrainingHistories/${historyId}`,
+          dedupeKey: record.dedupeKey,
+          savedPaths: [
+            `manualTrainingHistories/${historyId}`,
+            `userManualTrainingHistories/${employee.uid}/${historyId}`,
+          ],
         });
       }
       createdCount++;
