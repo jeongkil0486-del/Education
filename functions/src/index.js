@@ -6,6 +6,7 @@ const { defineSecret } = require("firebase-functions/params");
 const admin = require("firebase-admin");
 const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+const { classifyTraining, reconcileHistoryRecords } = require("./training-classification");
 
 admin.initializeApp();
 
@@ -601,6 +602,7 @@ exports.upsertManualTrainingHistory = onCall(OPTS, async (request) => {
     [`manualTrainingHistories/${targetId}`]: record,
     [`userManualTrainingHistories/${uid}/${targetId}`]: record,
   });
+  await reconcileManualHistoryClassifications([uid]);
 
   return { historyId: targetId, uid, message: historyId ? "개인 교육이력 수정 완료" : "개인 교육이력 등록 완료" };
 });
@@ -621,15 +623,20 @@ exports.bulkImportManualTrainingHistories = onCall(OPTS, async (request) => {
   Object.entries(users).forEach(([uid, user]) => {
     if (user?.role === "employee") employeeByEmpNo.set(normalizeEmpNo(user.empNo).toLowerCase(), { uid, ...user });
   });
-  const existingByKey = new Map(Object.entries(existingSnap.val() ?? {})
-    .filter(([, item]) => item?.dedupeKey)
-    .map(([id, item]) => [item.dedupeKey, { id, ...item }]));
+  const existingByKey = new Map();
+  for (const [id, item] of Object.entries(existingSnap.val() ?? {})) {
+    if (!item) continue;
+    const record = { id, ...item };
+    if (item.dedupeKey) existingByKey.set(item.dedupeKey, record);
+    existingByKey.set(buildManualHistoryDedupeKey(record), record);
+  }
 
   const updates = {};
   const succeeded = [];
   const failed = [];
   const skipped = [];
   const batchKeys = new Set();
+  const affectedUids = new Set();
 
   for (let index = 0; index < rows.length; index += 1) {
     const sourceRow = rows[index] ?? {};
@@ -638,6 +645,7 @@ exports.bulkImportManualTrainingHistories = onCall(OPTS, async (request) => {
     try {
       if (!empNo || !employee) throw new Error("등록된 사번을 찾을 수 없습니다.");
       assertSameCompany(actor, employee);
+      affectedUids.add(employee.uid);
       const inputName = normalizeText(sourceRow.employeeName || sourceRow.name);
       if (inputName && inputName !== normalizeText(employee.name)) throw new Error("사번과 이름이 일치하지 않습니다.");
 
@@ -706,6 +714,7 @@ exports.bulkImportManualTrainingHistories = onCall(OPTS, async (request) => {
   }
 
   if (Object.keys(updates).length) await db.ref().update(updates);
+  await reconcileManualHistoryClassifications(affectedUids);
   return {
     succeededCount: succeeded.length,
     skippedCount: skipped.length,
@@ -799,6 +808,7 @@ exports.replaceEmployeeManualTrainingHistories = onCall(OPTS, async (request) =>
     updates[`userManualTrainingHistories/${uid}/${historyId}`] = record;
   }
   if (Object.keys(updates).length) await db.ref().update(updates);
+  await reconcileManualHistoryClassifications([uid]);
   return { uid, deletedCount, createdCount: stages.length, message: "교육이력을 수정했습니다." };
 });
 
@@ -1197,7 +1207,7 @@ function normalizeTrainingTypeValue(value) {
   const raw = normalizeText(value).toLowerCase();
   if (!raw) return "";   // 빈 값은 "" 반환 — 필터 없음으로 처리
   const map = {
-    job: "job", "직무교육": "job", "직무 교육": "job",
+    job: "job", "직무": "job", "직무교육": "job", "직무 교육": "job",
     initial: "job", recurrent: "job", recurring: "job", refresher: "job",
     legal: "legal", "법정교육": "legal", "법정 교육": "legal",
     online: "online", "온라인교육": "online", "온라인 교육": "online",
@@ -1260,9 +1270,20 @@ function normalizeDateMillis(value, label) {
 }
 
 function normalizeManualHistory(data, employee, actorUid, actorName) {
-  const trainingType = normalizeTrainingTypeValue(data?.trainingType);
   const subjectName = normalizeText(data?.subjectName || data?.trainingSubject || data?.courseSubject);
-  const title = normalizeText(data?.title || data?.courseName || subjectName);
+  const rawCourseName = normalizeText(data?.title || data?.courseName || subjectName);
+  const classification = classifyTraining({
+    trainingType: data?.trainingType,
+    courseName: rawCourseName,
+    subjectName,
+    subType: data?.subType,
+    educationStage: data?.educationStage,
+    educationType: data?.educationType,
+    initialOrRecurrent: data?.initialOrRecurrent,
+    trainingPhase: data?.trainingPhase,
+  });
+  const trainingType = classification.trainingType || normalizeTrainingTypeValue(data?.trainingType);
+  const title = classification.canonicalCourseName || rawCourseName;
   const completedAt = normalizeDateMillis(data?.completedAt || data?.completionDate, "수료일");
   if (!title) throw new Error("교육과정명이 필요합니다.");
   if (!subjectName) throw new Error("교육 세부분류 또는 교육과목이 필요합니다.");
@@ -1272,19 +1293,23 @@ function normalizeManualHistory(data, employee, actorUid, actorName) {
   const hours = Math.max(0, Number(data?.hours ?? data?.trainingHours ?? 0) || 0);
   return {
     trainingType,
+    canonicalCourseName: classification.canonicalCourseName,
+    canonicalCourseKey: classification.canonicalCourseKey,
+    sectionKey: classification.sectionKey,
+    stageSource: classification.stageSource,
     itemId: normalizeText(data?.itemId),
     subjectCode: normalizeText(data?.subjectCode),
     subjectName,
     title,
-    courseName: normalizeText(data?.courseName || title),
+    courseName: classification.canonicalCourseName || normalizeText(data?.courseName || title),
     instructorName: normalizeText(data?.instructorName),
     hours,
     startDate: normalizeDateMillis(data?.startDate, "교육 시작일"),
     endDate: normalizeDateMillis(data?.endDate, "교육 종료일"),
     completedAt,
     result: normalizeText(data?.result || "PASS").toUpperCase(),
-    subType: normalizeText(data?.subType),
-    educationStage: normalizeText(data?.educationStage),
+    subType: classification.subType || normalizeText(data?.subType),
+    educationStage: classification.subType || normalizeText(data?.educationStage),
     educationType: normalizeText(data?.educationType),
     source: normalizeText(data?.source) || "manual",
     initialRecurrent: normalizeText(data?.initialRecurrent),
@@ -1296,12 +1321,40 @@ function normalizeManualHistory(data, employee, actorUid, actorName) {
   };
 }
 
+async function reconcileManualHistoryClassifications(uids) {
+  const updates = {};
+  for (const uid of new Set([...uids].filter(Boolean))) {
+    const snap = await db.ref(`userManualTrainingHistories/${uid}`).get();
+    const current = snap.val() ?? {};
+    const reconciled = reconcileHistoryRecords(Object.entries(current).map(([historyId, record]) => ({
+      ...record,
+      historyId: record.historyId ?? historyId,
+      uid,
+    })));
+    for (const record of reconciled) {
+      const historyId = record.historyId;
+      const previous = current[historyId] ?? {};
+      const next = { ...previous, ...record };
+      const changed = [
+        "trainingType", "courseName", "title", "canonicalCourseName", "canonicalCourseKey",
+        "subType", "educationStage", "sectionKey", "stageSource",
+      ].some((field) => previous[field] !== next[field]);
+      if (!changed) continue;
+      next.updatedAt = Date.now();
+      updates[`manualTrainingHistories/${historyId}`] = next;
+      updates[`userManualTrainingHistories/${uid}/${historyId}`] = next;
+    }
+  }
+  if (Object.keys(updates).length) await db.ref().update(updates);
+}
+
 function buildManualHistoryDedupeKey(record) {
+  const classification = classifyTraining(record);
   return [
     normalizeEmpNo(record.empNo).toLowerCase(),
-    normalizeText(record.trainingType).toLowerCase(),
+    classification.trainingType || normalizeText(record.trainingType).toLowerCase(),
     normalizeText(record.subjectCode || record.subjectName).toLowerCase(),
-    normalizeText(record.title).toLowerCase(),
+    classification.canonicalCourseKey || normalizeText(record.title).toLowerCase(),
     Number(record.completedAt || 0),
   ].join("|");
 }
@@ -1753,6 +1806,7 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
   const errors      = [];
   const traceSamples = [];
   const parsedCount = rows.length;
+  const affectedUids = new Set();
 
   // dedupeKey 세트 (중복 방지)
   const processedKeys = new Set(manualAll.map((r) => r.dedupeKey).filter(Boolean));
@@ -1761,10 +1815,22 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
     // empNo: 탭·공백 완전 제거 (\tT259144 같은 패턴 처리)
     const empNoRaw   = normalizeImportEmpNo(row.empNo ?? row.employeeEmpNo ?? "");
     const empNameRaw = String(row.employeeName ?? row.name ?? "").replace(/\s+/g, " ").trim();
-    const trainingType = normalizeHistoryImportType(row);
-    const courseName   = normalizeText(row.courseName ?? row.subjectName ?? "");
+    const rawTrainingType = normalizeHistoryImportType(row);
+    const rawCourseName = normalizeText(row.courseName ?? row.subjectName ?? "");
     const subjectName  = normalizeText(row.subjectName ?? row.courseName ?? "");
-    const normalizedStage = normalizeHistoryStage(
+    const classification = classifyTraining({
+      trainingType: rawTrainingType,
+      courseName: rawCourseName,
+      subjectName,
+      educationStage: row.educationStage,
+      subType: row.subType,
+      educationType: row.educationType,
+      initialOrRecurrent: row.initialOrRecurrent,
+      trainingPhase: row.trainingPhase,
+    });
+    const trainingType = classification.trainingType;
+    const courseName = classification.canonicalCourseName || rawCourseName;
+    const normalizedStage = classification.subType || normalizeHistoryStage(
       row.educationStage,
       row.subType,
       row.initialOrRecurrent,
@@ -1806,18 +1872,20 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
     }
 
     matchedEmpUids.add(employee.uid);
+    affectedUids.add(employee.uid);
     matchedRecordCount++;
 
     // 기존 이력 매칭: trainingType + (courseName|subjectName) + completedAt
     const normalize = (s) => String(s ?? "").toLowerCase().replace(/[\s\(\)\[\]·]/g, "");
     let existingRec = manualAll.find((r) => {
       if (r.uid !== employee.uid) return false;
-      const rType  = normalize(r.trainingType ?? "");
-      const rCourse = normalize(r.courseName ?? r.title ?? r.subjectName ?? "");
+      const existingClassification = classifyTraining(r);
+      const rType  = normalize(existingClassification.trainingType ?? r.trainingType ?? "");
+      const rCourse = normalize(existingClassification.canonicalCourseKey ?? r.courseName ?? r.title ?? r.subjectName ?? "");
       const rSubject = normalize(r.subjectCode ?? r.subjectName ?? r.courseName ?? r.title ?? "");
       const rDate  = Number(r.completedAt ?? 0);
       return rType === normalize(trainingType) &&
-             rCourse === normalize(courseName || subjectName) &&
+             rCourse === normalize(classification.canonicalCourseKey || courseName || subjectName) &&
              rSubject === normalize(row.subjectCode || subjectName || courseName) &&
              rDate === completedAt;
     });
@@ -1826,9 +1894,9 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
     if (!existingRec) {
       existingRec = manualAll.find((r) => {
         if (r.uid !== employee.uid || normalizeText(r.source) !== "history_excel") return false;
-        const rCourse = normalize(r.courseName ?? r.title ?? r.subjectName ?? "");
+        const rCourse = normalize(classifyTraining(r).canonicalCourseKey ?? r.courseName ?? r.title ?? r.subjectName ?? "");
         const rSubject = normalize(r.subjectCode ?? r.subjectName ?? r.courseName ?? r.title ?? "");
-        return rCourse === normalize(courseName || subjectName) &&
+        return rCourse === normalize(classification.canonicalCourseKey || courseName || subjectName) &&
           rSubject === normalize(row.subjectCode || subjectName || courseName) &&
           Number(r.completedAt ?? 0) === completedAt;
       });
@@ -1842,6 +1910,10 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
       result:         normalizeText(row.result)        || "PASS",
       subType:        normalizedStage,
       educationStage: normalizedStage,
+      canonicalCourseName: classification.canonicalCourseName,
+      canonicalCourseKey: classification.canonicalCourseKey,
+      sectionKey: classification.sectionKey,
+      stageSource: classification.stageSource || (normalizedStage ? "explicit" : ""),
       note:           normalizeText(row.note),
       source:         "history_excel",
     };
@@ -1859,6 +1931,13 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
       const existingStage = normalizeHistoryStage(existingRec.subType, existingRec.educationStage);
       if (normalizeTrainingTypeValue(existingRec.trainingType) !== trainingType) {
         patch.trainingType = trainingType;
+      }
+      for (const field of ["canonicalCourseName", "canonicalCourseKey", "sectionKey", "stageSource"]) {
+        if (detailFields[field] && existingRec[field] !== detailFields[field]) patch[field] = detailFields[field];
+      }
+      if (classification.canonicalCourseName && existingRec.courseName !== classification.canonicalCourseName) {
+        patch.courseName = classification.canonicalCourseName;
+        patch.title = classification.canonicalCourseName;
       }
       if (normalizedStage && existingStage !== normalizedStage) {
         patch.subType = normalizedStage;
@@ -1913,6 +1992,10 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
         companyId:     employee.companyId  ?? actor.companyId ?? null,
         companyName:   employee.companyName ?? actor.companyName ?? "",
         trainingType,
+        canonicalCourseName: classification.canonicalCourseName,
+        canonicalCourseKey: classification.canonicalCourseKey,
+        sectionKey: classification.sectionKey,
+        stageSource: classification.stageSource || (normalizedStage ? "explicit" : ""),
         subjectCode:   normalizeText(row.subjectCode ?? ""),
         subjectName:   subjectName || courseName,
         title:         courseName  || subjectName,
@@ -1980,6 +2063,7 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
   if (Object.keys(updates).length) {
     await db.ref().update(updates);
   }
+  await reconcileManualHistoryClassifications(affectedUids);
 
   const validCount = parsedCount - skippedInvalidCount;
   const resultSummary = {

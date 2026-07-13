@@ -140,6 +140,7 @@ const LEGACY_TRAINING_TYPE_MAP = {
   online: "online",
   other: "other",
   job: "job",
+  "직무": "job",
   legal: "legal",
   "직무교육": "job",
   "법정교육": "legal",
@@ -1125,6 +1126,56 @@ function normalizeCycleMatchValue(value) {
   return normalized === "직무" || normalized === "직무교육" ? "job_duty" : normalized;
 }
 
+function historyCanonicalCourse(row) {
+  const courseName = String(row.courseName ?? row.title ?? row.subjectName ?? "").trim();
+  const courseKey = courseName.normalize("NFKC").toLowerCase().replace(/[^a-z0-9가-힣]+/g, "");
+  const trainingType = normalizeTrainingType(row.trainingType);
+  const isJob = trainingType === "job" || /직무|initial|recurrent|recurr|refresher/.test(courseKey);
+  const match = (values) => values.includes(courseKey);
+  if (isJob && match(["직무초기교육", "직무초기", "초기직무", "초기", "입문", "입문교육", "initial"])) return { name: "직무초기교육", key: "job_initial", type: "job", stage: "initial" };
+  if (isJob && match(["직무보수교육", "직무보수", "보수", "보수교육", "정기", "정기교육", "갱신", "갱신교육", "재교육", "recurrent", "recurring", "refresher"])) return { name: "직무보수교육", key: "job_recurrent", type: "job", stage: "recurrent" };
+  if (match(["sms", "safetymanagementsystem", "안전관리시스템"])) return { name: "SMS", key: "legal_sms", type: "legal", stage: "" };
+  if (match(["항공보안", "항공보안교육", "aviationsecurity", "보안교육"])) return { name: "항공보안", key: "legal_security", type: "legal", stage: "" };
+  if (match(["사내강사", "사내강사양성과정", "instructortraining"])) return { name: "사내강사", key: "job_instructor", type: "job", stage: "" };
+  if (match(["운항관리", "운항관리사", "운항통제", "flightdispatch"])) return { name: "운항관리", key: "job_operations", type: "job", stage: "" };
+  if (match(["위험물", "dangerousgoods", "dg"])) return { name: "위험물", key: "legal_dangerous_goods", type: "legal", stage: "" };
+  if (match(["wb", "weightbalance"])) return { name: "W&B", key: "job_wb", type: "job", stage: "" };
+  const key = row.canonicalCourseKey || (trainingType === "job" && ["직무", "직무교육"].includes(courseKey) ? "job_duty" : `${trainingType}_${courseKey || "default"}`);
+  return { name: row.canonicalCourseName || courseName, key, type: trainingType, stage: "" };
+}
+
+function applyHistoryClassification(rows) {
+  const classified = rows.map((row) => {
+    const canonical = historyCanonicalCourse(row);
+    const explicitStage = normalizeTrainingSubType(
+      row.subType, row.educationStage, row.educationType, row.initialOrRecurrent, row.trainingPhase
+    );
+    return {
+      ...row,
+      trainingType: canonical.type,
+      courseName: canonical.name || row.courseName,
+      title: canonical.name || row.title,
+      canonicalCourseName: canonical.name,
+      canonicalCourseKey: canonical.key,
+      subType: canonical.stage || explicitStage,
+    };
+  });
+  const byItem = new Map();
+  for (const row of classified) {
+    if (row.trainingType !== "job" || !row.completedAt) continue;
+    const groupKey = `${row.uid ?? ""}__${row.canonicalCourseKey}`;
+    if (!byItem.has(groupKey)) byItem.set(groupKey, []);
+    byItem.get(groupKey).push(row);
+  }
+  for (const records of byItem.values()) {
+    const firstDate = Math.min(...records.map((row) => Number(row.completedAt)).filter(Number.isFinite));
+    for (const row of records) {
+      if (!row.subType) row.subType = Number(row.completedAt) === firstDate ? "initial" : "recurrent";
+    }
+  }
+  return classified;
+}
+
 /** 교육항목별 회사 공통 주기를 이력 복사본에 적용합니다. */
 function applyEducationCycleConfigs(rows, configs) {
   const byItemId = new Map();
@@ -1302,7 +1353,7 @@ export async function buildEmployeeHistoryRowsV2(uid) {
 
   // ── 합산 후 교육별 최신 이력을 기준으로 재교육 예정일/잔여일 계산
   const allRows = applyDueMetadata(
-    applyEducationCycleConfigs([...legacyRows, ...sessionRows, ...manualRows], cycleConfigs)
+    applyEducationCycleConfigs(applyHistoryClassification([...legacyRows, ...sessionRows, ...manualRows]), cycleConfigs)
   );
 
   return {

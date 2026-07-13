@@ -35,6 +35,7 @@ const SECTION_LABELS = {
   other:         "기타",
 };
 function getSectionKey(row) {
+  if (SECTION_ORDER.includes(row.sectionKey)) return row.sectionKey;
   if (row.trainingType === "job") {
     const stage = _normStage(row.subType) ?? _normStage(row.educationStage) ?? "";
     return stage === "initial" ? "job_initial" : "job_recurring";
