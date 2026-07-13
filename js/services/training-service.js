@@ -35,7 +35,7 @@ export const TRAINING_TYPE_LABELS = {
 
 export const TRAINING_SUBJECT_OPTIONS = {
   job: [
-    { code: "job_duty", name: "직무" },
+    { code: "job_duty", name: "직무교육" },
     { code: "job_operations", name: "운항관리" },
     { code: "job_instructor", name: "사내강사" },
     { code: "job_wb", name: "W&B" },
@@ -77,15 +77,14 @@ function normalizeSelectableSubject(value) {
  */
 export function buildSelectableTrainingItems(items = []) {
   const byNormalizedKey = new Map();
-  const intermediateNames = new Set(["직무", "직무교육", "job", "법정", "법정교육", "legal"]);
+  const temporaryNames = new Set(["dd"]);
 
   const add = (candidate, standard = false) => {
     const trainingType = normalizeTrainingType(candidate.trainingType);
     const rawName = String(candidate.subjectName ?? candidate.title ?? "").normalize("NFKC").trim();
     const rawNameKey = normalizeSelectableSubject(rawName);
     const alias = STANDARD_SUBJECT_ALIASES[trainingType]?.[rawNameKey] ?? null;
-    if (!rawNameKey || intermediateNames.has(rawNameKey)) return;
-    if (!standard && !alias && rawNameKey.length < 3) return;
+    if (!rawNameKey || temporaryNames.has(rawNameKey)) return;
 
     const displayName = alias?.name ?? rawName.replace(/\s+/g, " ");
     const subjectCode = alias?.code ?? String(candidate.subjectCode ?? candidate.id ?? "").trim();
@@ -110,7 +109,6 @@ export function buildSelectableTrainingItems(items = []) {
 
   for (const [trainingType, subjects] of Object.entries(TRAINING_SUBJECT_OPTIONS)) {
     for (const subject of subjects) {
-      if (subject.code === "job_duty") continue;
       add({ trainingType, subjectCode: subject.code, subjectName: subject.name }, true);
     }
   }

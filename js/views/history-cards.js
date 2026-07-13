@@ -57,6 +57,7 @@ let S = {
   items:              [],
   dueStatusFilter:    "",
 };
+let historyCardSort = { key: null, direction: "none" };
 
 /* ──────────────────────────────────────────────────────────
    render
@@ -171,6 +172,20 @@ export async function render(container, params = {}) {
   document.getElementById("hc-due-status")?.addEventListener("change", () => {
     S.dueStatusFilter = document.getElementById("hc-due-status")?.value ?? "";
     if (S.selectedEmployee) { renderSummary(S.selectedEmployee, filteredRows()); renderSections(filteredRows()); }
+  });
+  const sectionsEl = document.getElementById("hc-sections");
+  const handleSortHeader = (event) => {
+    const header = event.target.closest("th[data-hc-sort-key]");
+    if (!header || !sectionsEl?.contains(header)) return;
+    cycleHistoryCardSort(header.dataset.hcSortKey);
+  };
+  sectionsEl?.addEventListener("click", handleSortHeader);
+  sectionsEl?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const header = event.target.closest("th[data-hc-sort-key]");
+    if (!header || !sectionsEl.contains(header)) return;
+    event.preventDefault();
+    cycleHistoryCardSort(header.dataset.hcSortKey);
   });
 
   await initView(params.uid ?? "");
@@ -458,6 +473,27 @@ function groupRows(rows) {
   return groups;
 }
 
+function sortCourseGroups(groups) {
+  if (historyCardSort.key !== "courseName" || historyCardSort.direction === "none") return groups;
+  const direction = historyCardSort.direction === "asc" ? 1 : -1;
+  return [...groups].sort((a, b) => direction * String(a.rep.courseName ?? a.rep.title ?? "")
+    .localeCompare(String(b.rep.courseName ?? b.rep.title ?? ""), "ko", { numeric: true, sensitivity: "base" }));
+}
+
+function cycleHistoryCardSort(key) {
+  const previousDirection = historyCardSort.key === key ? historyCardSort.direction : "none";
+  const nextDirection = previousDirection === "none" ? "asc" : previousDirection === "asc" ? "desc" : "none";
+  historyCardSort = { key: nextDirection === "none" ? null : key, direction: nextDirection };
+  renderSections(filteredRows());
+}
+
+function sortableHistoryCardHeader(key, label) {
+  const active = historyCardSort.key === key && historyCardSort.direction !== "none";
+  const icon = active ? (historyCardSort.direction === "asc" ? "▲" : "▼") : "";
+  const ariaSort = !active ? "none" : historyCardSort.direction === "asc" ? "ascending" : "descending";
+  return `<th data-hc-sort-key="${esc(key)}" tabindex="0" role="columnheader" aria-sort="${ariaSort}" style="cursor:pointer;user-select:none;white-space:nowrap" title="클릭하여 정렬">${esc(label)}${icon ? ` <span aria-hidden="true" style="font-size:10px">${icon}</span>` : ""}</th>`;
+}
+
 function renderSections(rows) {
   const el = document.getElementById("hc-sections");
   if (!el) return;
@@ -469,7 +505,7 @@ function renderSections(rows) {
 
   el.innerHTML = SECTION_ORDER.map((secKey) => {
     const sRows   = sectionMap[secKey] ?? [];
-    const groups  = groupRows(sRows);
+    const groups  = sortCourseGroups(groupRows(sRows));
     const isAdmin = authStore.role === ROLES.HQ_ADMIN;
 
     return `
@@ -488,7 +524,7 @@ function renderSections(rows) {
                   <thead>
                     <tr>
                       <th style="width:28px"></th>
-                      <th>교육과정명</th>
+                      ${sortableHistoryCardHeader("courseName", "교육과정명")}
                       <th>강사</th>
                       <th>교육시간</th>
                       <th>교육기간</th>
