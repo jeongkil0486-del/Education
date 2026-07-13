@@ -3,7 +3,7 @@ import { modal } from "../utils/modal.js";
 import { formatDate } from "../utils/date.js";
 import { buildEmployeeHistoryRowsV2, loadTrainingReferences, DUE_STATUS_LABELS } from "../services/training-service.js";
 import { authStore, ROLES } from "../core/auth.js";
-import { deleteEmployeeHistory, upsertManualTrainingHistory } from "../core/admin-api.js";
+import { deleteEmployeeHistory, upsertManualTrainingHistory, resetSelectedManualTrainingHistories } from "../core/admin-api.js";
 import {
   exportEmployeeHistoryCard,
 } from "../services/history-card-export.js";
@@ -68,6 +68,7 @@ export async function render(container, params = {}) {
             <button class="btn btn--secondary" id="btn-import-excel">기존 교육이력 가져오기</button>
           ` : ''}
           ${authStore.role === ROLES.HQ_ADMIN ? '<button class="btn btn--secondary" id="btn-add-manual-history">개인 이력 추가</button>' : ''}
+          ${authStore.role === ROLES.HQ_ADMIN ? '<button class="btn btn--danger btn--sm" id="btn-reset-all-history" disabled style="margin-left:auto">개인이력 전체 초기화</button>' : ''}
           <button class="btn btn--primary" id="btn-download-card" disabled>이력카드 다운로드</button>
         </div>
       </div>
@@ -156,6 +157,7 @@ export async function render(container, params = {}) {
   document.getElementById("btn-import-excel")?.addEventListener("click", openImportExcelModal);
   document.getElementById("btn-add-manual-history")?.addEventListener("click", () => openManualHistoryModal());
   document.getElementById("btn-download-card")?.addEventListener("click", handleDownload);
+  document.getElementById("btn-reset-all-history")?.addEventListener("click", openResetAllHistoryModal);
   document.getElementById("btn-deselect")?.addEventListener("click", deselectEmployee);
   document.getElementById("hc-search")?.addEventListener("input", onFilter);
   document.getElementById("hc-branch")?.addEventListener("change", onFilter);
@@ -294,6 +296,8 @@ async function loadCard(uid) {
     S.rows = rows;
 
     if (dlBtn) dlBtn.disabled = false;
+    const resetBtn = document.getElementById("btn-reset-all-history");
+    if (resetBtn) resetBtn.disabled = false;
 
     // 선택 배너
     const bannerLabel = document.getElementById("hc-selected-label");
@@ -324,6 +328,8 @@ function deselectEmployee() {
 
   const dlBtn = document.getElementById("btn-download-card");
   if (dlBtn) dlBtn.disabled = true;
+  const resetBtn = document.getElementById("btn-reset-all-history");
+  if (resetBtn) resetBtn.disabled = true;
 
   renderEmployeeList();
 }
@@ -846,12 +852,31 @@ function openImportExcelModal() {
           modal.setLoading("저장", true);
           try {
             const result = await importHistoryExcelData({ rows: payload, mode });
-            toast.success([
-              `직원 매칭: ${result.matchedEmployees}명`,
-              `기존 이력 보완: ${result.updatedCount}건`,
-              `신규 이력 추가: ${result.createdCount}건`,
-              `중복 건너뜀: ${result.skippedCount}건`,
-            ].join(" · "));
+
+            // 상세 결과 구성
+            const totalSaved = (result.createdCount ?? 0) + (result.updatedCount ?? 0);
+            const parts = [
+              `분석: ${result.parsedCount ?? payload.length}건`,
+              `직원매칭: ${result.matchedEmployeeCount ?? result.matchedEmployees ?? 0}명`,
+              result.createdCount  ? `신규: ${result.createdCount}건` : null,
+              result.updatedCount  ? `보완: ${result.updatedCount}건` : null,
+              result.skippedDuplicateCount ? `중복: ${result.skippedDuplicateCount}건` : null,
+              result.skippedInvalidCount   ? `오류: ${result.skippedInvalidCount}건` : null,
+              result.unmatchedEmployeeCount ? `직원미매칭: ${result.unmatchedEmployeeCount}건` : null,
+            ].filter(Boolean).join(" · ");
+
+            if (totalSaved === 0) {
+              // 0건 시 이유 표시
+              const reasons = [];
+              if (result.unmatchedEmployeeCount > 0) reasons.push(`직원 미매칭: ${result.unmatchedEmployeeCount}건`);
+              if (result.skippedInvalidCount    > 0) reasons.push(`유효하지 않은 수료일: ${result.skippedInvalidCount}건`);
+              if (result.skippedDuplicateCount  > 0) reasons.push(`중복으로 건너뜀: ${result.skippedDuplicateCount}건`);
+              if (result.matchedExistingCount   > 0 && result.updatedCount === 0) reasons.push(`기존 이력에 보완할 내용 없음: ${result.matchedExistingCount}건`);
+              if (result.errors?.length)             reasons.push(...result.errors.slice(0, 3));
+              toast.warning(`저장된 이력이 없습니다.\n${reasons.join("\n") || "알 수 없는 이유"}`);
+            } else {
+              toast.success(parts);
+            }
             modal.close();
             delete window._importAnalyzed;
             if (S.selectedEmployeeId) await loadCard(S.selectedEmployeeId);
@@ -1170,6 +1195,67 @@ function fmtDateMs(ms) {
   if (!ms) return "–";
   const d = new Date(Number(ms));
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+
+/* ──────────────────────────────────────────────────────────
+   개인이력 전체 초기화
+────────────────────────────────────────────────────────── */
+function openResetAllHistoryModal() {
+  if (!S.selectedEmployeeId || !S.selectedEmployee) {
+    toast.warning("먼저 직원을 선택해 주세요.");
+    return;
+  }
+  const emp = S.selectedEmployee;
+  modal.open({
+    title: "개인이력 전체 초기화",
+    content: `
+      <div style="padding:var(--space-2)">
+        <p style="margin-bottom:var(--space-3);font-weight:var(--weight-semibold);color:var(--red-600,#dc2626)">
+          ⚠ 주의: 이 작업은 되돌릴 수 없습니다.
+        </p>
+        <p style="margin-bottom:var(--space-2)">
+          <strong>${esc(emp.name ?? "–")}</strong> (${esc(emp.empNo ?? "–")}) 직원의
+          수동 등록 및 Excel 가져오기 교육이력을 모두 삭제합니다.
+        </p>
+        <p style="margin-bottom:var(--space-4);color:var(--gray-500);font-size:var(--text-sm)">
+          교육 회차 완료 이력은 유지됩니다.
+        </p>
+        <p style="font-size:var(--text-xs);color:var(--gray-400)">
+          삭제 대상: manual / manual_excel / history_excel source 이력 전체
+        </p>
+      </div>`,
+    buttons: [
+      { label: "취소", variant: "ghost", onClick: () => modal.close() },
+      {
+        label: "전체 초기화",
+        variant: "danger",
+        onClick: async () => {
+          modal.setLoading("전체 초기화", true);
+          try {
+            const result = await resetSelectedManualTrainingHistories({
+              uids: [S.selectedEmployeeId],
+              resetAllForUser: true,
+              trainingType: "",
+            });
+            const count = result.deletedCount ?? 0;
+            if (count > 0) {
+              toast.success(
+                `${esc(emp.name)}의 개인이력 ${count}건을 초기화했습니다. 회차 완료 이력은 유지되었습니다.`
+              );
+            } else {
+              toast.info("초기화할 개인이력이 없습니다.");
+            }
+            modal.close();
+            await loadCard(S.selectedEmployeeId);
+          } catch (err) {
+            console.error("[history-cards] resetAllHistory failed", err);
+            toast.error(err?.message || "초기화에 실패했습니다.");
+            modal.setLoading("전체 초기화", false);
+          }
+        },
+      },
+    ],
+  });
 }
 
 /* ──────────────────────────────────────────────────────────

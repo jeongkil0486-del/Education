@@ -913,7 +913,7 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
   const shouldDeleteRecord = (record) => {
     if (!record) return false;
     const recordSource = normalizeText(record.source).toLowerCase();
-    if (recordSource && !["manual", "manual_excel"].includes(recordSource)) return false;
+    if (recordSource && !["manual", "manual_excel", "history_excel"].includes(recordSource)) return false;
     if (sourceFilter && recordSource !== sourceFilter) return false;
     if (trainingType && normalizeTrainingTypeValue(record.trainingType) !== trainingType) return false;
     if (subjectCode && normalizeText(record.subjectCode) !== subjectCode) return false;
@@ -1092,8 +1092,19 @@ function normalizeDateMillis(value, label) {
   if (value === null || value === undefined || value === "") return null;
   const numberValue = Number(value);
   if (Number.isFinite(numberValue) && numberValue > 100000000000) return numberValue;
+  // YYYYMMDD 형식 지원 (20241207 → ms)
+  if (Number.isFinite(numberValue) && numberValue >= 19700101 && numberValue <= 21001231) {
+    const s = String(Math.round(numberValue));
+    if (/^\d{8}$/.test(s)) {
+      const d = new Date(`${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}`);
+      if (!isNaN(d.getTime())) return d.getTime();
+    }
+  }
   const parsed = Date.parse(String(value));
-  if (!Number.isFinite(parsed)) throw new Error(`${label} 형식이 올바르지 않습니다.`);
+  if (!Number.isFinite(parsed)) {
+    // throw 대신 null 반환 (importHistoryExcelData에서 무효행 처리)
+    return null;
+  }
   return parsed;
 }
 
@@ -1515,7 +1526,10 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
   const mode = normalizeText(request.data?.mode) === "overwrite" ? "overwrite" : "fill";
 
   if (!rows.length) {
-    return { matchedEmployees: 0, updatedCount: 0, createdCount: 0, skippedCount: 0, errors: [] };
+    return { parsedCount: 0, validCount: 0, matchedEmployeeCount: 0, unmatchedEmployeeCount: 0,
+             matchedExistingCount: 0, updatedCount: 0, createdCount: 0,
+             skippedDuplicateCount: 0, skippedInvalidCount: 0,
+             matchedEmployees: 0, skippedCount: 0, errors: ["전송된 이력이 없습니다."] };
   }
 
   // 회사 직원 목록 조회
@@ -1541,10 +1555,15 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
 
   const updates         = {};
   const matchedEmpUids  = new Set();
-  let updatedCount  = 0;
-  let createdCount  = 0;
-  let skippedCount  = 0;
+  let updatedCount          = 0;
+  let createdCount          = 0;
+  let skippedCount          = 0;
+  let skippedDuplicateCount = 0;
+  let skippedInvalidCount   = 0;
+  let unmatchedEmpCount     = 0;
+  let matchedExistingCount  = 0;
   const errors      = [];
+  const parsedCount = rows.length;
 
   // dedupeKey 세트 (중복 방지)
   const processedKeys = new Set(manualAll.map((r) => r.dedupeKey).filter(Boolean));
@@ -1556,10 +1575,20 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
     const trainingType = normalizeTrainingTypeValue(row.trainingType ?? "job");
     const courseName   = normalizeText(row.courseName ?? row.subjectName ?? "");
     const subjectName  = normalizeText(row.subjectName ?? row.courseName ?? "");
-    const completedAt  = normalizeDateMillis(row.completedAt, "수료일");
+    // normalizeDateMillis는 null을 반환할 수 있음 (throw 대신)
+    let completedAt = null;
+    try { completedAt = normalizeDateMillis(row.completedAt, "수료일"); } catch(e) { completedAt = null; }
 
-    if (!courseName && !subjectName) { errors.push(`교육과정명 없음`); continue; }
-    if (!completedAt)                { errors.push(`수료일 없음 (과정: ${courseName})`); continue; }
+    if (!courseName && !subjectName) {
+      errors.push(`교육과정명 없음`);
+      skippedInvalidCount++;
+      continue;
+    }
+    if (!completedAt) {
+      errors.push(`수료일 없음 또는 형식 오류 (과정: ${courseName}, 원본값: ${row.completedAt})`);
+      skippedInvalidCount++;
+      continue;
+    }
 
     // 직원 탐색
     let employee = null;
@@ -1574,7 +1603,11 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
         continue;
       }
     }
-    if (!employee) { errors.push(`직원 미매칭: ${empNameRaw || empNoRaw || "?"}`); continue; }
+    if (!employee) {
+      errors.push(`직원 미매칭: ${empNameRaw || empNoRaw || "?"}`);
+      unmatchedEmpCount++;
+      continue;
+    }
 
     matchedEmpUids.add(employee.uid);
 
@@ -1614,6 +1647,7 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
         if (mode === "fill" && existing && existing !== "-" && existing !== "") continue;
         patch[k] = v;
       }
+      matchedExistingCount++;
       if (Object.keys(patch).length > 0) {
         patch.updatedAt    = Date.now();
         patch.updatedBy    = request.auth.uid;
@@ -1663,7 +1697,7 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
       record.dedupeKey = buildManualHistoryDedupeKey(record);
 
       // 중복 체크
-      if (processedKeys.has(record.dedupeKey)) { skippedCount++; continue; }
+      if (processedKeys.has(record.dedupeKey)) { skippedCount++; skippedDuplicateCount++; continue; }
       processedKeys.add(record.dedupeKey);
 
       updates[`manualTrainingHistories/${historyId}`] = record;
@@ -1676,11 +1710,21 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
     await db.ref().update(updates);
   }
 
-  return {
-    matchedEmployees: matchedEmpUids.size,
+  const validCount = parsedCount - skippedInvalidCount;
+  const resultSummary = {
+    parsedCount,
+    validCount,
+    matchedEmployeeCount: matchedEmpUids.size,
+    unmatchedEmployeeCount: unmatchedEmpCount,
+    matchedExistingCount,
     updatedCount,
     createdCount,
+    skippedDuplicateCount,
+    skippedInvalidCount,
+    // 하위 호환 필드
+    matchedEmployees: matchedEmpUids.size,
     skippedCount,
-    errors: errors.slice(0, 20),
+    errors: errors.slice(0, 30),
   };
+  return resultSummary;
 });
