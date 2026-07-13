@@ -1,7 +1,13 @@
 import { toast } from "../utils/toast.js";
 import { modal } from "../utils/modal.js";
 import { formatDate } from "../utils/date.js";
-import { buildEmployeeHistoryRowsV2, loadTrainingReferences, DUE_STATUS_LABELS } from "../services/training-service.js";
+import {
+  buildEmployeeHistoryRowsV2,
+  loadTrainingReferences,
+  listManagedItems,
+  TRAINING_SUBJECT_OPTIONS,
+  DUE_STATUS_LABELS,
+} from "../services/training-service.js";
 import { authStore, ROLES } from "../core/auth.js";
 import { deleteEmployeeHistory, upsertManualTrainingHistory, resetSelectedManualTrainingHistories } from "../core/admin-api.js";
 import {
@@ -48,6 +54,7 @@ let S = {
   selectedEmployee:   null,
   rows:               [],
   templates:          [],
+  items:              [],
   dueStatusFilter:    "",
 };
 
@@ -67,7 +74,7 @@ export async function render(container, params = {}) {
           ${authStore.role === ROLES.HQ_ADMIN || authStore.role === ROLES.SUPER_ADMIN ? `
             <button class="btn btn--secondary" id="btn-import-excel">기존 교육이력 가져오기</button>
           ` : ''}
-          ${authStore.role === ROLES.HQ_ADMIN ? '<button class="btn btn--secondary" id="btn-add-manual-history">개인 이력 추가</button>' : ''}
+          ${authStore.role === ROLES.HQ_ADMIN ? '<button class="btn btn--secondary" id="btn-add-manual-history" disabled>개인 이력 추가</button>' : ''}
           ${authStore.role === ROLES.HQ_ADMIN ? '<button class="btn btn--danger btn--sm" id="btn-reset-all-history" disabled style="margin-left:auto">개인이력 전체 초기화</button>' : ''}
           <button class="btn btn--primary" id="btn-download-card" disabled>이력카드 다운로드</button>
         </div>
@@ -174,11 +181,15 @@ export async function render(container, params = {}) {
 ────────────────────────────────────────────────────────── */
 async function initView(initialUid = "") {
   try {
-    const references = await loadTrainingReferences();
+    const [references, items] = await Promise.all([
+      loadTrainingReferences(),
+      authStore.role === ROLES.HQ_ADMIN ? listManagedItems().catch(() => []) : Promise.resolve([]),
+    ]);
 
     S.employees = references.employees ?? [];
     S.branches  = references.branches  ?? [];
     S.templates = [];
+    S.items = items;
 
     // 지점 셀렉트 채우기
     const branchSel = document.getElementById("hc-branch");
@@ -296,6 +307,8 @@ async function loadCard(uid) {
     S.rows = rows;
 
     if (dlBtn) dlBtn.disabled = false;
+    const addManualBtn = document.getElementById("btn-add-manual-history");
+    if (addManualBtn) addManualBtn.disabled = false;
     const resetBtn = document.getElementById("btn-reset-all-history");
     if (resetBtn) resetBtn.disabled = false;
 
@@ -325,6 +338,8 @@ function deselectEmployee() {
 
   const cardSection = document.getElementById("hc-card-section");
   if (cardSection) cardSection.style.display = "none";
+  const addManualBtn = document.getElementById("btn-add-manual-history");
+  if (addManualBtn) addManualBtn.disabled = true;
 
   const dlBtn = document.getElementById("btn-download-card");
   if (dlBtn) dlBtn.disabled = true;
@@ -835,23 +850,137 @@ function toInputDate(value) {
 }
 function dateInputMillis(id) { const value=document.getElementById(id)?.value; return value ? new Date(`${value}T00:00:00`).getTime() : null; }
 
+function normalizeManualStage(value) {
+  const key = String(value ?? "").trim().toLowerCase();
+  if (["recurrent", "recurring", "refresher", "보수", "정기", "갱신", "재교육"].includes(key)) return "recurrent";
+  if (["initial", "초기", "입문"].includes(key)) return "initial";
+  return "";
+}
+
+function manualCategoryForRow(row) {
+  if (row?.trainingType !== "job") return row?.trainingType ?? "job";
+  return normalizeManualStage(row?.subType ?? row?.educationStage) === "recurrent" ? "job_recurrent" : "job_initial";
+}
+
+function getManualSelectableItems(category, row) {
+  const trainingType = category.startsWith("job_") ? "job" : category;
+  const categoryStage = category === "job_initial" ? "initial" : category === "job_recurrent" ? "recurrent" : "";
+  const items = [];
+
+  for (const item of S.items.filter((entry) => entry.trainingType === trainingType)) {
+    const itemStage = normalizeManualStage(item.subType);
+    if (categoryStage && itemStage && itemStage !== categoryStage) continue;
+    items.push({
+      itemId: item.id ?? "",
+      subjectCode: item.subjectCode ?? "",
+      subjectName: item.subjectName ?? item.title ?? "",
+      courseName: item.title ?? item.subjectName ?? "",
+      subType: itemStage || categoryStage,
+    });
+  }
+
+  for (const subject of TRAINING_SUBJECT_OPTIONS[trainingType] ?? []) {
+    items.push({
+      itemId: "",
+      subjectCode: subject.code ?? "",
+      subjectName: subject.name ?? "",
+      courseName: subject.name ?? "",
+      subType: categoryStage,
+    });
+  }
+
+  if (row && ["job", "legal"].includes(trainingType)) {
+    items.push({
+      itemId: row.itemId ?? "",
+      subjectCode: row.subjectCode ?? "",
+      subjectName: row.subjectName ?? row.courseName ?? row.title ?? "",
+      courseName: row.courseName ?? row.title ?? row.subjectName ?? "",
+      subType: normalizeManualStage(row.subType) || categoryStage,
+    });
+  }
+
+  const seen = new Set();
+  return items.filter((item) => {
+    if (!item.courseName) return false;
+    const key = `${item.itemId}|${item.subjectCode}|${item.courseName}|${item.subType}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).sort((a, b) => a.courseName.localeCompare(b.courseName, "ko"));
+}
+
 function openManualHistoryModal(row = null) {
-  if (!S.selectedEmployeeId) { toast.warning("먼저 직원을 선택해 주세요."); return; }
+  if (!S.selectedEmployeeId || !S.selectedEmployee) { toast.warning("먼저 직원을 선택해 주세요."); return; }
+  const initialCategory = manualCategoryForRow(row);
+  let selectableItems = [];
   modal.open({
     title: row ? "개인 교육이력 수정" : "개인 교육이력 추가", size: "lg",
     body: `<div style="display:flex;flex-direction:column;gap:var(--space-4)">
-      <div class="form-row"><div class="form-group"><label class="form-label form-label--required">교육유형</label><select class="form-control" id="mh-type">${[["job","직무교육"],["legal","법정교육"],["online","온라인교육"],["external","외부교육"],["other","기타"]].map(([v,l])=>`<option value="${v}" ${row?.trainingType===v?"selected":""}>${l}</option>`).join("")}</select></div><div class="form-group"><label class="form-label form-label--required">교육 세부분류/과목</label><input class="form-control" id="mh-subject" value="${esc(row?.subjectName??"")}"/></div></div>
-      <div class="form-row"><div class="form-group"><label class="form-label form-label--required">교육과정명</label><input class="form-control" id="mh-title" value="${esc(row?.courseName??row?.title??"")}"/></div><div class="form-group"><label class="form-label">강사명</label><input class="form-control" id="mh-instructor" value="${esc(row?.instructorName??"")}"/></div></div>
-      <div class="form-row form-row--3"><div class="form-group"><label class="form-label">교육시간</label><input class="form-control" id="mh-hours" type="number" min="0" step="0.5" value="${row?.hours??""}"/></div><div class="form-group"><label class="form-label">초기/보수</label><select class="form-control" id="mh-subtype"><option value="">구분 없음</option><option value="initial" ${row?.subType==="initial"?"selected":""}>초기</option><option value="recurring" ${row?.subType==="recurring"?"selected":""}>보수</option></select></div><div class="form-group"><label class="form-label">재교육 주기(개월)</label><input class="form-control" id="mh-cycle" type="number" min="0" value="${row?.cycleMonths??""}"/></div></div>
+      <div style="padding:var(--space-3);background:var(--gray-50);border-radius:var(--radius-md);font-size:var(--text-sm)"><b>${esc(S.selectedEmployee.name ?? "–")}</b> (${esc(S.selectedEmployee.empNo ?? "–")})에게만 등록됩니다.</div>
+      <div class="form-row"><div class="form-group"><label class="form-label form-label--required">교육유형</label><select class="form-control" id="mh-category">${[["job_initial","직무초기교육"],["job_recurrent","직무보수교육"],["legal","법정교육"],["online","온라인교육"],["external","외부교육"],["other","기타"]].map(([v,l])=>`<option value="${v}" ${initialCategory===v?"selected":""}>${l}</option>`).join("")}</select></div><div class="form-group"><label class="form-label form-label--required">교육과목명</label><input class="form-control" id="mh-subject" value="${esc(row?.subjectName??"")}"/></div></div>
+      <div class="form-row"><div class="form-group" id="mh-item-wrap"><label class="form-label form-label--required">교육항목 선택</label><select class="form-control" id="mh-item"><option value="">-- 교육항목을 선택하세요 --</option></select><div class="form-hint">등록된 교육항목만 선택할 수 있습니다.</div></div><div class="form-group" id="mh-title-wrap"><label class="form-label form-label--required">교육과정명</label><input class="form-control" id="mh-title" value="${esc(row?.courseName??row?.title??"")}"/></div><div class="form-group"><label class="form-label">강사명</label><input class="form-control" id="mh-instructor" value="${esc(row?.instructorName??"")}"/></div></div>
+      <input type="hidden" id="mh-item-id" value="${esc(row?.itemId??"")}"/><input type="hidden" id="mh-subject-code" value="${esc(row?.subjectCode??"")}"/>
+      <div class="form-row form-row--3"><div class="form-group"><label class="form-label">교육시간</label><input class="form-control" id="mh-hours" type="number" min="0" step="0.5" value="${row?.hours??""}"/></div><div class="form-group"><label class="form-label">초기/보수</label><select class="form-control" id="mh-subtype"><option value="">구분 없음</option><option value="initial">초기</option><option value="recurrent">보수</option></select></div><div class="form-group"><label class="form-label">결과</label><input class="form-control" id="mh-result" value="${esc(row?.result??"PASS")}"/></div></div>
       <div class="form-row form-row--3"><div class="form-group"><label class="form-label">교육 시작일</label><input class="form-control" id="mh-start" type="date" value="${toInputDate(row?.startDate)}"/></div><div class="form-group"><label class="form-label">교육 종료일</label><input class="form-control" id="mh-end" type="date" value="${toInputDate(row?.endDate)}"/></div><div class="form-group"><label class="form-label form-label--required">수료일</label><input class="form-control" id="mh-completed" type="date" value="${toInputDate(row?.completedAt)}"/></div></div>
       <div class="form-group"><label class="form-label">비고</label><textarea class="form-control" id="mh-note" rows="2">${esc(row?.note??"")}</textarea></div>
     </div>`,
     actions:[{label:"취소",variant:"secondary",onClick:()=>modal.close()},{label:row?"수정":"등록",variant:"primary",onClick:async()=>{
-      const payload={historyId:row?.historyId??"",uid:S.selectedEmployeeId,trainingType:document.getElementById("mh-type")?.value,subjectName:document.getElementById("mh-subject")?.value?.trim(),title:document.getElementById("mh-title")?.value?.trim(),courseName:document.getElementById("mh-title")?.value?.trim(),instructorName:document.getElementById("mh-instructor")?.value?.trim(),hours:Number(document.getElementById("mh-hours")?.value)||0,subType:document.getElementById("mh-subtype")?.value,cycleMonths:Number(document.getElementById("mh-cycle")?.value)||0,startDate:dateInputMillis("mh-start"),endDate:dateInputMillis("mh-end"),completedAt:dateInputMillis("mh-completed"),result:"PASS",note:document.getElementById("mh-note")?.value?.trim()};
-      if(!payload.subjectName||!payload.title||!payload.completedAt){toast.error("세부분류, 교육과정명, 수료일을 입력해 주세요.");return;}
+      const category = document.getElementById("mh-category")?.value ?? "";
+      const trainingType = category.startsWith("job_") ? "job" : category;
+      const payload={historyId:row?.historyId??"",uid:S.selectedEmployeeId,itemId:document.getElementById("mh-item-id")?.value??"",trainingType,subjectCode:document.getElementById("mh-subject-code")?.value??"",subjectName:document.getElementById("mh-subject")?.value?.trim(),title:document.getElementById("mh-title")?.value?.trim(),courseName:document.getElementById("mh-title")?.value?.trim(),instructorName:document.getElementById("mh-instructor")?.value?.trim(),hours:Number(document.getElementById("mh-hours")?.value)||0,subType:document.getElementById("mh-subtype")?.value,cycleMonths:Number(row?.cycleMonths??0)||0,startDate:dateInputMillis("mh-start"),endDate:dateInputMillis("mh-end"),completedAt:dateInputMillis("mh-completed"),result:document.getElementById("mh-result")?.value?.trim()||"PASS",note:document.getElementById("mh-note")?.value?.trim()};
+      if(!payload.subjectName||!payload.title||!payload.completedAt){toast.error("교육항목/과정명, 교육과목명, 수료일을 확인해 주세요.");return;}
+      if(["job","legal"].includes(trainingType)&&!document.getElementById("mh-item")?.value){toast.error("등록된 교육항목을 선택해 주세요.");return;}
       modal.setLoading(row?"수정":"등록",true);try{await upsertManualTrainingHistory(payload);toast.success(`개인 교육이력을 ${row?"수정":"등록"}했습니다.`);modal.close();await loadCard(S.selectedEmployeeId);}catch(err){console.error(err);toast.error(err?.message||"저장에 실패했습니다.");modal.setLoading(row?"수정":"등록",false);}
     }}]
   });
+
+  const refreshCourseControl = () => {
+    const category = document.getElementById("mh-category")?.value ?? "";
+    const directInput = ["online", "external", "other"].includes(category);
+    const itemWrap = document.getElementById("mh-item-wrap");
+    const titleWrap = document.getElementById("mh-title-wrap");
+    const itemSelect = document.getElementById("mh-item");
+    const subType = document.getElementById("mh-subtype");
+    if (itemWrap) itemWrap.style.display = directInput ? "none" : "block";
+    if (titleWrap) titleWrap.style.display = directInput ? "block" : "none";
+    selectableItems = directInput ? [] : getManualSelectableItems(category, row);
+    if (itemSelect) {
+      itemSelect.innerHTML = `<option value="">-- 교육항목을 선택하세요 --</option>` + selectableItems.map((item, index) => `<option value="${index}">${esc(item.courseName)}${item.subjectName !== item.courseName ? ` · ${esc(item.subjectName)}` : ""}</option>`).join("");
+      const selectedIndex = selectableItems.findIndex((item) =>
+        (row?.itemId && item.itemId === row.itemId) ||
+        (row && item.courseName === (row.courseName ?? row.title) && (!row.subjectCode || item.subjectCode === row.subjectCode))
+      );
+      if (selectedIndex >= 0) itemSelect.value = String(selectedIndex);
+    }
+    if (subType) {
+      if (category === "job_initial") { subType.value = "initial"; subType.disabled = true; }
+      else if (category === "job_recurrent") { subType.value = "recurrent"; subType.disabled = true; }
+      else { subType.disabled = false; subType.value = normalizeManualStage(row?.subType) || ""; }
+    }
+  };
+
+  document.getElementById("mh-category")?.addEventListener("change", () => {
+    document.getElementById("mh-title").value = "";
+    document.getElementById("mh-subject").value = "";
+    document.getElementById("mh-item-id").value = "";
+    document.getElementById("mh-subject-code").value = "";
+    refreshCourseControl();
+  });
+  document.getElementById("mh-item")?.addEventListener("change", (event) => {
+    if (event.target.value === "") {
+      document.getElementById("mh-title").value = "";
+      document.getElementById("mh-item-id").value = "";
+      document.getElementById("mh-subject-code").value = "";
+      return;
+    }
+    const item = selectableItems[Number(event.target.value)];
+    if (!item) return;
+    document.getElementById("mh-title").value = item.courseName;
+    document.getElementById("mh-subject").value = item.subjectName;
+    document.getElementById("mh-item-id").value = item.itemId;
+    document.getElementById("mh-subject-code").value = item.subjectCode;
+  });
+  refreshCourseControl();
 }
 
 

@@ -118,7 +118,7 @@ export async function render(container) {
       <div style="display:flex;gap:var(--space-2);flex-wrap:wrap;align-items:center">
         ${isHQAdmin ? `
           <button class="btn btn--secondary btn--sm" id="btn-history-template">양식 다운로드</button>
-          <button class="btn btn--secondary btn--sm" id="btn-cycle-config" disabled>재교육 주기 설정</button>
+          <button class="btn btn--secondary btn--sm" id="btn-cycle-config">재교육 주기 설정</button>
         ` : ""}
       </div>
     </div>
@@ -255,7 +255,7 @@ export async function render(container) {
     if (searchBtn) searchBtn.disabled = !ok;
     if (isHQAdmin) {
       const cycleBtn = document.getElementById("btn-cycle-config");
-      if (cycleBtn) cycleBtn.disabled = !trainingSel?.value;
+      if (cycleBtn) cycleBtn.disabled = false;
     }
   };
   branchSel?.addEventListener("change", () => { selectedUids.clear(); checkBtnState(); });
@@ -273,22 +273,29 @@ export async function render(container) {
    교육 옵션 목록 빌드
 ═══════════════════════════════════════════════════════ */
 function buildTrainingOptions(items) {
-  const opts = [];
+  const optionsByValue = new Map();
+  const addOption = (option) => optionsByValue.set(option.value, option);
   for (const s of TRAINING_SUBJECT_OPTIONS.job ?? []) {
-    opts.push({ value: `job|${s.code}`, label: `직무교육 - ${s.name}`, trainingType: "job", subjectCode: s.code, subjectName: s.name });
+    addOption({ value: `job|${s.code}`, label: `직무교육 - ${s.name}`, trainingType: "job", subjectCode: s.code, subjectName: s.name });
   }
   for (const s of TRAINING_SUBJECT_OPTIONS.legal ?? []) {
-    opts.push({ value: `legal|${s.code}`, label: `법정교육 - ${s.name}`, trainingType: "legal", subjectCode: s.code, subjectName: s.name });
+    addOption({ value: `legal|${s.code}`, label: `법정교육 - ${s.name}`, trainingType: "legal", subjectCode: s.code, subjectName: s.name });
   }
-  for (const item of items.filter((i) => i.trainingType === "online")) {
+  for (const item of items) {
+    const trainingType = normalizeTrainingType(item.trainingType);
     const sn = item.subjectName ?? item.title ?? "";
-    opts.push({ value: `online|${item.subjectCode || item.id}`, label: `온라인교육 - ${sn}`, trainingType: "online", subjectCode: item.subjectCode || item.id, subjectName: sn, itemId: item.id });
+    if (!sn) continue;
+    const value = `${trainingType}|${item.subjectCode || item.id}`;
+    addOption({
+      value,
+      label: `${TRAINING_TYPE_LABELS[trainingType] ?? "기타"} - ${sn}`,
+      trainingType,
+      subjectCode: item.subjectCode || item.id,
+      subjectName: sn,
+      itemId: item.id,
+    });
   }
-  for (const item of items.filter((i) => i.trainingType === "other")) {
-    const sn = item.subjectName ?? item.title ?? "";
-    opts.push({ value: `other|${item.subjectCode || item.id}`, label: `기타 - ${sn}`, trainingType: "other", subjectCode: item.subjectCode || item.id, subjectName: sn, itemId: item.id });
-  }
-  return opts;
+  return [...optionsByValue.values()].sort((a, b) => a.label.localeCompare(b.label, "ko"));
 }
 
 function parseTrainingValue(val) {
@@ -454,9 +461,9 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
     // 비고 및 cycleMonths
     const lastRec = [...recs].sort((a, b) => Number(b.completedAt ?? 0) - Number(a.completedAt ?? 0))[0];
     const note    = lastRec?.note ?? "";
-    // cycleMonths 적용 우선순위: 이력 > item > 전역설정
+    // 회사 공통 교육항목 설정을 최우선 적용하고 기존 값은 안전한 fallback으로 유지
     const itemCycle = (() => { if (!trainingMeta?.itemId) return 0; const it = viewState.items.find((i) => i.id === trainingMeta.itemId); return Number(it?.cycleMonths ?? 0) || 0; })();
-    const effectiveCycle = Number(lastRec?.cycleMonths ?? 0) || itemCycle || globalCycleMonths;
+    const effectiveCycle = globalCycleMonths || itemCycle || Number(lastRec?.cycleMonths ?? 0) || 0;
 
     // applyDueMetadata 적용
     const dueRow = lastDate ? applyDueMetadata([{
@@ -978,32 +985,20 @@ async function openEditEmployeeModal(row) {
    재교육 주기 설정 모달
 ═══════════════════════════════════════════════════════ */
 async function openCycleConfigModal() {
-  const trainingVal = document.getElementById("ledger-training")?.value ?? "";
-  const trainingMeta = parseTrainingValue(trainingVal);
-  if (!trainingMeta) { toast.warning("교육을 먼저 선택하세요."); return; }
-
-  const educationKey = buildEducationKey(trainingMeta);
-  const selectedBranch = getSelectedBranch();
-  const companyId    = getEffectiveCompanyId(trainingMeta, selectedBranch);
-  let currentCycle   = 0;
-  try {
-    const config = companyId ? await educationCycleConfigsDB.get(companyId, educationKey) : null;
-    currentCycle = Number(config?.cycleMonths ?? 0) || 0;
-    if (!currentCycle && trainingMeta.itemId) {
-      const item = viewState.items.find((i) => i.id === trainingMeta.itemId);
-      currentCycle = Number(item?.cycleMonths ?? 0) || 0;
-    }
-  } catch (e) { /* 무시 */ }
+  const options = buildTrainingOptions(viewState.items);
+  if (!options.length) { toast.warning("설정할 교육항목이 없습니다."); return; }
+  const preselectedValue = document.getElementById("ledger-training")?.value ?? "";
+  const preselected = options.find((option) => option.value === preselectedValue) ?? options[0];
+  const types = [...new Set(options.map((option) => option.trainingType))];
 
   modal.open({
     title: "재교육 주기 설정",
     size: "sm",
     body: `
       <div style="display:flex;flex-direction:column;gap:var(--space-4)">
-        <div style="font-size:var(--text-sm);line-height:1.7">
-          <div><b>교육:</b> ${esc(trainingMeta.label)}</div>
-          <div><b>현재 주기:</b> ${currentCycle ? `${currentCycle}개월` : "미설정"}</div>
-        </div>
+        <div class="form-group" style="margin:0"><label class="form-label form-label--required">교육유형</label><select class="form-control" id="cycle-training-type">${types.map((type) => `<option value="${type}" ${type === preselected.trainingType ? "selected" : ""}>${esc(TRAINING_TYPE_LABELS[type] ?? type)}</option>`).join("")}</select></div>
+        <div class="form-group" style="margin:0"><label class="form-label form-label--required">교육항목</label><select class="form-control" id="cycle-training-item"></select></div>
+        <div style="font-size:var(--text-sm);line-height:1.7"><b>현재 주기:</b> <span id="cycle-current-label">불러오는 중…</span><div class="form-hint">이 설정은 지점과 관계없이 회사 전체의 동일 교육항목에 적용됩니다.</div></div>
         <div class="form-group" style="margin:0">
           <label class="form-label form-label--required">새 재교육 주기</label>
           <div style="display:flex;gap:var(--space-2);flex-wrap:wrap;margin-bottom:var(--space-2)">
@@ -1013,7 +1008,7 @@ async function openCycleConfigModal() {
             <button type="button" class="btn btn--ghost btn--sm cycle-preset" data-val="0">주기 없음</button>
           </div>
           <input class="form-control" id="cycle-months-input" type="number" min="0" max="120" step="1"
-            placeholder="직접 입력 (0 = 주기 없음)" value="${currentCycle}"/>
+            placeholder="직접 입력 (0 = 주기 없음)" value="0"/>
           <div class="form-hint">0~120 사이 정수 · 0은 주기 없음</div>
         </div>
       </div>`,
@@ -1031,9 +1026,12 @@ async function openCycleConfigModal() {
           }
           modal.setLoading("저장", true);
           try {
+            const selectedValue = document.getElementById("cycle-training-item")?.value ?? "";
+            const trainingMeta = options.find((option) => option.value === selectedValue);
+            if (!trainingMeta) throw new Error("교육항목을 선택해 주세요.");
+            const companyId = getEffectiveCompanyId(trainingMeta, null);
             const payload = {
               companyId,
-              branchId:     selectedBranch?.id ?? currentLedgerMeta?.branchId ?? "",
               itemId:       trainingMeta.itemId ?? "",
               trainingType: trainingMeta.trainingType,
               subjectCode:  trainingMeta.subjectCode ?? "",
@@ -1041,11 +1039,6 @@ async function openCycleConfigModal() {
               cycleMonths:  val,
             };
             console.info("[employees] saveEducationCycleConfig request", {
-              selectedBranch: selectedBranch ? {
-                id: selectedBranch.id,
-                name: selectedBranch.name,
-                companyId: selectedBranch.companyId ?? "",
-              } : null,
               selectedEducation: trainingMeta,
               currentUser: {
                 uid: authStore.uid,
@@ -1061,7 +1054,9 @@ async function openCycleConfigModal() {
             toast.success(`재교육 주기가 ${val ? `${val}개월` : "주기 없음"}으로 설정되었습니다.`);
             modal.close();
             await refreshViewState();
-            await runLedgerQuery();
+            if (document.getElementById("ledger-branch")?.value && document.getElementById("ledger-training")?.value) {
+              await runLedgerQuery();
+            }
           } catch (err) {
             console.error("[employees] saveEducationCycleConfig failed", {
               code: err?.code,
@@ -1077,15 +1072,41 @@ async function openCycleConfigModal() {
     ],
   });
 
-  // 프리셋 버튼 클릭
-  setTimeout(() => {
-    document.querySelectorAll(".cycle-preset").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const inp = document.getElementById("cycle-months-input");
-        if (inp) inp.value = btn.dataset.val;
-      });
-    });
-  }, 50);
+  const loadCurrentCycle = async () => {
+    const selectedValue = document.getElementById("cycle-training-item")?.value ?? "";
+    const trainingMeta = options.find((option) => option.value === selectedValue);
+    const label = document.getElementById("cycle-current-label");
+    const input = document.getElementById("cycle-months-input");
+    if (!trainingMeta) { if (label) label.textContent = "미설정"; return; }
+    const companyId = getEffectiveCompanyId(trainingMeta, null);
+    let currentCycle = 0;
+    try {
+      const config = companyId ? await educationCycleConfigsDB.get(companyId, buildEducationKey(trainingMeta)) : null;
+      currentCycle = Number(config?.cycleMonths ?? 0) || 0;
+      if (!currentCycle && trainingMeta.itemId) {
+        currentCycle = Number(viewState.items.find((item) => item.id === trainingMeta.itemId)?.cycleMonths ?? 0) || 0;
+      }
+    } catch (error) { console.warn("[employees] cycle config lookup failed", error); }
+    if (label) label.textContent = currentCycle ? `${currentCycle}개월` : "미설정";
+    if (input) input.value = String(currentCycle);
+  };
+  const renderCycleItems = (preferredValue = "") => {
+    const type = document.getElementById("cycle-training-type")?.value ?? "";
+    const itemSelect = document.getElementById("cycle-training-item");
+    const typeOptions = options.filter((option) => option.trainingType === type);
+    if (!itemSelect) return;
+    itemSelect.innerHTML = typeOptions.map((option) => `<option value="${esc(option.value)}">${esc(option.subjectName)}</option>`).join("");
+    if (typeOptions.some((option) => option.value === preferredValue)) itemSelect.value = preferredValue;
+    loadCurrentCycle();
+  };
+
+  document.querySelectorAll(".cycle-preset").forEach((btn) => btn.addEventListener("click", () => {
+    const input = document.getElementById("cycle-months-input");
+    if (input) input.value = btn.dataset.val;
+  }));
+  document.getElementById("cycle-training-type")?.addEventListener("change", () => renderCycleItems());
+  document.getElementById("cycle-training-item")?.addEventListener("change", loadCurrentCycle);
+  renderCycleItems(preselected.value);
 }
 
 function buildEducationKey(meta) {
@@ -1576,4 +1597,3 @@ async function loadXlsx() { return import("https://cdn.sheetjs.com/xlsx-0.20.3/p
 function matchesBranch(emp, branchId) { return String(emp.branchId ?? "") === String(branchId); }
 function metaError(msg) { return `<div style="color:var(--color-danger,#dc2626);padding:var(--space-4);font-size:var(--text-sm);border:1px solid #fecaca;border-radius:var(--radius-md);background:#fff1f2">${esc(msg)}</div>`; }
 function esc(v) { return String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
-

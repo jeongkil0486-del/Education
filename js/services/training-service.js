@@ -1,4 +1,5 @@
 import { authStore, ROLES } from "../core/auth.js";
+import { cycleMonthEnd } from "../utils/date.js";
 import {
   assignmentsDB,
   branchesDB,
@@ -11,6 +12,7 @@ import {
   trainingSessionsDB,
   trainingsDB,
   usersDB,
+  educationCycleConfigsDB,
 } from "../core/db.js";
 
 export const DEADLINE_SOON_DAYS = 3;
@@ -1004,11 +1006,17 @@ export function applyDueMetadata(rows, now = Date.now()) {
       };
     }
 
-    // 다음 교육 예정일 = 수료일 + cycleMonths 개월
-    const completedDate = new Date(Number(row.completedAt));
-    const nextDue = new Date(completedDate);
-    nextDue.setMonth(nextDue.getMonth() + cycleMonths);
-    const nextDueDate = nextDue.getTime();
+    // 다음 교육 예정일 = 수료일 + cycleMonths 개월이 속한 월의 마지막 날
+    const nextDueDate = cycleMonthEnd(row.completedAt, cycleMonths);
+    if (!nextDueDate) {
+      return {
+        ...row,
+        dueStatus: "history",
+        dueStatusLabel: DUE_STATUS_LABELS.history ?? "과거 이력",
+        nextDueDate: null,
+        daysRemaining: null,
+      };
+    }
 
     // 남은 일수 (음수 = 초과)
     const diffMs = nextDueDate - now;
@@ -1033,6 +1041,48 @@ export function applyDueMetadata(rows, now = Date.now()) {
   });
 }
 
+function normalizeCycleMatchValue(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9가-힣]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+/** 교육항목별 회사 공통 주기를 이력 복사본에 적용합니다. */
+function applyEducationCycleConfigs(rows, configs) {
+  const byItemId = new Map();
+  const bySubjectCode = new Map();
+  const bySubjectName = new Map();
+
+  for (const config of configs ?? []) {
+    const cycleMonths = Math.max(0, Number(config?.cycleMonths ?? 0) || 0);
+    if (!cycleMonths) continue;
+    const trainingType = normalizeTrainingType(config.trainingType);
+    const itemId = String(config.itemId ?? "").trim();
+    const subjectCode = normalizeCycleMatchValue(config.subjectCode);
+    const subjectName = normalizeCycleMatchValue(config.subjectName);
+    if (itemId) byItemId.set(itemId, cycleMonths);
+    if (subjectCode) bySubjectCode.set(`${trainingType}__${subjectCode}`, cycleMonths);
+    if (subjectName) bySubjectName.set(`${trainingType}__${subjectName}`, cycleMonths);
+  }
+
+  return rows.map((row) => {
+    const trainingType = normalizeTrainingType(row.trainingType);
+    const itemCycle = row.itemId ? byItemId.get(String(row.itemId)) : null;
+    const codeCycle = row.subjectCode
+      ? bySubjectCode.get(`${trainingType}__${normalizeCycleMatchValue(row.subjectCode)}`)
+      : null;
+    const nameCycle = [row.subjectName, row.courseName, row.title]
+      .map(normalizeCycleMatchValue)
+      .filter(Boolean)
+      .map((name) => bySubjectName.get(`${trainingType}__${name}`))
+      .find((value) => value != null);
+    const configuredCycle = itemCycle ?? codeCycle ?? nameCycle;
+    return configuredCycle ? { ...row, cycleMonths: configuredCycle } : row;
+  });
+}
+
 /* ──────────────────────────────────────────────────────────
    직원 교육이력카드 — 회차 수료 기록 포함
    기존 buildEmployeeHistoryRows 는 위에 그대로 유지
@@ -1041,12 +1091,14 @@ export function applyDueMetadata(rows, now = Date.now()) {
 
 export async function buildEmployeeHistoryRowsV2(uid) {
   const user = await assertEmployeeHistoryAccess(uid);
+  const cycleCompanyId = user?.companyId ?? authStore.companyId ?? "";
   const [
     legacyAssignments,
     legacyCompletions,
     legacyTrainings,
     sessionCompletionsList,
     manualHistories,
+    cycleConfigs,
   ] = await Promise.all([
     assignmentsDB.forUser(uid),
     completionsDB.forUser(uid),
@@ -1055,6 +1107,7 @@ export async function buildEmployeeHistoryRowsV2(uid) {
       : trainingsDB.list(authStore.companyId),
     sessionCompletionsDB.forUser(uid),
     manualTrainingHistoriesDB.forUser(uid),
+    cycleCompanyId ? educationCycleConfigsDB.listAll(cycleCompanyId).catch(() => []) : Promise.resolve([]),
   ]);
 
   // ── 기존 trainings 기반 행 (기존 buildEmployeeHistoryRows 와 동일)
@@ -1172,7 +1225,9 @@ export async function buildEmployeeHistoryRowsV2(uid) {
   }));
 
   // ── 합산 후 교육별 최신 이력을 기준으로 재교육 예정일/잔여일 계산
-  const allRows = applyDueMetadata([...legacyRows, ...sessionRows, ...manualRows]);
+  const allRows = applyDueMetadata(
+    applyEducationCycleConfigs([...legacyRows, ...sessionRows, ...manualRows], cycleConfigs)
+  );
 
   return {
     employee: user ? { uid, ...user } : null,

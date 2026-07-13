@@ -954,48 +954,93 @@ export function renderDetailedPreview(container, preview) {
   const esc = (s) => String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   const stageLabel = { initial: "초기", recurrent: "보수" };
   const { summary, rows } = preview;
+  const originalRows = rows.map((row, originalIndex) => ({ row, originalIndex }));
+  let sortState = { key: "", direction: "none" };
+  const columns = [
+    { key: "status", label: "처리", value: (r) => r._status },
+    { key: "employeeName", label: "직원명", value: (r) => r._employee?.name ?? r.employeeName },
+    { key: "empNo", label: "사번", value: (r) => r._employee?.empNo ?? r.empNo },
+    { key: "trainingType", label: "교육유형/분류", value: (r) => r.trainingType },
+    { key: "courseName", label: "교육과정명", value: (r) => r.courseName },
+    { key: "subjectName", label: "교육과목명", value: (r) => r.subjectName },
+    { key: "instructor", label: "강사", value: (r) => r.instructor },
+    { key: "hours", label: "교육시간", value: (r) => Number(r.hours ?? 0), numeric: true },
+    { key: "startDate", label: "교육 시작일", value: (r) => Number(r.startDate ?? 0), numeric: true },
+    { key: "endDate", label: "교육 종료일", value: (r) => Number(r.endDate ?? 0), numeric: true },
+    { key: "completedAt", label: "수료일", value: (r) => Number(r.completedAt ?? 0), numeric: true },
+    { key: "result", label: "결과", value: (r) => r.result },
+    { key: "stage", label: "초기/보수", value: (r) => stageLabel[r.initialOrRecurrent] ?? r.initialOrRecurrent },
+    { key: "note", label: "비고", value: (r) => r.note },
+  ];
 
-  container.innerHTML = `
-    <div style="display:flex;gap:var(--space-3);flex-wrap:wrap;margin-bottom:var(--space-3);font-size:var(--text-sm)">
-      <span>전체 <strong>${summary.total}</strong></span>
-      <span style="color:var(--green-600,#16a34a)">신규 <strong>${summary.new}</strong></span>
-      <span style="color:var(--blue-600,#2563eb)">보완 <strong>${summary.fill}</strong></span>
-      <span style="color:var(--gray-400,#9ca3af)">중복 <strong>${summary.duplicate}</strong></span>
-      <span style="color:var(--red-600,#dc2626)">오류 <strong>${summary.error}</strong></span>
-    </div>
-    <div style="overflow-x:auto;max-height:400px;overflow-y:auto;border:1px solid var(--gray-200);border-radius:var(--radius-md)">
-      <table class="data-table" style="min-width:960px;font-size:var(--text-xs)">
-        <thead>
-          <tr>
-            <th>처리</th><th>직원명</th><th>사번</th><th>유형</th>
-            <th>교육과정</th><th>교육과목</th><th>강사</th>
-            <th>시간</th><th>시작일</th><th>종료일</th>
-            <th>수료일</th><th>결과</th><th>초기/보수</th><th>비고</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows.map((r) => `
-            <tr>
-              <td><span style="color:${STATUS_COLOR[r._status] ?? "inherit"};font-weight:600">${esc(r._status)}</span>
-                  ${r._statusDetail ? `<br/><span style="color:var(--gray-400);font-size:10px">${esc(r._statusDetail)}</span>` : ""}
-              </td>
-              <td>${esc(r._employee?.name ?? r.employeeName)}</td>
-              <td>${esc(r._employee?.empNo ?? r.empNo)}</td>
-              <td>${r.trainingType === "legal" ? "법정" : r.trainingType === "job" ? "직무" : "기타"}</td>
-              <td>${esc(r.courseName)}</td>
-              <td>${esc(r.subjectName)}</td>
-              <td>${esc(r.instructor)}</td>
-              <td>${r.hours ?? "–"}</td>
-              <td>${fmt(r.startDate)}</td>
-              <td>${fmt(r.endDate)}</td>
-              <td>${fmt(r.completedAt)}</td>
-              <td>${esc(r.result)}</td>
-              <td>${esc(stageLabel[r.initialOrRecurrent] ?? r.initialOrRecurrent ?? "–")}</td>
-              <td>${esc(r.note)}</td>
-            </tr>`).join("")}
-        </tbody>
-      </table>
-    </div>`;
+  const cycleSort = (key) => {
+    if (sortState.key !== key || sortState.direction === "none") sortState = { key, direction: "asc" };
+    else if (sortState.direction === "asc") sortState = { key, direction: "desc" };
+    else sortState = { key: "", direction: "none" };
+    renderTable();
+  };
+
+  const renderTable = () => {
+    const selectedColumn = columns.find((column) => column.key === sortState.key);
+    const displayedRows = [...originalRows];
+    if (selectedColumn && sortState.direction !== "none") {
+      const direction = sortState.direction === "asc" ? 1 : -1;
+      displayedRows.sort((a, b) => {
+        const av = selectedColumn.value(a.row);
+        const bv = selectedColumn.value(b.row);
+        const compared = selectedColumn.numeric
+          ? (Number(av) || 0) - (Number(bv) || 0)
+          : String(av ?? "").localeCompare(String(bv ?? ""), "ko", { numeric: true, sensitivity: "base" });
+        return compared === 0 ? a.originalIndex - b.originalIndex : compared * direction;
+      });
+    }
+
+    const header = (column) => {
+      const active = sortState.key === column.key && sortState.direction !== "none";
+      const icon = active ? (sortState.direction === "asc" ? "▲" : "▼") : "";
+      const ariaSort = !active ? "none" : sortState.direction === "asc" ? "ascending" : "descending";
+      return `<th data-preview-sort="${column.key}" tabindex="0" aria-sort="${ariaSort}" style="cursor:pointer;user-select:none;white-space:nowrap" title="클릭: 오름차순 → 내림차순 → 원래 순서">${column.label}${icon ? ` <span aria-hidden="true" style="font-size:10px">${icon}</span>` : ""}</th>`;
+    };
+
+    container.innerHTML = `
+      <div style="display:flex;gap:var(--space-3);flex-wrap:wrap;margin-bottom:var(--space-3);font-size:var(--text-sm)">
+        <span>전체 <strong>${summary.total}</strong></span>
+        <span style="color:var(--green-600,#16a34a)">신규 <strong>${summary.new}</strong></span>
+        <span style="color:var(--blue-600,#2563eb)">보완 <strong>${summary.fill}</strong></span>
+        <span style="color:var(--gray-400,#9ca3af)">중복 <strong>${summary.duplicate}</strong></span>
+        <span style="color:var(--red-600,#dc2626)">오류 <strong>${summary.error}</strong></span>
+      </div>
+      <div style="overflow-x:auto;max-height:400px;overflow-y:auto;border:1px solid var(--gray-200);border-radius:var(--radius-md)">
+        <table class="data-table" style="min-width:1100px;font-size:var(--text-xs)">
+          <thead><tr>${columns.map(header).join("")}</tr></thead>
+          <tbody>
+            ${displayedRows.map(({ row: r }) => `
+              <tr>
+                <td><span style="color:${STATUS_COLOR[r._status] ?? "inherit"};font-weight:600">${esc(r._status)}</span>
+                    ${r._statusDetail ? `<br/><span style="color:var(--gray-400);font-size:10px">${esc(r._statusDetail)}</span>` : ""}
+                </td>
+                <td>${esc(r._employee?.name ?? r.employeeName)}</td>
+                <td>${esc(r._employee?.empNo ?? r.empNo)}</td>
+                <td>${r.trainingType === "legal" ? "법정" : r.trainingType === "job" ? "직무" : r.trainingType === "online" ? "온라인" : r.trainingType === "external" ? "외부" : "기타"}</td>
+                <td>${esc(r.courseName)}</td><td>${esc(r.subjectName)}</td><td>${esc(r.instructor)}</td>
+                <td>${r.hours ?? "–"}</td><td>${fmt(r.startDate)}</td><td>${fmt(r.endDate)}</td>
+                <td>${fmt(r.completedAt)}</td><td>${esc(r.result)}</td>
+                <td>${esc(stageLabel[r.initialOrRecurrent] ?? r.initialOrRecurrent ?? "–")}</td><td>${esc(r.note)}</td>
+              </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>`;
+
+    container.querySelectorAll("[data-preview-sort]").forEach((th) => {
+      const activate = () => cycleSort(th.dataset.previewSort);
+      th.addEventListener("click", activate);
+      th.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(); }
+      });
+    });
+  };
+
+  renderTable();
 }
 
 // ═══════════════════════════════════════════════════════════════════

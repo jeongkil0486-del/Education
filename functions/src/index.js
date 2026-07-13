@@ -1142,7 +1142,7 @@ exports.saveEducationCycleConfig = onCall(OPTS, async (request) => {
 
   await db.ref(targetPath).set({
     companyId,
-    branchId,
+    scope: "company",
     itemId,
     trainingType,
     subjectCode,
@@ -1157,7 +1157,7 @@ exports.saveEducationCycleConfig = onCall(OPTS, async (request) => {
     actorUid: request.auth.uid,
     companyId,
     companyResolutionSource: companyResolution.source,
-    branchId,
+    scope: "company",
     itemId,
     configKey,
     cycleMonths: cycleInfo.value,
@@ -1272,6 +1272,7 @@ function normalizeManualHistory(data, employee, actorUid, actorName) {
   const hours = Math.max(0, Number(data?.hours ?? data?.trainingHours ?? 0) || 0);
   return {
     trainingType,
+    itemId: normalizeText(data?.itemId),
     subjectCode: normalizeText(data?.subjectCode),
     subjectName,
     title,

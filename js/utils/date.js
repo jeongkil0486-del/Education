@@ -33,6 +33,27 @@ export function daysFromNow(ts) {
   return Math.ceil(diff / (1000 * 60 * 60 * 24));
 }
 
+/**
+ * 수료일에 주기 개월 수를 더한 뒤 해당 월의 마지막 날(로컬 자정)을 반환합니다.
+ * Date#setMonth의 말일 넘침과 UTC 변환으로 인한 날짜 밀림을 피하기 위해
+ * 연/월만 추출해 새 로컬 날짜를 구성합니다.
+ */
+export function cycleMonthEnd(completedAt, cycleMonths) {
+  const timestamp = Number(completedAt);
+  const months = Number(cycleMonths);
+  if (!Number.isFinite(timestamp) || !Number.isInteger(months) || months <= 0) return null;
+
+  const completedDate = new Date(timestamp);
+  if (Number.isNaN(completedDate.getTime())) return null;
+
+  return new Date(
+    completedDate.getFullYear(),
+    completedDate.getMonth() + months + 1,
+    0,
+    0, 0, 0, 0
+  ).getTime();
+}
+
 export function isOverdue(ts) {
   return ts != null && ts < Date.now();
 }
