@@ -1,16 +1,18 @@
 /**
- * Excel Import Engine  v2.0
+ * Excel Import Engine  v3.0
  * ─────────────────────────────────────────────────────────────────
- * 단계:  Reader → Normalizer → TemplateDetector → Mapper
- *        → Validator → (Preview) → Import
+ * Reader → Normalizer → TemplateDetector → Mapper → Validator → Preview → Import
  *
- * 새 양식이 생겨도 PARSERS 배열에 Parser 하나만 추가하면 됩니다.
- * if 문 복붙 금지.
+ * 지원 양식:
+ *  A. 법정/직무 분리 시트 — 표준형 (전정길, 신형 영문병기 등)
+ *  B. 법정/직무 분리 시트 — TAS형 (김소현, 박진우, 김연수, 배예나, 김채영)
+ *  C. 법정/직무 분리 시트 — 보수예정/교육이수형 (신태용, 배수민, 강재원)
+ *  D. Sheet1 단일 시트 — 섹션 분리형 (이지현)
  * ─────────────────────────────────────────────────────────────────
  */
 
 // ═══════════════════════════════════════════════════════════════════
-// § 0.  SheetJS 로더 (싱글턴)
+// § 0.  SheetJS 로더
 // ═══════════════════════════════════════════════════════════════════
 let _xlsxPromise = null;
 async function loadXlsx() {
@@ -21,11 +23,8 @@ async function loadXlsx() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// § 1.  READER  —  원본 셀 데이터 추출 (의미 해석 없음)
+// § 1.  READER  —  원본 셀 데이터 추출
 // ═══════════════════════════════════════════════════════════════════
-/**
- * @returns {{ sheetName, trainingType, cells, mergeMap, maxRow, maxCol }[]}
- */
 async function readerRead(file) {
   const XLSX = await loadXlsx();
   if (!XLSX) throw new Error("SheetJS 로드 실패");
@@ -33,17 +32,11 @@ async function readerRead(file) {
   const buffer = await file.arrayBuffer();
   const wb = XLSX.read(buffer, { type: "array", cellDates: false, dense: false });
 
-  const SHEET_TYPE = { 법정: "legal", 직무: "job" };
-
   return wb.SheetNames.filter((n) => !n.startsWith("_")).map((sheetName) => {
     const ws = wb.Sheets[sheetName];
-    const trainingType =
-      Object.entries(SHEET_TYPE).find(([k]) => sheetName.includes(k))?.[1] ?? "other";
-
     const ref = ws["!ref"] ?? "A1:A1";
     const range = XLSX.utils.decode_range(ref);
 
-    // 모든 셀 읽기
     const cells = {};
     for (let r = range.s.r; r <= range.e.r; r++) {
       for (let c = range.s.c; c <= range.e.c; c++) {
@@ -56,7 +49,7 @@ async function readerRead(file) {
       }
     }
 
-    // 병합맵 (비어있는 나머지 셀에 anchor 값 채움)
+    // 병합맵
     const mergeMap = {};
     for (const m of ws["!merges"] ?? []) {
       const anchorAddr = XLSX.utils.encode_cell({ r: m.s.r, c: m.s.c });
@@ -68,18 +61,10 @@ async function readerRead(file) {
       }
     }
 
-    return {
-      sheetName,
-      trainingType,
-      cells,
-      mergeMap,
-      maxRow: range.e.r,
-      maxCol: range.e.c,
-    };
+    return { sheetName, cells, mergeMap, maxRow: range.e.r, maxCol: range.e.c };
   });
 }
 
-/** 셀 값 읽기 (병합 우선) */
 function rawCell(sheet, r, c) {
   const key = `${r},${c}`;
   if (key in sheet.mergeMap) return sheet.mergeMap[key];
@@ -87,86 +72,104 @@ function rawCell(sheet, r, c) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// § 2.  NORMALIZER  —  문자열 정규화
+// § 2.  NORMALIZER
 // ═══════════════════════════════════════════════════════════════════
-const STAGE_MAP = {
-  // ── 초기
-  초기: "initial",
-  초기교육: "initial",
-  initial: "initial",
-  // ── 보수
-  보수: "recurrent",
-  보수교육: "recurrent",
-  정기: "recurrent",
-  정기교육: "recurrent",
-  recurrent: "recurrent",
-  recurring: "recurrent",
-  갱신: "recurrent",
-  // ── 결과값이 stage 열에 잘못 들어온 경우 → 빈값으로 처리 (결과 필드로 이동)
-  pass: "",
-  fail: "",
-  이수: "",
-  수료: "",
-  완료: "",
-  합격: "",
-  미수료: "",
-  불합격: "",
-};
-const RESULT_PASS = ["pass", "수료", "완료", "합격", "이수"];
-const RESULT_FAIL = ["fail", "미수료", "불합격"];
 
-/** 공백 제거 + 영문 병기 제거 + 소문자 */
+// 공백·괄호 제거 + 소문자
 function norm(v) {
   if (v == null) return "";
   return String(v)
-    .replace(/\([^)]*\)/g, "")   // (영문) 제거
-    .replace(/\[[^\]]*\]/g, "")  // [영문] 제거
-    .replace(/\s+/g, "")         // 공백 전부 제거
+    .replace(/\([^)]*\)/g, "")
+    .replace(/\[[^\]]*\]/g, "")
+    .replace(/\s+/g, "")
     .toLowerCase()
     .trim();
 }
 
-/** 헤더 정규화 (콜론 기준 앞부분 + 특수 매핑) */
+// ── Stage 정규화
+const STAGE_INITIAL  = new Set(["초기", "초기교육", "initial"]);
+const STAGE_RECURRENT = new Set(["보수", "보수교육", "정기", "정기교육", "recurrent", "recurring", "갱신"]);
+const RESULT_PASS_SET = new Set(["pass", "이수", "수료", "완료", "합격"]);
+const RESULT_FAIL_SET = new Set(["fail", "미수료", "불합격"]);
+
+function normStage(v) {
+  if (!v) return null;
+  const s = norm(v);
+  if (STAGE_INITIAL.has(s))   return "initial";
+  if (STAGE_RECURRENT.has(s)) return "recurrent";
+  return null; // result 값은 null
+}
+
+function normResult(v) {
+  if (!v) return null;
+  const s = norm(v);
+  if (STAGE_INITIAL.has(s) || STAGE_RECURRENT.has(s)) return null; // stage 값은 무시
+  if (RESULT_PASS_SET.has(s)) return "PASS";
+  if (RESULT_FAIL_SET.has(s)) return "FAIL";
+  return null;
+}
+
+/** result/stage 열 교차 감지·보정 */
+function resolveResultStage(rawResult, rawStage) {
+  const stageFromResultCol  = normStage(rawResult);
+  const resultFromStageCol  = normResult(rawStage);
+  const stageFromStageCol   = normStage(rawStage);
+  const resultFromResultCol = normResult(rawResult);
+
+  let finalResult = resultFromResultCol ?? null;
+  let finalStage  = stageFromStageCol  ?? null;
+
+  if (!finalResult && resultFromStageCol) finalResult = resultFromStageCol;
+  if (!finalStage  && stageFromResultCol) finalStage  = stageFromResultCol;
+
+  return {
+    result:             finalResult ?? "PASS",
+    initialOrRecurrent: finalStage  ?? null,
+  };
+}
+
+// ── 헤더 별칭 테이블
 const HEADER_ALIAS = {
-  교육과정명: "courseName",
-  교육과정: "courseName",
-  과정명: "courseName",
-  curriculum: "courseName",
-  교육과목: "subjectName",
-  과목: "subjectName",
-  subject: "subjectName",
-  강사: "instructor",
-  instructor: "instructor",
-  교육시간: "hours",
-  시간: "hours",
-  time: "hours",
-  교육기간: "period",
-  기간: "period",
-  period: "period",
-  수료일자: "completedAt",
-  수료일: "completedAt",
-  completion: "completedAt",
-  완료일: "completedAt",
-  결과: "result",
-  result: "result",
-  "초기/보수": "stage",
-  초기보수: "stage",
-  "initial/recurrent": "stage",
-  initialrecurrent: "stage",
-  비고: "note",
-  remark: "note",
+  // 교육과정명
+  교육과정명:    "courseName",  교육과정:  "courseName",
+  과정명:        "courseName",  교육과정명curriculum: "courseName",
+  // 교육과목
+  교육과목:      "subjectName", 과목:      "subjectName",
+  // 강사
+  강사:          "instructor",  instructor: "instructor",
+  // 교육시간
+  교육시간:      "hours",       "교육\n시간": "hours",
+  교육시간time:  "hours",       시간:          "hours",
+  // 교육기간 / 교육일자 / 교육날짜
+  교육기간:      "period",      교육일자:   "period",
+  교육기간period:"period",      기간:       "period",
+  // 수료일자
+  수료일자:      "completedAt", 수료일:     "completedAt",
+  "수료\n일자":  "completedAt", completion:  "completedAt",
+  // 결과
+  결과:          "result",      result:     "result",
+  결과result:    "result",
+  // 초기/보수 (stage)
+  "초기/보수":   "stage",       초기보수:   "stage",
+  "initial/recurrent": "stage", initialrecurrent: "stage",
+  // 보수 예정 (신태용/배수민 양식): stage
+  보수예정:      "stage",
+  // 교육 이수 / 발령일자 (신태용/배수민 양식): result 대용
+  교육이수:      "result2",     발령일자:   "result2",
+  // 비고
+  비고:          "note",        remark:     "note",
 };
 
 function normHeader(v) {
+  if (!v) return "";
   const cleaned = norm(v);
   return HEADER_ALIAS[cleaned] ?? cleaned;
 }
 
-/** 시간 숫자화: "3 HRS" → 3, "8HRS\n(4HRS E-learning)" → 8 */
+// ── 시간 파싱: "3 HRS" → 3, "4H" → 4, "27H" → 27, "8HRS\n(4HRS...)" → 8
 function normHours(v) {
   if (v == null || v === "") return null;
-  const s = String(v)
-    .split(/[\n(]/)[0]          // 첫 줄 / 괄호 전
+  const s = String(v).split(/[\n(]/)[0]
     .replace(/[Hh][Rr][Ss]?/g, "")
     .replace(/시간/g, "")
     .trim();
@@ -174,61 +177,32 @@ function normHours(v) {
   return isNaN(n) ? null : n;
 }
 
-/** stage 정규화 — result 값이 들어오면 null 반환 */
-function normStage(v) {
-  if (!v) return null;
-  const s = norm(v);
-  if (s in STAGE_MAP) return STAGE_MAP[s] || null;  // ""→null
-  return null;  // 매핑 없으면 stage 아님
-}
-
-/** result 정규화 — stage 값이 들어오면 null 반환 */
-function normResult(v) {
-  if (!v) return null;
-  const s = norm(v);
-  // stage 값이 result 열에 들어온 경우 → null (stage 쪽으로 처리됨)
-  if (["initial", "초기", "초기교육", "recurrent", "recurring", "recurrent", "정기", "정기교육", "보수", "보수교육", "갱신"].includes(s)) return null;
-  if (RESULT_PASS.some((w) => s.includes(w))) return "PASS";
-  if (RESULT_FAIL.some((w) => s.includes(w))) return "FAIL";
-  return null;
-}
-
-/**
- * 날짜 → Unix ms
- * 지원:  Excel serial / ISO string / 2024.03.01 / 2024-03-01 00:00:00 / 범위(첫날)
- */
+// ── 날짜: Excel serial / ISO / YYYY.MM.DD / YYYY-MM-DD / datetime string
 function normDate(v) {
   if (v == null || v === "") return null;
   const n = Number(v);
   if (Number.isFinite(n) && n >= 30000 && n < 2958466) {
-    // Excel serial (Windows epoch: 25569)
     return Math.round((n - 25569) * 86400 * 1000);
   }
   let s = String(v).trim();
+  // "2024-02-26 00:00:00" 패턴 (datetime string)
+  s = s.replace(/ 00:00:00$/, "").trim();
   // 범위면 첫 번째만
-  s = s.split(/[~–\n]/)[0].trim();
+  s = s.split(/[~–\n/]/)[0].trim();
   // 구분자 통일
-  s = s.replace(/[./]/g, "-").replace(/\s+/g, " ").replace(/ 00:00:00$/, "");
+  s = s.replace(/[.]/g, "-");
   const d = new Date(s);
   return isNaN(d.getTime()) ? null : d.getTime();
 }
 
-/**
- * 기간 → { startDate, endDate }
- * 지원 패턴:
- *   2024.03.01               → start only
- *   2024.03.01~03.07         → start + 같은해 end
- *   2024.03.01~2024.03.07    → start + end (full)
- *   2024.03.01\n2024.03.07   → start + end (newline)
- *   2024. 11. 23\n2024. 11. 26  → start + end (space)
- */
+// ── 기간: 다양한 패턴 → { startDate, endDate }
 function normPeriod(v) {
   if (!v) return { startDate: null, endDate: null };
   const s = String(v).trim();
 
-  // "YYYY. MM. DD\nYYYY. MM. DD" 패턴 (space after dot)
+  // YYYY.MM.DD\nYYYY.MM.DD 또는 YYYY.MM.DD~YYYY.MM.DD (전체 연도)
   const m0 = s.match(
-    /^(\d{4})[.\-\/\s]+(\d{1,2})[.\-\/\s]+(\d{1,2})\s*[\n~–-]\s*(\d{4})[.\-\/\s]+(\d{1,2})[.\-\/\s]+(\d{1,2})/
+    /(\d{4})[.\-\/\s]+(\d{1,2})[.\-\/\s]+(\d{1,2})\s*[~–\-\n\/]\s*(\d{4})[.\-\/\s]+(\d{1,2})[.\-\/\s]+(\d{1,2})/
   );
   if (m0) {
     return {
@@ -236,8 +210,7 @@ function normPeriod(v) {
       endDate:   normDate(`${m0[4]}-${m0[5].padStart(2,"0")}-${m0[6].padStart(2,"0")}`),
     };
   }
-
-  // "YYYY.MM.DD~MM.DD" (단축 종료일)
+  // YYYY.MM.DD~MM.DD (단축 종료)
   const m1 = s.match(/^(\d{4})[.\-](\d{1,2})[.\-](\d{1,2})\s*[~–-]\s*(\d{1,2})[.\-](\d{1,2})$/);
   if (m1) {
     return {
@@ -245,12 +218,10 @@ function normPeriod(v) {
       endDate:   normDate(`${m1[1]}-${m1[4].padStart(2,"0")}-${m1[5].padStart(2,"0")}`),
     };
   }
-
-  // 단일 날짜 or 나머지
   return { startDate: normDate(s), endDate: null };
 }
 
-/** 이름에서 공백·괄호 내 영문 제거 (순수 한글 이름 추출) */
+// ── 이름 정규화 (공백, 영문 제거)
 function normName(v) {
   if (!v) return "";
   return String(v)
@@ -260,77 +231,131 @@ function normName(v) {
     .trim();
 }
 
-/** 사번 정규화 */
+// ── 사번 정규화 (탭·공백 제거)
 function normEmpNo(v) {
   if (!v) return "";
-  return String(v)
-    .replace(/\([^)]*\)/g, "")
-    .trim()
-    .toUpperCase();
+  return String(v).replace(/[\t\s]/g, "").toUpperCase();
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// § 3.  TEMPLATE DETECTOR  —  양식 판별
+// § 3.  TEMPLATE DETECTOR
 // ═══════════════════════════════════════════════════════════════════
-/**
- * Parser 인터페이스:
- *   { id, name, detect(sheet) → boolean, parse(sheet) → MappedRow[] }
- *
- * detect()가 true를 반환한 첫 번째 Parser가 사용됩니다.
- * 맨 마지막에 항상 GenericParser를 두세요.
- */
 
-// ── Parser A: 신형 양식 2024+  (영문 병기, 10열, 과목 줄바꿈 합산)
-const ParserModern = {
-  id: "modern_2024",
-  name: "신형 양식 (2024+, 영문 병기)",
-  detect(sheet) {
-    // 헤더 행에 "(Curriculum)" or "(Subject)" or "(Instructor)" 포함
-    for (let r = 0; r <= Math.min(sheet.maxRow, 20); r++) {
-      for (let c = 0; c <= sheet.maxCol; c++) {
-        const v = String(rawCell(sheet, r, c) ?? "");
-        if (v.includes("Curriculum") || v.includes("Subject") || v.includes("Instructor")) return true;
-      }
+/**
+ * 공통 헤더 행 탐지: 교육과정명/과목 포함 행
+ * 반환: 행 인덱스(0-based) 또는 -1
+ */
+function findHeaderRow(sheet, startRow = 0, endRow = 30) {
+  for (let r = startRow; r <= Math.min(endRow, sheet.maxRow); r++) {
+    for (let c = 0; c <= sheet.maxCol; c++) {
+      const v = rawCell(sheet, r, c);
+      if (!v) continue;
+      const h = normHeader(v);
+      if (h === "courseName" || h === "subjectName") return r;
     }
-    return false;
+  }
+  return -1;
+}
+
+/**
+ * 섹션 헤더 탐지: "법정교육"/"보수교육 및 사내교육" 같은 섹션 구분자 행
+ * 반환: { row, type: "legal"|"job" }[]
+ */
+function findSectionHeaders(sheet) {
+  const sections = [];
+  for (let r = 0; r <= sheet.maxRow; r++) {
+    const v = String(rawCell(sheet, r, 0) ?? rawCell(sheet, r, 1) ?? "").trim();
+    const n = norm(v);
+    if (n.includes("법정교육"))                    sections.push({ row: r, type: "legal" });
+    else if (n.includes("직무교육") || n.includes("보수교육") || n.includes("사내교육"))
+                                                    sections.push({ row: r, type: "job" });
+  }
+  return sections;
+}
+
+/** 시트가 TAS 양식인지 (수료일 열이 헤더에 없고 6~7열에 존재) */
+function isTasSheet(sheet) {
+  const hr = findHeaderRow(sheet);
+  if (hr < 0) return false;
+  // 헤더에 completedAt 열이 없으면 TAS
+  for (let c = 0; c <= sheet.maxCol; c++) {
+    const v = rawCell(sheet, hr, c);
+    if (normHeader(v) === "completedAt") return false;
+  }
+  return true;
+}
+
+/** 시트가 보수예정/교육이수형인지 */
+function isBosooSheet(sheet) {
+  const hr = findHeaderRow(sheet);
+  if (hr < 0) return false;
+  for (let c = 0; c <= sheet.maxCol; c++) {
+    const v = rawCell(sheet, hr, c);
+    const h = normHeader(v);
+    if (h === "stage" && norm(rawCell(sheet, hr, c) ?? "") === "보수예정") return true;
+  }
+  return false;
+}
+
+// ── Parser A: 표준형 (법정/직무 시트 분리, 컬럼 정상 존재)
+const ParserStandard = {
+  id: "standard",
+  name: "표준형 (법정/직무 분리)",
+  detect(sheet) {
+    return !isTasSheet(sheet) && !isBosooSheet(sheet) && findHeaderRow(sheet) >= 0;
   },
-  parse(sheet) {
-    return _parseStandard(sheet, { splitSubjects: true, colOffset: 0 });
+  parse(sheet, trainingType) {
+    return _parseBlock(sheet, findHeaderRow(sheet), sheet.maxRow, trainingType, { splitSubjects: false });
   },
 };
 
-// ── Parser B: 구형 양식 (한글 전용, 9열)
-const ParserLegacy = {
-  id: "legacy_kr",
-  name: "구형 양식 (한글 전용)",
+// ── Parser B: TAS형 (수료일 열 헤더 없음 → 6열 또는 7열에서 직접 읽기)
+const ParserTAS = {
+  id: "tas",
+  name: "TAS형 (수료일 헤더 없음)",
+  detect(sheet) { return isTasSheet(sheet); },
+  parse(sheet, trainingType) {
+    return _parseTAS(sheet, trainingType);
+  },
+};
+
+// ── Parser C: 보수예정/교육이수형 (신태용/배수민/강재원)
+const ParserBosoo = {
+  id: "bosoo",
+  name: "보수예정/교육이수형",
+  detect(sheet) { return isBosooSheet(sheet); },
+  parse(sheet, trainingType) {
+    return _parseBosoo(sheet, trainingType);
+  },
+};
+
+// ── Parser D: Sheet1 단일 시트 섹션형 (이지현)
+const ParserSheet1 = {
+  id: "sheet1_section",
+  name: "Sheet1 섹션 분리형",
   detect(sheet) {
-    for (let r = 0; r <= Math.min(sheet.maxRow, 20); r++) {
-      for (let c = 0; c <= sheet.maxCol; c++) {
-        const v = String(rawCell(sheet, r, c) ?? "");
-        if (norm(v) === "교육과정명" || norm(v) === "교육과목") return true;
-      }
-    }
-    return false;
+    const sections = findSectionHeaders(sheet);
+    return sections.length >= 2;
   },
   parse(sheet) {
-    return _parseStandard(sheet, { splitSubjects: false, colOffset: 0 });
+    return _parseSheet1(sheet);
   },
 };
 
 // ── Parser Z: Generic (fallback)
 const ParserGeneric = {
   id: "generic",
-  name: "Generic (자동 탐지)",
+  name: "Generic",
   detect() { return true; },
-  parse(sheet) {
-    return _parseStandard(sheet, { splitSubjects: false, colOffset: 0 });
+  parse(sheet, trainingType) {
+    return _parseBlock(sheet, findHeaderRow(sheet), sheet.maxRow, trainingType, { splitSubjects: false });
   },
 };
 
-/** 등록된 Parser 목록 (순서 중요: 가장 구체적인 것 먼저) */
-const PARSERS = [ParserModern, ParserLegacy, ParserGeneric];
+// 순서: 구체적인 것 먼저
+const PARSERS = [ParserSheet1, ParserTAS, ParserBosoo, ParserStandard, ParserGeneric];
 
-function detectTemplate(sheet) {
+function detectParser(sheet) {
   for (const p of PARSERS) {
     if (p.detect(sheet)) return p;
   }
@@ -338,95 +363,127 @@ function detectTemplate(sheet) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// § 4.  MAPPER  —  각 Parser의 공통 파싱 로직 + 통일된 출력 구조
+// § 4.  MAPPER
 // ═══════════════════════════════════════════════════════════════════
-/**
- * 표준 파싱 로직 (두 양식 모두 커버)
- * splitSubjects: true → 과목이 단일 셀 줄바꿈으로 합쳐진 경우 분리
- */
-function _parseStandard(sheet, { splitSubjects }) {
-  // ── 헤더 행 탐지
-  let headerRow = -1;
-  for (let r = 0; r <= Math.min(sheet.maxRow, 25); r++) {
+
+/** 직원 정보 탐지 */
+function detectEmpInfo(sheet, headerRow) {
+  let name = "", empNo = "";
+  const limit = Math.min(headerRow + 1, 15);
+  for (let r = 0; r <= limit; r++) {
     for (let c = 0; c <= sheet.maxCol; c++) {
       const v = rawCell(sheet, r, c);
       if (!v) continue;
-      const h = normHeader(v);
-      if (h === "courseName" || h === "subjectName") { headerRow = r; break; }
+      const key = norm(v);
+      if (key === "성명" || key === "이름" || key === "성명name") {
+        for (let dc = 1; dc <= 5; dc++) {
+          const cand = rawCell(sheet, r, c + dc);
+          if (cand) {
+            const s = normName(String(cand));
+            if (s && norm(s) !== "사번" && norm(s) !== "생년월일") { name = s; break; }
+          }
+        }
+      }
+      if (key === "사번" || key === "사번idnbr" || key === "직원번호") {
+        for (let dc = 1; dc <= 5; dc++) {
+          const cand = rawCell(sheet, r, c + dc);
+          if (cand) {
+            const s = normEmpNo(String(cand));
+            if (s && !["성명", "이름", "생년월일"].includes(norm(s))) { empNo = s; break; }
+          }
+        }
+      }
     }
-    if (headerRow >= 0) break;
   }
-  if (headerRow < 0) return [];
+  return { name, empNo };
+}
 
-  // ── 컬럼맵 구축
-  const colMap = {};  // fieldKey → colIndex
+/** 컬럼맵 구축 */
+function buildColMap(sheet, headerRow) {
+  const colMap = {};
   for (let c = 0; c <= sheet.maxCol; c++) {
     const v = rawCell(sheet, headerRow, c);
     if (!v) continue;
     const key = normHeader(v);
     if (key && !colMap[key]) colMap[key] = c;
   }
+  return colMap;
+}
 
-  // ── 직원 정보 탐지 (헤더 행 위쪽)
-  const empInfo = _detectEmpInfo(sheet, headerRow);
+/**
+ * 표준 블록 파싱
+ * dataStart: 데이터 시작 행(0-based), dataEnd: 종료 행
+ * trainingType: "legal"|"job"|"other"
+ */
+function _parseBlock(sheet, headerRow, dataEnd, trainingType, { splitSubjects = false } = {}) {
+  if (headerRow < 0) return [];
 
-  // ── 데이터 행 파싱
-  const rows = [];
+  const colMap  = buildColMap(sheet, headerRow);
+  const empInfo = detectEmpInfo(sheet, headerRow);
+  const rows    = [];
 
-  // 상속 값 (병합셀 처리)
   const inherit = {
     courseName: "", instructor: "", hours: null, period: "",
     completedAt: null, result: "", stage: "", note: "",
   };
 
-  for (let r = headerRow + 1; r <= sheet.maxRow; r++) {
+  for (let r = headerRow + 1; r <= dataEnd; r++) {
     const get = (field) => {
       const c = colMap[field];
-      if (c === undefined) return null;
-      return rawCell(sheet, r, c);
+      return c !== undefined ? rawCell(sheet, r, c) : null;
     };
 
-    const courseRaw   = get("courseName");
-    const subjectRaw  = get("subjectName");
+    const courseRaw    = get("courseName");
+    const subjectRaw   = get("subjectName");
     const instructorRaw = get("instructor");
-    const hoursRaw    = get("hours");
-    const periodRaw   = get("period");
+    const hoursRaw     = get("hours");
+    const periodRaw    = get("period");
     const completedRaw = get("completedAt");
-    const resultRaw   = get("result");
-    const stageRaw    = get("stage");
-    const noteRaw     = get("note");
+    const resultRaw    = get("result");
+    // result2 = 교육이수 / 발령일자 → stage 혹은 result 보조
+    const result2Raw   = get("result2");
+    const stageRaw     = get("stage");
+    const noteRaw      = get("note");
 
-    // 과정명 상속
+    // ── 과정명 상속
     const courseName = courseRaw != null
       ? String(courseRaw).replace(/\n/g, " ").trim()
       : inherit.courseName;
     if (courseRaw != null) inherit.courseName = courseName;
 
-    // 나머지 필드 상속
-    const instructor = instructorRaw != null ? String(instructorRaw).replace(/\n/g, ", ").trim() : inherit.instructor;
-    const hoursVal   = hoursRaw != null ? hoursRaw : (inherit.hours != null ? inherit.hours : null);
-    const period     = periodRaw != null ? String(periodRaw) : inherit.period;
-    const completedAt = completedRaw != null ? completedRaw : inherit.completedAt;
-    const result     = resultRaw != null ? String(resultRaw) : inherit.result;
-    const stage      = stageRaw != null ? String(stageRaw) : inherit.stage;
-    const note       = noteRaw != null ? String(noteRaw) : inherit.note;
+    // ── 나머지 상속
+    const instructor  = instructorRaw  != null ? String(instructorRaw).replace(/\n/g, ", ").trim() : inherit.instructor;
+    const hoursVal    = hoursRaw       != null ? hoursRaw : inherit.hours;
+    const period      = periodRaw      != null ? String(periodRaw)  : inherit.period;
+    const completedAt = completedRaw   != null ? completedRaw       : inherit.completedAt;
+    const result      = resultRaw      != null ? String(resultRaw)  : inherit.result;
+    const stage       = stageRaw       != null ? String(stageRaw)   : inherit.stage;
+    const note        = noteRaw        != null ? String(noteRaw)    : inherit.note;
 
-    if (instructorRaw != null) inherit.instructor = instructor;
-    if (hoursRaw != null) inherit.hours = hoursRaw;
-    if (periodRaw != null) inherit.period = period;
-    if (completedRaw != null) inherit.completedAt = completedRaw;
-    if (resultRaw != null) inherit.result = result;
-    if (stageRaw != null) inherit.stage = stage;
-    if (noteRaw != null) inherit.note = note;
+    if (instructorRaw  != null) inherit.instructor  = instructor;
+    if (hoursRaw       != null) inherit.hours       = hoursRaw;
+    if (periodRaw      != null) inherit.period      = period;
+    if (completedRaw   != null) inherit.completedAt = completedRaw;
+    if (resultRaw      != null) inherit.result      = result;
+    if (stageRaw       != null) inherit.stage       = stage;
+    if (noteRaw        != null) inherit.note        = note;
 
-    // 빈 행 건너뜀
     if (!courseName && !subjectRaw) continue;
 
-    // 날짜 파싱
     const { startDate, endDate } = normPeriod(period);
     const completedMs = normDate(completedAt);
 
-    // 과목 분리 (신형: 단일 셀에 \n으로 과목 목록)
+    // result2(교육이수) 처리: stage 열에 보수예정, result2 열에 이수 같은 구조
+    let rawResultFinal = result;
+    let rawStageFinal  = stage;
+    if (result2Raw != null) {
+      const r2 = String(result2Raw).trim();
+      // result2가 result 값이면 result로 사용
+      if (normResult(r2)) rawResultFinal = r2;
+      // result2가 stage 값이면 stage로 사용 (보완)
+      else if (normStage(r2)) rawStageFinal = rawStageFinal || r2;
+    }
+
     let subjects = [];
     if (subjectRaw != null) {
       const raw = String(subjectRaw);
@@ -436,29 +493,22 @@ function _parseStandard(sheet, { splitSubjects }) {
     }
     if (!subjects.length) subjects = [""];
 
-    // 행 완전히 비어있으면 skip
     if (!courseName && subjects.every((s) => !s) && !completedMs) continue;
 
-    // 과목별 row 생성 (신형: 과목마다 한 행, 구형: 이미 행별 분리됨)
     for (const subjectName of subjects) {
       rows.push({
-        // 직원
         employeeName: empInfo.name,
-        empNo: empInfo.empNo,
-        // 교육
-        trainingType: sheet.trainingType,
+        empNo:        empInfo.empNo,
+        trainingType,
         courseName:   courseName || subjectName,
         subjectName:  subjectName || courseName,
-        instructor:   instructor,
+        instructor,
         hours:        normHours(hoursVal),
         startDate,
         endDate,
         completedAt:  completedMs,
-        ..._resolveResultAndStage(result, stage),
+        ...resolveResultStage(rawResultFinal, rawStageFinal),
         note:         String(note).replace(/\n/g, " ").trim(),
-        // 내부
-        _raw: { course: courseRaw, subject: subjectRaw, stage, result },
-        _rowIdx: r,
       });
     }
   }
@@ -466,118 +516,210 @@ function _parseStandard(sheet, { splitSubjects }) {
   return rows;
 }
 
-/** 직원 기본정보 탐지 (헤더 위 영역) */
-function _detectEmpInfo(sheet, headerRow) {
-  let name = "", empNo = "";
-  const SEARCH_LIMIT = Math.min(headerRow, 15);
+/**
+ * TAS 형 파싱
+ * 헤더에 수료일자 열이 없고, 실제 데이터에서 6열(col5) 또는 7열(col6)에 수료일이 있음
+ * 교육일자 열을 period로, 별도 수료일을 completedAt으로 처리
+ */
+function _parseTAS(sheet, trainingType) {
+  const hr = findHeaderRow(sheet);
+  if (hr < 0) return [];
 
-  for (let r = 0; r <= SEARCH_LIMIT; r++) {
-    for (let c = 0; c <= sheet.maxCol; c++) {
-      const v = rawCell(sheet, r, c);
-      if (!v) continue;
-      const key = norm(v);
-      if (key === "성명" || key === "이름" || key === "성명name") {
-        // 오른쪽 셀들 탐색
-        for (let dc = 1; dc <= 4; dc++) {
-          const candidate = rawCell(sheet, r, c + dc);
-          if (candidate && norm(candidate) !== "사번" && norm(candidate) !== "생년월일") {
-            name = normName(String(candidate));
-            break;
-          }
-        }
+  const colMap  = buildColMap(sheet, hr);
+  const empInfo = detectEmpInfo(sheet, hr);
+  const rows    = [];
+
+  // TAS에서 수료일은 헤더가 없어도 6열(col5)이나 7열(col6)에 있음
+  // period 열(교육일자) 옆 열을 completedAt으로 추정
+  let completedAtCol = -1;
+  const periodCol = colMap["period"] ?? -1;
+  if (periodCol >= 0) {
+    // 헤더에 없는 오른쪽 열 탐색 (데이터 행에서 날짜값 확인)
+    for (let dc = 1; dc <= 3; dc++) {
+      const testCol = periodCol + dc;
+      // 이 열이 다른 헤더가 아닌지 확인
+      const headerVal = normHeader(rawCell(sheet, hr, testCol) ?? "");
+      if (headerVal === "stage" || headerVal === "note" || headerVal === "result2") continue;
+      // 데이터 행에서 날짜 같은 값이 있는지
+      for (let r = hr + 1; r <= Math.min(hr + 5, sheet.maxRow); r++) {
+        const v = rawCell(sheet, r, testCol);
+        if (v && normDate(v)) { completedAtCol = testCol; break; }
       }
-      if (key === "사번" || key === "사번idnbr" || key === "직원번호") {
-        for (let dc = 1; dc <= 4; dc++) {
-          const candidate = rawCell(sheet, r, c + dc);
-          if (candidate) {
-            const n = normEmpNo(String(candidate));
-            if (n && !["성명", "이름", "생년월일"].includes(norm(n))) {
-              empNo = n;
-              break;
-            }
-          }
-        }
-      }
+      if (completedAtCol >= 0) break;
     }
   }
-  return { name, empNo };
+
+  const inherit = {
+    courseName: "", instructor: "", hours: null, period: "",
+    completedAt: null, result: "", stage: "", note: "",
+  };
+
+  for (let r = hr + 1; r <= sheet.maxRow; r++) {
+    const get = (field) => {
+      const c = colMap[field];
+      return c !== undefined ? rawCell(sheet, r, c) : null;
+    };
+
+    const courseRaw    = get("courseName");
+    const subjectRaw   = get("subjectName");
+    const instructorRaw = get("instructor");
+    const hoursRaw     = get("hours");
+    const periodRaw    = get("period");
+    const completedRaw = completedAtCol >= 0 ? rawCell(sheet, r, completedAtCol) : get("completedAt");
+    const stageRaw     = get("stage");
+    const result2Raw   = get("result2");
+    const noteRaw      = get("note");
+
+    const courseName = courseRaw != null
+      ? String(courseRaw).replace(/\n/g, " ").trim()
+      : inherit.courseName;
+    if (courseRaw != null) inherit.courseName = courseName;
+
+    const instructor  = instructorRaw  != null ? String(instructorRaw).replace(/\n/g, ", ").trim() : inherit.instructor;
+    const hoursVal    = hoursRaw       != null ? hoursRaw : inherit.hours;
+    const period      = periodRaw      != null ? String(periodRaw)  : inherit.period;
+    const completedAt = completedRaw   != null ? completedRaw       : inherit.completedAt;
+    const stage       = stageRaw       != null ? String(stageRaw)   : inherit.stage;
+    const note        = noteRaw        != null ? String(noteRaw)    : inherit.note;
+
+    if (instructorRaw  != null) inherit.instructor  = instructor;
+    if (hoursRaw       != null) inherit.hours       = hoursRaw;
+    if (periodRaw      != null) inherit.period      = period;
+    if (completedRaw   != null) inherit.completedAt = completedRaw;
+    if (stageRaw       != null) inherit.stage       = stage;
+    if (noteRaw        != null) inherit.note        = note;
+
+    if (!courseName && !subjectRaw) continue;
+
+    // TAS에서 result는 "이수"(교육이수 열), stage는 "초기"(보수예정 열)
+    let rawResult = "PASS";
+    let rawStage  = stage;
+    if (result2Raw != null) {
+      const r2 = String(result2Raw).trim();
+      if (normResult(r2)) rawResult = r2;
+    }
+
+    const { startDate, endDate } = normPeriod(period);
+    const completedMs = normDate(completedAt);
+
+    if (!courseName && !subjectRaw && !completedMs) continue;
+
+    const subjectName = subjectRaw != null ? String(subjectRaw).trim() : "";
+    rows.push({
+      employeeName: empInfo.name,
+      empNo:        empInfo.empNo,
+      trainingType,
+      courseName:   courseName || subjectName,
+      subjectName:  subjectName || courseName,
+      instructor,
+      hours:        normHours(hoursVal),
+      startDate,
+      endDate,
+      completedAt:  completedMs,
+      ...resolveResultStage(rawResult, rawStage),
+      note:         String(note).replace(/\n/g, " ").trim(),
+    });
+  }
+
+  return rows;
+}
+
+/**
+ * 보수예정/교육이수형 파싱 (신태용, 배수민, 강재원)
+ * - 헤더: 보수예정(stage), 교육이수/발령일자(result2)
+ * - 법정: 교육일자 열(period=교육날짜), 직무: 교육기간 열
+ */
+function _parseBosoo(sheet, trainingType) {
+  // 표준 파싱과 동일하되 result2 처리 포함
+  return _parseBlock(sheet, findHeaderRow(sheet), sheet.maxRow, trainingType, { splitSubjects: false });
+}
+
+/**
+ * Sheet1 섹션 분리형 파싱 (이지현)
+ * 단일 시트에 법정+직무 섹션이 순서대로 있음
+ */
+function _parseSheet1(sheet) {
+  const sections = findSectionHeaders(sheet);
+  const empInfo  = detectEmpInfo(sheet, findHeaderRow(sheet));
+  const allRows  = [];
+
+  for (let i = 0; i < sections.length; i++) {
+    const sec     = sections[i];
+    const nextSec = sections[i + 1];
+    const secEnd  = nextSec ? nextSec.row - 1 : sheet.maxRow;
+
+    // 섹션 내 헤더 행 탐지
+    const hr = findHeaderRow(sheet, sec.row, sec.row + 5);
+    if (hr < 0) continue;
+
+    const blockRows = _parseBlock(sheet, hr, secEnd, sec.type, { splitSubjects: false });
+    // 직원 정보 덮어쓰기 (Sheet1에서 한 번만 탐지됨)
+    for (const row of blockRows) {
+      row.employeeName = row.employeeName || empInfo.name;
+      row.empNo        = row.empNo        || empInfo.empNo;
+    }
+    allRows.push(...blockRows);
+  }
+
+  return allRows;
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// § 5.  VALIDATOR  —  행별 검증
+// § 5.  VALIDATOR
 // ═══════════════════════════════════════════════════════════════════
 const STATUS = {
   NEW:       "신규",
-  UPDATE:    "업데이트",
   FILL:      "보완",
   DUPLICATE: "중복",
   ERROR:     "오류",
 };
 
-/**
- * @param {object[]} rows  - Mapper 출력
- * @param {Map}      empByNo   - 사번 → employee 객체
- * @param {Map}      empByName - 이름 → employee 객체[]
- * @param {object[]} existingHistory - 기존 manualTrainingHistories
- * @returns {object[]}  ValidatedRow (row + _status + _statusDetail + _employee)
- */
 function validate(rows, { empByNo, empByName, existingHistory }) {
-  const normalize = (s) =>
-    String(s ?? "").toLowerCase().replace(/[\s()[\]·\-]/g, "");
-
-  const existingKeys = new Set(
-    existingHistory.map((h) => h.dedupeKey).filter(Boolean)
-  );
+  const normKey = (s) => String(s ?? "").toLowerCase().replace(/[\s()[\]·\-]/g, "");
 
   return rows.map((row) => {
-    // ① 과정명 없음
     if (!row.courseName && !row.subjectName) {
       return { ...row, _status: STATUS.ERROR, _statusDetail: "과정명 없음" };
     }
-
-    // ② 수료일 없음 (경고지만 저장 가능)
     if (!row.completedAt) {
       return { ...row, _status: STATUS.ERROR, _statusDetail: "수료일 없음" };
     }
 
-    // ③ 직원 매칭
+    // 직원 매칭
     let employee = null;
-    if (row.empNo) {
-      employee = empByNo.get(row.empNo.toLowerCase()) ?? null;
-    }
+    if (row.empNo) employee = empByNo.get(row.empNo.toLowerCase()) ?? null;
     if (!employee && row.employeeName) {
-      const candidates = empByName.get(row.employeeName) ?? [];
-      if (candidates.length === 1) employee = candidates[0];
-      else if (candidates.length > 1) {
-        return { ...row, _status: STATUS.ERROR, _statusDetail: `동명이인 (${candidates.length}명): 사번 필요` };
+      const cands = empByName.get(row.employeeName) ?? [];
+      if (cands.length === 1) employee = cands[0];
+      else if (cands.length > 1) {
+        return { ...row, _status: STATUS.ERROR, _statusDetail: `동명이인 (${cands.length}명)` };
       }
     }
     if (!employee) {
       return { ...row, _status: STATUS.ERROR, _statusDetail: `직원 미매칭: ${row.employeeName || row.empNo || "?"}` };
     }
 
-    // ④ 기존 이력 매칭
-    const courseKey = normalize(row.courseName || row.subjectName);
+    // 기존 이력 매칭
+    const courseKey = normKey(row.courseName || row.subjectName);
     const existing = existingHistory.find((h) => {
       if (h.uid !== employee.uid) return false;
-      const hType   = normalize(h.trainingType ?? "");
-      const hCourse = normalize(h.courseName ?? h.title ?? h.subjectName ?? "");
+      const hCourse = normKey(h.courseName ?? h.title ?? h.subjectName ?? "");
       const hDate   = Number(h.completedAt ?? 0);
-      return hType   === normalize(row.trainingType) &&
-             hCourse === courseKey &&
-             hDate   === Number(row.completedAt);
+      return hCourse === courseKey && hDate === Number(row.completedAt);
     });
 
     if (existing) {
-      // 보완할 빈 필드가 있는지 확인
-      const fillable = ["instructor", "hours", "startDate", "endDate",
-                        "initialOrRecurrent", "note"].filter((f) => {
-        const existVal = existing[f === "instructor" ? "instructorName" :
-                                  f === "initialOrRecurrent" ? "educationStage" : f];
+      const fillable = ["instructor", "hours", "startDate", "endDate", "initialOrRecurrent", "note"].filter((f) => {
+        const existVal = existing[f === "instructor" ? "instructorName" : f === "initialOrRecurrent" ? "educationStage" : f];
         return (!existVal || existVal === "" || existVal === "-") && !!row[f];
       });
-      const status = fillable.length > 0 ? STATUS.FILL : STATUS.DUPLICATE;
-      return { ...row, _status: status, _statusDetail: fillable.join(", ") || "이미 완료", _employee: employee, _existing: existing };
+      return {
+        ...row,
+        _status: fillable.length > 0 ? STATUS.FILL : STATUS.DUPLICATE,
+        _statusDetail: fillable.join(", ") || "완료",
+        _employee: employee,
+        _existing: existing,
+      };
     }
 
     return { ...row, _status: STATUS.NEW, _statusDetail: "신규 생성", _employee: employee };
@@ -585,29 +727,8 @@ function validate(rows, { empByNo, empByName, existingHistory }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// § 6.  PREVIEW  —  상세 미리보기 데이터 생성
+// § 6.  PREVIEW
 // ═══════════════════════════════════════════════════════════════════
-/**
- * @returns { summary, rows: ValidatedRow[] }
- */
-function buildPreview(validatedRows) {
-  const summary = {
-    total:     validatedRows.length,
-    new:       0,
-    fill:      0,
-    duplicate: 0,
-    error:     0,
-  };
-  for (const r of validatedRows) {
-    if (r._status === STATUS.NEW)       summary.new++;
-    else if (r._status === STATUS.FILL) summary.fill++;
-    else if (r._status === STATUS.DUPLICATE) summary.duplicate++;
-    else if (r._status === STATUS.ERROR) summary.error++;
-  }
-  return { summary, rows: validatedRows };
-}
-
-/** HTML 미리보기 테이블 렌더 */
 export function renderDetailedPreview(container, preview) {
   if (!container) return;
   const STATUS_COLOR = {
@@ -615,17 +736,14 @@ export function renderDetailedPreview(container, preview) {
     보완: "var(--blue-600,#2563eb)",
     중복: "var(--gray-400,#9ca3af)",
     오류: "var(--red-600,#dc2626)",
-    업데이트: "var(--orange-500,#f97316)",
   };
-
   const fmt = (ms) => {
     if (!ms) return "–";
     const d = new Date(Number(ms));
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
   };
   const esc = (s) => String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-  const stageLabel = { initial: "초기", recurrent: "보수", pass: "이수" };
-
+  const stageLabel = { initial: "초기", recurrent: "보수" };
   const { summary, rows } = preview;
 
   container.innerHTML = `
@@ -636,8 +754,8 @@ export function renderDetailedPreview(container, preview) {
       <span style="color:var(--gray-400,#9ca3af)">중복 <strong>${summary.duplicate}</strong></span>
       <span style="color:var(--red-600,#dc2626)">오류 <strong>${summary.error}</strong></span>
     </div>
-    <div style="overflow-x:auto;max-height:360px;overflow-y:auto;border:1px solid var(--gray-200);border-radius:var(--radius-md)">
-      <table class="data-table" style="min-width:900px;font-size:var(--text-xs)">
+    <div style="overflow-x:auto;max-height:400px;overflow-y:auto;border:1px solid var(--gray-200);border-radius:var(--radius-md)">
+      <table class="data-table" style="min-width:960px;font-size:var(--text-xs)">
         <thead>
           <tr>
             <th>처리</th><th>직원명</th><th>사번</th><th>유형</th>
@@ -676,94 +794,59 @@ export function renderDetailedPreview(container, preview) {
 // ═══════════════════════════════════════════════════════════════════
 
 /**
- * result 열과 stage 열 값이 뒤집힌 경우를 감지·교정하여 올바른 필드에 배치
- *
- * 처리 순서:
- *  1. 각 열 값을 result 후보 / stage 후보로 분석
- *  2. 열이 뒤집힌 경우(result열→stage값, stage열→result값) 교환
- *  3. 한쪽만 유효한 경우 의미에 맞는 필드에 배치
- *  4. PASS를 stage로, 초기/보수를 result로 저장하지 않음
- */
-function _resolveResultAndStage(rawResult, rawStage) {
-  const stageFromResultCol = normStage(rawResult);   // result 열에서 stage 값 감지
-  const resultFromStageCol = normResult(rawStage);   // stage 열에서 result 값 감지
-  const stageFromStageCol  = normStage(rawStage);    // stage 열에서 stage 값 감지
-  const resultFromResultCol = normResult(rawResult); // result 열에서 result 값 감지
-
-  let finalResult = null;
-  let finalStage  = null;
-
-  // ── 정상: 각 열이 올바른 값 보유
-  if (resultFromResultCol) finalResult = resultFromResultCol;
-  if (stageFromStageCol)   finalStage  = stageFromStageCol;
-
-  // ── 보정: result열에 stage값, stage열에 result값 → 교환
-  if (!finalResult && resultFromStageCol) finalResult = resultFromStageCol;
-  if (!finalStage  && stageFromResultCol) finalStage  = stageFromResultCol;
-
-  return {
-    result:             finalResult ?? "PASS",
-    initialOrRecurrent: finalStage  ?? null,
-  };
-}
-/**
- * @returns {{ empInfo, rows, parserUsed, fileName }}
+ * 파일 분석 (Reader → Normalizer → TemplateDetector → Mapper)
  */
 export async function analyzeExcel(file) {
-  const sheets = await readerRead(file);
+  const sheetRaws = await readerRead(file);
 
-  const allRows = [];
+  const SHEET_TYPE = { 법정: "legal", 직무: "job" };
+
+  const allRows    = [];
   const parsersUsed = [];
 
-  for (const sheet of sheets) {
-    const parser = detectTemplate(sheet);
+  for (const sheetRaw of sheetRaws) {
+    const parser = detectParser(sheetRaw);
     if (!parsersUsed.includes(parser.name)) parsersUsed.push(parser.name);
-    const rows = parser.parse(sheet);
+
+    // 시트 이름에서 교육유형 판별
+    const trainingType =
+      Object.entries(SHEET_TYPE).find(([k]) => sheetRaw.sheetName.includes(k))?.[1] ?? "other";
+
+    let rows;
+    if (parser.id === "sheet1_section") {
+      // Sheet1 섹션형은 내부에서 교육유형을 스스로 판별
+      rows = parser.parse(sheetRaw);
+    } else {
+      rows = parser.parse(sheetRaw, trainingType);
+    }
     allRows.push(...rows);
   }
 
-  // 직원 정보: 첫 번째 유효 시트에서
+  // 직원 정보 추출 (첫 번째 유효 시트)
   let empInfo = { name: "", empNo: "" };
-  for (const sheet of sheets) {
-    const info = _detectEmpInfo(sheet, (() => {
-      for (let r = 0; r <= Math.min(sheet.maxRow, 25); r++) {
-        for (let c = 0; c <= sheet.maxCol; c++) {
-          const v = rawCell(sheet, r, c);
-          if (!v) continue;
-          const h = normHeader(v);
-          if (h === "courseName" || h === "subjectName") return r;
-        }
-      }
-      return 10;
-    })());
+  for (const sheetRaw of sheetRaws) {
+    const hr = findHeaderRow(sheetRaw);
+    const info = detectEmpInfo(sheetRaw, hr >= 0 ? hr : 12);
     if (info.name || info.empNo) { empInfo = info; break; }
   }
 
-  return {
-    empInfo,
-    rows: allRows,
-    parsersUsed,
-    fileName: file.name,
-  };
+  return { empInfo, rows: allRows, parsersUsed, fileName: file.name };
 }
 
-/**
- * 검증 + 미리보기 빌드
- * @param {object[]} rows
- * @param {{ empByNo, empByName, existingHistory }} lookups
- */
 export function validateAndPreview(rows, lookups) {
   const validated = validate(rows, lookups);
-  return buildPreview(validated);
+  const summary = {
+    total:     validated.length,
+    new:       validated.filter((r) => r._status === STATUS.NEW).length,
+    fill:      validated.filter((r) => r._status === STATUS.FILL).length,
+    duplicate: validated.filter((r) => r._status === STATUS.DUPLICATE).length,
+    error:     validated.filter((r) => r._status === STATUS.ERROR).length,
+  };
+  return { summary, rows: validated };
 }
 
-/**
- * 저장할 행만 추출 (신규 + 보완, 중복·오류 제외)
- */
 export function getImportableRows(validatedRows) {
-  return validatedRows.filter(
-    (r) => r._status === STATUS.NEW || r._status === STATUS.FILL
-  );
+  return validatedRows.filter((r) => r._status === STATUS.NEW || r._status === STATUS.FILL);
 }
 
 export { STATUS };

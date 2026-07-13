@@ -1521,11 +1521,16 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
   // 회사 직원 목록 조회
   const usersSnap = await db.ref("users").get();
   const allUsers  = Object.entries(usersSnap.val() ?? {}).map(([uid, u]) => ({ uid, ...u }));
-  const empByNo   = new Map(allUsers.filter((u) => u.empNo).map((u) => [String(u.empNo).trim().toLowerCase(), u]));
-  const empByName = new Map(); // 이름 → [uid, ...] (동명이인 처리)
+  // empNo: 탭·공백 완전 제거 후 대소문자 무시
+  const empByNo   = new Map(
+    allUsers
+      .filter((u) => u.empNo)
+      .map((u) => [String(u.empNo).replace(/[\t\s]/g, "").toLowerCase(), u])
+  );
+  const empByName = new Map();
   for (const u of allUsers) {
     if (!u.name) continue;
-    const k = String(u.name).trim();
+    const k = String(u.name).replace(/\s+/g, " ").trim();
     if (!empByName.has(k)) empByName.set(k, []);
     empByName.get(k).push(u);
   }
@@ -1545,8 +1550,9 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
   const processedKeys = new Set(manualAll.map((r) => r.dedupeKey).filter(Boolean));
 
   for (const row of rows) {
-    const empNoRaw     = normalizeText(row.empNo ?? row.employeeEmpNo ?? "");
-    const empNameRaw   = normalizeText(row.employeeName ?? row.name ?? "");
+    // empNo: 탭·공백 완전 제거 (\tT259144 같은 패턴 처리)
+    const empNoRaw   = String(row.empNo ?? row.employeeEmpNo ?? "").replace(/[\t\s]/g, "").toUpperCase();
+    const empNameRaw = String(row.employeeName ?? row.name ?? "").replace(/\s+/g, " ").trim();
     const trainingType = normalizeTrainingTypeValue(row.trainingType ?? "job");
     const courseName   = normalizeText(row.courseName ?? row.subjectName ?? "");
     const subjectName  = normalizeText(row.subjectName ?? row.courseName ?? "");

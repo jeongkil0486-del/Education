@@ -779,33 +779,31 @@ function openImportExcelModal() {
           const statusEl = document.getElementById("import-parse-status");
           if (statusEl) statusEl.textContent = "파일 분석 중...";
           try {
-            // ── § 1-4: Reader → Normalizer → TemplateDetector → Mapper
             const analyzed = await analyzeExcel(file);
 
-            // ── § 5: Validator (lookups는 서버에서 가져오지 않고 클라이언트에서 빈 맵으로 skip;
-            //          실제 매칭은 importHistoryExcelData 서버 함수에서 수행)
-            //          단, 미리보기용으로 기본 validated rows 생성 (직원 매칭 없이)
-            const preview = { summary: { total: analyzed.rows.length, new: 0, fill: 0, duplicate: 0, error: 0 }, rows: analyzed.rows };
+            // 기본 미리보기 통계 (직원 매칭은 서버에서)
             let newCount = 0, errorCount = 0;
             for (const r of analyzed.rows) {
-              if (!r.completedAt) errorCount++;
+              if (!r.completedAt || (!r.courseName && !r.subjectName)) errorCount++;
               else newCount++;
             }
-            preview.summary.new = newCount;
-            preview.summary.error = errorCount;
+            const preview = {
+              summary: { total: analyzed.rows.length, new: newCount, fill: 0, duplicate: 0, error: errorCount },
+              rows: analyzed.rows,
+            };
 
             window._importAnalyzed = analyzed;
 
-            // ── § 6: 상세 미리보기 렌더
             const previewEl = document.getElementById("import-preview");
             const contentEl = document.getElementById("import-preview-content");
             if (previewEl) previewEl.style.display = "block";
             if (contentEl) renderDetailedPreview(contentEl, preview);
 
             const parserInfo = analyzed.parsersUsed?.join(", ") ?? "";
+            const validCount = analyzed.rows.filter((r) => r.completedAt && (r.courseName || r.subjectName)).length;
             if (statusEl) statusEl.textContent =
-              `분석 완료: ${analyzed.rows.length}개 이력 발견` +
-              (parserInfo ? ` [${parserInfo}]` : "");
+              `분석 완료: 총 ${analyzed.rows.length}건 (저장 가능: ${validCount}건, 오류: ${errorCount}건)` +
+              (parserInfo ? `  [${parserInfo}]` : "");
           } catch (err) {
             console.error("[history-cards] analyzeExcel failed", err);
             if (statusEl) statusEl.textContent = `분석 실패: ${err.message}`;
@@ -821,25 +819,30 @@ function openImportExcelModal() {
           if (!analyzed?.rows?.length) { toast.warning("먼저 파일을 분석해 주세요."); return; }
           const mode = document.querySelector("input[name='import-mode']:checked")?.value ?? "fill";
 
-          // ── § 7: Import (Validator 통과분만 서버로 전송)
-          //   서버의 importHistoryExcelData가 직원 매칭 + 중복 방지를 최종 수행
-          const payload = analyzed.rows.map((r) => ({
-            empNo:          r.empNo,
-            employeeName:   r.employeeName,
-            trainingType:   r.trainingType,
-            courseName:     r.courseName,
-            subjectName:    r.subjectName,
-            instructorName: r.instructor,
-            trainingHours:  r.hours,
-            startDate:      r.startDate,
-            endDate:        r.endDate,
-            completedAt:    r.completedAt,
-            result:         r.result,
-            educationStage: r.initialOrRecurrent,
-            subType:        r.initialOrRecurrent,
-            note:           r.note,
-          })).filter((r) => r.completedAt || r.courseName); // 최소 조건
+          // 수료일 없는 행 제외 (필수), 과정명 없는 행 제외
+          const payload = analyzed.rows
+            .filter((r) => r.completedAt && (r.courseName || r.subjectName))
+            .map((r) => ({
+              empNo:          String(r.empNo ?? "").trim(),
+              employeeName:   String(r.employeeName ?? "").trim(),
+              trainingType:   r.trainingType,
+              courseName:     String(r.courseName ?? "").trim(),
+              subjectName:    String(r.subjectName ?? "").trim(),
+              instructorName: String(r.instructor ?? "").trim(),
+              trainingHours:  r.hours != null ? Number(r.hours) : 0,
+              startDate:      r.startDate  ?? null,
+              endDate:        r.endDate    ?? null,
+              completedAt:    r.completedAt,
+              result:         r.result     ?? "PASS",
+              educationStage: r.initialOrRecurrent ?? "",
+              subType:        r.initialOrRecurrent ?? "",
+              note:           String(r.note ?? "").trim(),
+            }));
 
+          if (!payload.length) {
+            toast.warning("저장 가능한 이력이 없습니다. (수료일 또는 과정명 누락)");
+            return;
+          }
           modal.setLoading("저장", true);
           try {
             const result = await importHistoryExcelData({ rows: payload, mode });
