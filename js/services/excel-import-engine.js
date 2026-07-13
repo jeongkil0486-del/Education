@@ -90,13 +90,27 @@ function rawCell(sheet, r, c) {
 // § 2.  NORMALIZER  —  문자열 정규화
 // ═══════════════════════════════════════════════════════════════════
 const STAGE_MAP = {
+  // ── 초기
   초기: "initial",
+  초기교육: "initial",
   initial: "initial",
-  이수: "pass",     // 이수 → result 에 반영, stage는 별도 판단
+  // ── 보수
   보수: "recurrent",
-  recurrent: "recurrent",
+  보수교육: "recurrent",
   정기: "recurrent",
+  정기교육: "recurrent",
+  recurrent: "recurrent",
+  recurring: "recurrent",
   갱신: "recurrent",
+  // ── 결과값이 stage 열에 잘못 들어온 경우 → 빈값으로 처리 (결과 필드로 이동)
+  pass: "",
+  fail: "",
+  이수: "",
+  수료: "",
+  완료: "",
+  합격: "",
+  미수료: "",
+  불합격: "",
 };
 const RESULT_PASS = ["pass", "수료", "완료", "합격", "이수"];
 const RESULT_FAIL = ["fail", "미수료", "불합격"];
@@ -160,19 +174,23 @@ function normHours(v) {
   return isNaN(n) ? null : n;
 }
 
-/** stage 정규화 */
+/** stage 정규화 — result 값이 들어오면 null 반환 */
 function normStage(v) {
+  if (!v) return null;
   const s = norm(v);
-  return STAGE_MAP[s] ?? (s || null);
+  if (s in STAGE_MAP) return STAGE_MAP[s] || null;  // ""→null
+  return null;  // 매핑 없으면 stage 아님
 }
 
-/** result 정규화 */
+/** result 정규화 — stage 값이 들어오면 null 반환 */
 function normResult(v) {
-  if (!v) return "PASS";
+  if (!v) return null;
   const s = norm(v);
+  // stage 값이 result 열에 들어온 경우 → null (stage 쪽으로 처리됨)
+  if (["initial", "초기", "초기교육", "recurrent", "recurring", "recurrent", "정기", "정기교육", "보수", "보수교육", "갱신"].includes(s)) return null;
   if (RESULT_PASS.some((w) => s.includes(w))) return "PASS";
   if (RESULT_FAIL.some((w) => s.includes(w))) return "FAIL";
-  return String(v).trim().toUpperCase() || "PASS";
+  return null;
 }
 
 /**
@@ -436,8 +454,7 @@ function _parseStandard(sheet, { splitSubjects }) {
         startDate,
         endDate,
         completedAt:  completedMs,
-        result:       normResult(result),
-        initialOrRecurrent: normStage(stage),
+        ..._resolveResultAndStage(result, stage),
         note:         String(note).replace(/\n/g, " ").trim(),
         // 내부
         _raw: { course: courseRaw, subject: subjectRaw, stage, result },
@@ -659,7 +676,36 @@ export function renderDetailedPreview(container, preview) {
 // ═══════════════════════════════════════════════════════════════════
 
 /**
- * 파일 분석 (Reader → Normalizer → TemplateDetector → Mapper)
+ * result 열과 stage 열 값이 뒤집힌 경우를 감지·교정하여 올바른 필드에 배치
+ *
+ * 처리 순서:
+ *  1. 각 열 값을 result 후보 / stage 후보로 분석
+ *  2. 열이 뒤집힌 경우(result열→stage값, stage열→result값) 교환
+ *  3. 한쪽만 유효한 경우 의미에 맞는 필드에 배치
+ *  4. PASS를 stage로, 초기/보수를 result로 저장하지 않음
+ */
+function _resolveResultAndStage(rawResult, rawStage) {
+  const stageFromResultCol = normStage(rawResult);   // result 열에서 stage 값 감지
+  const resultFromStageCol = normResult(rawStage);   // stage 열에서 result 값 감지
+  const stageFromStageCol  = normStage(rawStage);    // stage 열에서 stage 값 감지
+  const resultFromResultCol = normResult(rawResult); // result 열에서 result 값 감지
+
+  let finalResult = null;
+  let finalStage  = null;
+
+  // ── 정상: 각 열이 올바른 값 보유
+  if (resultFromResultCol) finalResult = resultFromResultCol;
+  if (stageFromStageCol)   finalStage  = stageFromStageCol;
+
+  // ── 보정: result열에 stage값, stage열에 result값 → 교환
+  if (!finalResult && resultFromStageCol) finalResult = resultFromStageCol;
+  if (!finalStage  && stageFromResultCol) finalStage  = stageFromResultCol;
+
+  return {
+    result:             finalResult ?? "PASS",
+    initialOrRecurrent: finalStage  ?? null,
+  };
+}
  * @returns {{ empInfo, rows, parserUsed, fileName }}
  */
 export async function analyzeExcel(file) {

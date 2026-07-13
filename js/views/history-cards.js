@@ -29,7 +29,10 @@ const SECTION_LABELS = {
   other:         "기타",
 };
 function getSectionKey(row) {
-  if (row.trainingType === "job") return row.subType === "initial" ? "job_initial" : "job_recurring";
+  if (row.trainingType === "job") {
+    const stage = _normStage(row.subType) ?? _normStage(row.educationStage) ?? "";
+    return stage === "initial" ? "job_initial" : "job_recurring";
+  }
   return row.trainingType;
 }
 
@@ -407,8 +410,10 @@ function renderProfile(emp) {
  * 동일 키 → 하나의 그룹 (Accordion)
  */
 function groupKey(row) {
-  const norm = (s) => String(s ?? "").trim().toLowerCase();
-  return `${getSectionKey(row)}||${norm(row.courseName ?? row.title)}||${norm(row.subType ?? "")}`;
+  const normStr = (s) => String(s ?? "").trim().toLowerCase();
+  // stage는 정규화된 값(initial/recurrent/null)으로 그룹화 → 정기·보수·recurrent·recurring 모두 같은 그룹
+  const stageNorm = _normStage(row.subType) ?? _normStage(row.educationStage) ?? "";
+  return `${getSectionKey(row)}||${normStr(row.courseName ?? row.title)}||${stageNorm}`;
 }
 
 /**
@@ -545,7 +550,7 @@ function courseGroupRows(group, gi, secKey, isAdmin) {
   const period  = rep.startDate
     ? (rep.endDate ? `${formatDate(rep.startDate)} ~ ${formatDate(rep.endDate)}` : formatDate(rep.startDate))
     : "–";
-  const subType = _stageLabel(rep.subType);
+  const subType = getStageLabel(rep);   // 모든 교육유형에 적용
   const days    = rep.daysRemaining == null ? "–"
                 : rep.daysRemaining < 0 ? `${Math.abs(rep.daysRemaining)}일 초과`
                 : `${rep.daysRemaining}일`;
@@ -608,10 +613,10 @@ function courseGroupRows(group, gi, secKey, isAdmin) {
               <span style="color:var(--gray-500);font-size:11px">시간</span><br/>${m.hours ? `${m.hours}시간` : "–"}
             </div>
             <div>
-              <span style="color:var(--gray-500);font-size:11px">초기/보수</span><br/>${_stageLabel(m.subType)}
+              <span style="color:var(--gray-500);font-size:11px">초기/보수</span><br/>${getStageLabel(m)}
             </div>
             <div>
-              <span style="color:var(--gray-500);font-size:11px">결과</span><br/>${esc(m.result || (m.completionStatus === "completed" ? "PASS" : "–"))}
+              <span style="color:var(--gray-500);font-size:11px">결과</span><br/>${getResultLabel(m)}
             </div>
             ${m.subjectName && m.subjectName !== (m.courseName ?? m.title)
               ? `<div><span style="color:var(--gray-500);font-size:11px">교육과목</span><br/>${esc(m.subjectName)}</div>`
@@ -626,11 +631,73 @@ function courseGroupRows(group, gi, secKey, isAdmin) {
   return repRow + detailRows;
 }
 
+/* ──────────────────────────────────────────────────────────
+   Stage / Result 정규화 Helper  (화면 표시 + 그룹화 공용)
+────────────────────────────────────────────────────────── */
+
+/** stage 값 정규화 → "initial" | "recurrent" | null */
+function _normStage(v) {
+  if (!v) return null;
+  const s = String(v).replace(/\([^)]*\)/g, "").replace(/\s+/g, "").toLowerCase().trim();
+  if (["초기", "초기교육", "initial"].includes(s)) return "initial";
+  if (["보수", "보수교육", "정기", "정기교육", "recurrent", "recurring", "갱신"].includes(s)) return "recurrent";
+  return null;  // PASS, FAIL, 이수 등 result 값은 null 반환
+}
+
+/** result 값 정규화 → "PASS" | "FAIL" | null */
+function _normResult(v) {
+  if (!v) return null;
+  const s = String(v).replace(/\([^)]*\)/g, "").replace(/\s+/g, "").toLowerCase().trim();
+  // stage 값이 result 자리에 있으면 null
+  if (_normStage(v)) return null;
+  if (["pass", "이수", "수료", "완료", "합격"].includes(s)) return "PASS";
+  if (["fail", "미수료", "불합격"].includes(s)) return "FAIL";
+  return null;
+}
+
+/**
+ * 여러 후보 필드에서 stage 를 찾아 한글 라벨로 반환
+ * 기존에 잘못 저장된 경우(result 자리에 stage 값): result 필드도 탐색
+ */
+function getStageLabel(row) {
+  // 1차: 정상 위치에서 탐색
+  for (const v of [row.subType, row.educationStage, row.initialOrRecurrent, row.trainingPhase]) {
+    const s = _normStage(v);
+    if (s === "initial")   return "초기";
+    if (s === "recurrent") return "보수";
+  }
+  // 2차: result 자리에 stage 값이 잘못 저장된 경우 → result 필드에서 탐색
+  const stageFromResult = _normStage(row.result);
+  if (stageFromResult === "initial")   return "초기";
+  if (stageFromResult === "recurrent") return "보수";
+  return "–";
+}
+
+/**
+ * 여러 후보 필드에서 result 를 찾아 반환
+ * 기존에 잘못 저장된 경우(subType 자리에 result 값): subType 필드도 탐색
+ */
+function getResultLabel(row) {
+  // 1차: 정상 위치에서 탐색
+  for (const v of [row.result]) {
+    const r = _normResult(v);
+    if (r === "PASS") return "PASS";
+    if (r === "FAIL") return "FAIL";
+  }
+  // 2차: stage 자리에 result 값이 잘못 저장된 경우 → subType/educationStage 필드에서 탐색
+  for (const v of [row.subType, row.educationStage, row.initialOrRecurrent]) {
+    const r = _normResult(v);
+    if (r === "PASS") return "PASS";
+    if (r === "FAIL") return "FAIL";
+  }
+  // 3차: completionStatus
+  if (row.completionStatus === "completed") return "PASS";
+  return "–";
+}
+
+/** @deprecated — getStageLabel() 사용 권장 */
 function _stageLabel(subType) {
-  if (!subType) return "–";
-  if (subType === "initial")   return "초기";
-  if (subType === "recurring" || subType === "recurrent") return "보수";
-  return esc(subType);
+  return getStageLabel({ subType });
 }
 
 function toInputDate(value) {
@@ -1049,20 +1116,14 @@ function normalizeHours(v) {
   return isNaN(n) ? String(v) : n;
 }
 
+/** @deprecated — _normResult() + getResultLabel() 사용 권장 */
 function normalizeResult(v) {
-  if (!v) return "PASS";
-  const s = String(v).trim().toUpperCase();
-  if (["PASS", "수료", "완료", "합격", "이수"].some((w) => s.includes(w))) return "PASS";
-  if (["FAIL", "미수료", "불합격"].some((w) => s.includes(w))) return "FAIL";
-  return s || "PASS";
+  return _normResult(v) ?? "PASS";
 }
 
+/** @deprecated — _normStage() + getStageLabel() 사용 권장 */
 function normalizeStage(v) {
-  if (!v) return "";
-  const s = String(v).trim();
-  if (s.includes("초기")) return "initial";
-  if (s.includes("보수") || s.includes("보교")) return "recurrent";
-  return s.toLowerCase();
+  return _normStage(v) ?? "";
 }
 
 /* ──────────────────────────────────────────────────────────
@@ -1092,7 +1153,7 @@ function renderImportPreview(parsed) {
               <td style="font-size:var(--text-xs)">${esc(r.subjectName)}</td>
               <td style="font-size:var(--text-xs)">${esc(r.instructorName) || "–"}</td>
               <td style="font-size:var(--text-xs)">${r.completedAt ? fmtDateMs(r.completedAt) : "–"}</td>
-              <td style="font-size:var(--text-xs)">${r.educationStage === "initial" ? "초기" : r.educationStage === "recurrent" ? "보수" : "–"}</td>
+              <td style="font-size:var(--text-xs)">${getStageLabel({ subType: r.educationStage, educationStage: r.educationStage, initialOrRecurrent: r.initialOrRecurrent })}</td>
             </tr>`).join("")}
           ${parsed.rows.length > 50 ? `<tr><td colspan="6" style="text-align:center;color:var(--gray-400);font-size:var(--text-xs)">… 외 ${parsed.rows.length - 50}건</td></tr>` : ""}
         </tbody>
