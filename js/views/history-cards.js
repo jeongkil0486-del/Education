@@ -57,7 +57,9 @@ let S = {
   items:              [],
   dueStatusFilter:    "",
 };
-let historyCardSort = { key: null, direction: "none" };
+const historyCardSortBySection = Object.fromEntries(
+  SECTION_ORDER.map((sectionKey) => [sectionKey, { key: null, direction: "none" }])
+);
 
 /* ──────────────────────────────────────────────────────────
    render
@@ -177,7 +179,7 @@ export async function render(container, params = {}) {
   const handleSortHeader = (event) => {
     const header = event.target.closest("th[data-hc-sort-key]");
     if (!header || !sectionsEl?.contains(header)) return;
-    cycleHistoryCardSort(header.dataset.hcSortKey);
+    cycleHistoryCardSort(header.dataset.hcSectionKey, header.dataset.hcSortKey);
   };
   sectionsEl?.addEventListener("click", handleSortHeader);
   sectionsEl?.addEventListener("keydown", (event) => {
@@ -185,7 +187,7 @@ export async function render(container, params = {}) {
     const header = event.target.closest("th[data-hc-sort-key]");
     if (!header || !sectionsEl.contains(header)) return;
     event.preventDefault();
-    cycleHistoryCardSort(header.dataset.hcSortKey);
+    cycleHistoryCardSort(header.dataset.hcSectionKey, header.dataset.hcSortKey);
   });
 
   await initView(params.uid ?? "");
@@ -513,32 +515,35 @@ function compareHistoryValues(a, b, type, direction) {
   return direction === "asc" ? comparison : -comparison;
 }
 
-function sortCourseGroups(groups) {
-  const column = HISTORY_CARD_SORT_COLUMNS[historyCardSort.key];
-  if (!column || historyCardSort.direction === "none") return groups;
+function sortCourseGroups(groups, sectionKey) {
+  const sortState = historyCardSortBySection[sectionKey] ?? { key: null, direction: "none" };
+  const column = HISTORY_CARD_SORT_COLUMNS[sortState.key];
+  if (!column || sortState.direction === "none") return groups;
   return groups
     .map((group, originalIndex) => ({ group, originalIndex }))
     .sort((a, b) => compareHistoryValues(
       column.value(a.group.rep),
       column.value(b.group.rep),
       column.type,
-      historyCardSort.direction
+      sortState.direction
     ) || a.originalIndex - b.originalIndex)
     .map(({ group }) => group);
 }
 
-function cycleHistoryCardSort(key) {
-  const previousDirection = historyCardSort.key === key ? historyCardSort.direction : "none";
+function cycleHistoryCardSort(sectionKey, key) {
+  const current = historyCardSortBySection[sectionKey] ?? { key: null, direction: "none" };
+  const previousDirection = current.key === key ? current.direction : "none";
   const nextDirection = previousDirection === "none" ? "asc" : previousDirection === "asc" ? "desc" : "none";
-  historyCardSort = { key: nextDirection === "none" ? null : key, direction: nextDirection };
+  historyCardSortBySection[sectionKey] = { key: nextDirection === "none" ? null : key, direction: nextDirection };
   renderSections(filteredRows());
 }
 
-function sortableHistoryCardHeader(key, label) {
-  const active = historyCardSort.key === key && historyCardSort.direction !== "none";
-  const icon = active ? (historyCardSort.direction === "asc" ? "▲" : "▼") : "";
-  const ariaSort = !active ? "none" : historyCardSort.direction === "asc" ? "ascending" : "descending";
-  return `<th data-hc-sort-key="${esc(key)}" tabindex="0" role="columnheader" aria-sort="${ariaSort}" style="cursor:pointer;user-select:none;white-space:nowrap" title="클릭하여 정렬">${esc(label)}${icon ? ` <span aria-hidden="true" style="font-size:10px">${icon}</span>` : ""}</th>`;
+function sortableHistoryCardHeader(sectionKey, key, label) {
+  const sortState = historyCardSortBySection[sectionKey] ?? { key: null, direction: "none" };
+  const active = sortState.key === key && sortState.direction !== "none";
+  const icon = active ? (sortState.direction === "asc" ? "▲" : "▼") : "";
+  const ariaSort = !active ? "none" : sortState.direction === "asc" ? "ascending" : "descending";
+  return `<th data-hc-section-key="${esc(sectionKey)}" data-hc-sort-key="${esc(key)}" tabindex="0" role="columnheader" aria-sort="${ariaSort}" style="cursor:pointer;user-select:none;white-space:nowrap" title="클릭하여 정렬">${esc(label)}${icon ? ` <span aria-hidden="true" style="font-size:10px">${icon}</span>` : ""}</th>`;
 }
 
 function renderSections(rows) {
@@ -552,7 +557,7 @@ function renderSections(rows) {
 
   el.innerHTML = SECTION_ORDER.map((secKey) => {
     const sRows   = sectionMap[secKey] ?? [];
-    const groups  = sortCourseGroups(groupRows(sRows));
+    const groups  = sortCourseGroups(groupRows(sRows), secKey);
     const isAdmin = authStore.role === ROLES.HQ_ADMIN;
 
     return `
@@ -571,16 +576,16 @@ function renderSections(rows) {
                   <thead>
                     <tr>
                       <th style="width:28px"></th>
-                      ${sortableHistoryCardHeader("courseName", "교육과정명")}
-                      ${sortableHistoryCardHeader("instructorName", "강사")}
-                      ${sortableHistoryCardHeader("hours", "교육시간")}
-                      ${sortableHistoryCardHeader("period", "교육기간")}
-                      ${sortableHistoryCardHeader("completedAt", "최신 수료일")}
-                      ${sortableHistoryCardHeader("subType", "초기/보수")}
-                      ${sortableHistoryCardHeader("nextDueDate", "다음 예정일")}
-                      ${sortableHistoryCardHeader("daysRemaining", "남은 일수")}
-                      ${sortableHistoryCardHeader("status", "상태")}
-                      ${sortableHistoryCardHeader("note", "비고")}
+                      ${sortableHistoryCardHeader(secKey, "courseName", "교육과정명")}
+                      ${sortableHistoryCardHeader(secKey, "instructorName", "강사")}
+                      ${sortableHistoryCardHeader(secKey, "hours", "교육시간")}
+                      ${sortableHistoryCardHeader(secKey, "period", "교육기간")}
+                      ${sortableHistoryCardHeader(secKey, "completedAt", "최신 수료일")}
+                      ${sortableHistoryCardHeader(secKey, "subType", "초기/보수")}
+                      ${sortableHistoryCardHeader(secKey, "nextDueDate", "다음 예정일")}
+                      ${sortableHistoryCardHeader(secKey, "daysRemaining", "남은 일수")}
+                      ${sortableHistoryCardHeader(secKey, "status", "상태")}
+                      ${sortableHistoryCardHeader(secKey, "note", "비고")}
                     </tr>
                   </thead>
                   <tbody>
