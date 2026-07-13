@@ -83,6 +83,22 @@ export function normalizeTrainingType(type) {
   return LEGACY_TRAINING_TYPE_MAP[normalized] ?? "other";
 }
 
+function normalizeTrainingSubType(...values) {
+  for (const value of values) {
+    const normalized = String(value ?? "")
+      .replace(/\([^)]*\)/g, "")
+      .replace(/\s+/g, "")
+      .toLowerCase()
+      .trim();
+    if (["초기", "초기교육", "입문", "입문교육", "initial"].includes(normalized)) return "initial";
+    if ([
+      "보수", "보수교육", "정기", "정기교육", "갱신", "갱신교육", "재교육",
+      "recurrent", "recurring", "refresher", "recurrenttraining",
+    ].includes(normalized)) return "recurrent";
+  }
+  return "";
+}
+
 export function getTrainingTypeLabel(type) {
   return TRAINING_TYPE_LABELS[normalizeTrainingType(type)] ?? TRAINING_TYPE_LABELS.other;
 }
@@ -1139,7 +1155,14 @@ export async function buildEmployeeHistoryRowsV2(uid) {
     subjectName: mh.subjectName ?? mh.title ?? "-",
     trainingType: normalizeTrainingType(mh.trainingType),
     trainingTypeLabel: getTrainingTypeLabel(mh.trainingType),
-    subType: mh.subType ?? "",
+    subType: normalizeTrainingSubType(
+      mh.subType,
+      mh.educationStage,
+      mh.initialOrRecurrent,
+      mh.trainingPhase,
+      mh.courseName,
+      mh.title
+    ),
     hours: Number(mh.hours ?? 0),
     cycleMonths: Math.max(0, Number(mh.cycleMonths ?? 0) || 0),
     completionStatus: "completed",

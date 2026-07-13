@@ -72,13 +72,20 @@ function getSelectedTrainingMeta() {
 }
 
 function getEffectiveCompanyId(trainingMeta = getSelectedTrainingMeta(), branch = getSelectedBranch()) {
+  const itemCompanyId = trainingMeta?.itemId
+    ? viewState.items.find((item) => item.id === trainingMeta.itemId)?.companyId
+    : null;
+  const candidateCompanyIds = new Set([
+    ...viewState.branches.map((item) => item?.companyId),
+    ...viewState.items.map((item) => item?.companyId),
+  ].map((value) => String(value ?? "").trim()).filter(Boolean));
+
   return String(
     authStore.companyId ??
     branch?.companyId ??
-    (trainingMeta?.itemId
-      ? viewState.items.find((item) => item.id === trainingMeta.itemId)?.companyId
-      : null) ??
+    itemCompanyId ??
     viewState.company?.id ??
+    (candidateCompanyIds.size === 1 ? [...candidateCompanyIds][0] : null) ??
     ""
   ).trim();
 }
@@ -1024,7 +1031,7 @@ async function openCycleConfigModal() {
           }
           modal.setLoading("저장", true);
           try {
-            await saveEducationCycleConfig({
+            const payload = {
               companyId,
               branchId:     selectedBranch?.id ?? currentLedgerMeta?.branchId ?? "",
               itemId:       trainingMeta.itemId ?? "",
@@ -1032,13 +1039,36 @@ async function openCycleConfigModal() {
               subjectCode:  trainingMeta.subjectCode ?? "",
               subjectName:  trainingMeta.subjectName ?? "",
               cycleMonths:  val,
+            };
+            console.info("[employees] saveEducationCycleConfig request", {
+              selectedBranch: selectedBranch ? {
+                id: selectedBranch.id,
+                name: selectedBranch.name,
+                companyId: selectedBranch.companyId ?? "",
+              } : null,
+              selectedEducation: trainingMeta,
+              currentUser: {
+                uid: authStore.uid,
+                role: authStore.role,
+                companyId: authStore.companyId,
+                branchId: authStore.branchId,
+              },
+              candidateCompanyIds: [...new Set(viewState.branches.map((item) => item?.companyId).filter(Boolean))],
+              payload,
             });
+            const result = await saveEducationCycleConfig(payload);
+            console.info("[employees] saveEducationCycleConfig response", result);
             toast.success(`재교육 주기가 ${val ? `${val}개월` : "주기 없음"}으로 설정되었습니다.`);
             modal.close();
             await refreshViewState();
             await runLedgerQuery();
           } catch (err) {
-            console.error("[employees] saveEducationCycleConfig failed", err);
+            console.error("[employees] saveEducationCycleConfig failed", {
+              code: err?.code,
+              message: err?.message,
+              details: err?.details,
+              error: err,
+            });
             toast.error(err?.message || "저장에 실패했습니다.");
             modal.setLoading("저장", false);
           }

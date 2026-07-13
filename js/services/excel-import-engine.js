@@ -91,8 +91,11 @@ function norm(v) {
 }
 
 // ── Stage 정규화
-const STAGE_INITIAL  = new Set(["초기", "초기교육", "initial"]);
-const STAGE_RECURRENT = new Set(["보수", "보수교육", "정기", "정기교육", "recurrent", "recurring", "갱신"]);
+const STAGE_INITIAL  = new Set(["초기", "초기교육", "입문", "입문교육", "initial"]);
+const STAGE_RECURRENT = new Set([
+  "보수", "보수교육", "정기", "정기교육", "갱신", "갱신교육", "재교육",
+  "recurrent", "recurring", "refresher", "recurrenttraining",
+]);
 const RESULT_PASS_SET = new Set(["pass", "이수", "수료", "완료", "합격"]);
 const RESULT_FAIL_SET = new Set(["fail", "미수료", "불합격"]);
 
@@ -102,6 +105,32 @@ function normStage(v) {
   if (STAGE_INITIAL.has(s))   return "initial";
   if (STAGE_RECURRENT.has(s)) return "recurrent";
   return null; // result 값은 null
+}
+
+function inferStage(...values) {
+  for (const value of values) {
+    const explicit = normStage(value);
+    if (explicit) return explicit;
+  }
+  const context = values.map((value) => norm(value)).join("|");
+  if (/초기|입문|initial/.test(context)) return "initial";
+  if (/보수|정기|갱신|재교육|recurr|refresher/.test(context)) return "recurrent";
+  return null;
+}
+
+function detectSheetTrainingType(sheetName) {
+  const value = norm(sheetName);
+  if (value.includes("법정")) return "legal";
+  if (/직무|보수|정기|갱신|재교육|초기|입문/.test(value)) return "job";
+  return "other";
+}
+
+function inferTrainingType(baseType, courseName, subjectName, sheetName) {
+  if (baseType === "legal" || baseType === "job") return baseType;
+  const context = [courseName, subjectName, sheetName].map((value) => norm(value)).join("|");
+  if (context.includes("법정")) return "legal";
+  if (/직무|보수|정기|갱신|재교육|초기|입문/.test(context)) return "job";
+  return baseType || "other";
 }
 
 function normResult(v) {
@@ -460,9 +489,22 @@ function _parseBlock(sheet, headerRow, dataEnd, trainingType, { splitSubjects = 
     const stageRaw     = get("stage");
     const noteRaw      = get("note");
 
-    // ── 과정명 상속
-    const courseName = hasCellValue(courseRaw)
+    const explicitCourseName = hasCellValue(courseRaw)
       ? String(courseRaw).replace(/\n/g, " ").trim()
+      : "";
+    const startsNewCourse = explicitCourseName && inherit.courseName &&
+      norm(explicitCourseName) !== norm(inherit.courseName);
+    if (startsNewCourse) {
+      // 과정 블록이 바뀌면 이전 과정의 초기/보수·강사·날짜가 새 과정으로 새지 않게 한다.
+      Object.assign(inherit, {
+        instructor: "", hours: null, period: "", completedAt: null,
+        result: "", stage: "", note: "",
+      });
+    }
+
+    // ── 과정명 상속
+    const courseName = explicitCourseName
+      ? explicitCourseName
       : inherit.courseName;
     if (hasCellValue(courseRaw)) inherit.courseName = courseName;
 
@@ -511,11 +553,18 @@ function _parseBlock(sheet, headerRow, dataEnd, trainingType, { splitSubjects = 
     if (!courseName && subjects.every((s) => !s) && !completedMs) continue;
 
     for (const subjectName of subjects) {
+      const resolved = resolveResultStage(rawResultFinal, rawStageFinal);
+      const initialOrRecurrent = resolved.initialOrRecurrent ?? inferStage(
+        rawStageFinal,
+        courseName,
+        subjectName,
+        sheet.sheetName
+      );
       rows.push({
         sourceRowNumber: r + 1,
         employeeName: empInfo.name,
         empNo:        empInfo.empNo,
-        trainingType,
+        trainingType: inferTrainingType(trainingType, courseName, subjectName, sheet.sheetName),
         courseName:   courseName || subjectName,
         subjectName:  subjectName || courseName,
         instructor,
@@ -523,7 +572,8 @@ function _parseBlock(sheet, headerRow, dataEnd, trainingType, { splitSubjects = 
         startDate,
         endDate,
         completedAt:  completedMs,
-        ...resolveResultStage(rawResultFinal, rawStageFinal),
+        result: resolved.result,
+        initialOrRecurrent,
         note:         String(note).replace(/\n/g, " ").trim(),
       });
     }
@@ -586,8 +636,20 @@ function _parseTAS(sheet, trainingType) {
     const result2Raw   = get("result2");
     const noteRaw      = get("note");
 
-    const courseName = courseRaw != null
+    const explicitCourseName = hasCellValue(courseRaw)
       ? String(courseRaw).replace(/\n/g, " ").trim()
+      : "";
+    const startsNewCourse = explicitCourseName && inherit.courseName &&
+      norm(explicitCourseName) !== norm(inherit.courseName);
+    if (startsNewCourse) {
+      Object.assign(inherit, {
+        instructor: "", hours: null, period: "", completedAt: null,
+        result: "", stage: "", note: "",
+      });
+    }
+
+    const courseName = explicitCourseName
+      ? explicitCourseName
       : inherit.courseName;
     if (courseRaw != null) inherit.courseName = courseName;
 
@@ -621,11 +683,18 @@ function _parseTAS(sheet, trainingType) {
     if (!courseName && !subjectRaw && !completedMs) continue;
 
     const subjectName = subjectRaw != null ? String(subjectRaw).trim() : "";
+    const resolved = resolveResultStage(rawResult, rawStage);
+    const initialOrRecurrent = resolved.initialOrRecurrent ?? inferStage(
+      rawStage,
+      courseName,
+      subjectName,
+      sheet.sheetName
+    );
     rows.push({
       sourceRowNumber: r + 1,
       employeeName: empInfo.name,
       empNo:        empInfo.empNo,
-      trainingType,
+      trainingType: inferTrainingType(trainingType, courseName, subjectName, sheet.sheetName),
       courseName:   courseName || subjectName,
       subjectName:  subjectName || courseName,
       instructor,
@@ -633,7 +702,8 @@ function _parseTAS(sheet, trainingType) {
       startDate,
       endDate,
       completedAt:  completedMs,
-      ...resolveResultStage(rawResult, rawStage),
+      result: resolved.result,
+      initialOrRecurrent,
       note:         String(note).replace(/\n/g, " ").trim(),
     });
   }
@@ -718,11 +788,19 @@ function validate(rows, { empByNo, empByName, existingHistory }) {
 
     // 기존 이력 매칭
     const courseKey = normKey(row.courseName || row.subjectName);
+    const subjectKey = normKey(row.subjectName || row.courseName);
+    const typeKey = row.trainingType || "other";
+    const stageKey = inferStage(row.initialOrRecurrent, row.courseName, row.subjectName) || "";
     const existing = existingHistory.find((h) => {
       if (h.uid !== employee.uid) return false;
       const hCourse = normKey(h.courseName ?? h.title ?? h.subjectName ?? "");
+      const hSubject = normKey(h.subjectName ?? h.courseName ?? h.title ?? "");
       const hDate   = Number(h.completedAt ?? 0);
-      return hCourse === courseKey && hDate === Number(row.completedAt);
+      return normalizeImportTrainingType(h.trainingType) === typeKey &&
+        hCourse === courseKey &&
+        hSubject === subjectKey &&
+        hDate === Number(row.completedAt) &&
+        (inferStage(h.subType, h.educationStage) || "") === stageKey;
     });
 
     if (existing) {
@@ -741,6 +819,15 @@ function validate(rows, { empByNo, empByName, existingHistory }) {
 
     return { ...row, _status: STATUS.NEW, _statusDetail: "신규 생성", _employee: employee };
   });
+}
+
+function normalizeImportTrainingType(value) {
+  const key = norm(value);
+  if (["job", "직무", "직무교육", "initial", "recurrent", "recurring"].includes(key)) return "job";
+  if (["legal", "법정", "법정교육"].includes(key)) return "legal";
+  if (["online", "온라인", "온라인교육"].includes(key)) return "online";
+  if (["external", "외부", "외부교육"].includes(key)) return "external";
+  return "other";
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -816,8 +903,6 @@ export function renderDetailedPreview(container, preview) {
 export async function analyzeExcel(file) {
   const sheetRaws = await readerRead(file);
 
-  const SHEET_TYPE = { 법정: "legal", 직무: "job" };
-
   const allRows    = [];
   const parsersUsed = [];
   const parserDiagnostics = [];
@@ -832,8 +917,7 @@ export async function analyzeExcel(file) {
     if (!parsersUsed.includes(parser.name)) parsersUsed.push(parser.name);
 
     // 시트 이름에서 교육유형 판별
-    const trainingType =
-      Object.entries(SHEET_TYPE).find(([k]) => sheetRaw.sheetName.includes(k))?.[1] ?? "other";
+    const trainingType = detectSheetTrainingType(sheetRaw.sheetName);
 
     let rows;
     if (parser.id === "sheet1_section") {
@@ -847,9 +931,16 @@ export async function analyzeExcel(file) {
     rows = rows.map((row, index) => ({
       ...row,
       // 구분 열이 없는 시트도 시트/섹션 구조로 초기·보수를 보존한다.
-      initialOrRecurrent: row.initialOrRecurrent ?? (
-        trainingType === "job" && /보수|정기|갱신/.test(sheetRaw.sheetName) ? "recurrent" :
-        trainingType === "job" && /초기|입문/.test(sheetRaw.sheetName) ? "initial" : null
+      trainingType: inferTrainingType(
+        row.trainingType ?? trainingType,
+        row.courseName,
+        row.subjectName,
+        sheetRaw.sheetName
+      ),
+      initialOrRecurrent: row.initialOrRecurrent ?? inferStage(
+        row.courseName,
+        row.subjectName,
+        sheetRaw.sheetName
       ),
       sourceRowNumber: row.sourceRowNumber ?? (headerRow + index + 2),
       sourceSheetName: sheetRaw.sheetName,
@@ -877,6 +968,19 @@ export async function analyzeExcel(file) {
   }
 
   console.info("[excel-import-engine] parser diagnostics", parserDiagnostics);
+  console.info("[excel-import-engine] recurrent trace samples", allRows
+    .filter((row) => row.trainingType === "job" && row.initialOrRecurrent === "recurrent")
+    .slice(0, 10)
+    .map((row) => ({
+      sourceSheetName: row.sourceSheetName,
+      sourceRowNumber: row.sourceRowNumber,
+      courseName: row.courseName,
+      subjectName: row.subjectName,
+      trainingType: row.trainingType,
+      initialOrRecurrent: row.initialOrRecurrent,
+      completedAt: row.completedAt,
+      importTraceId: row.importTraceId,
+    })));
   return { empInfo, rows: allRows, parsersUsed, parserDiagnostics, fileName: file.name };
 }
 

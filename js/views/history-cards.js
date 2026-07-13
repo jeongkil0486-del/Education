@@ -763,8 +763,11 @@ function courseGroupRows(group, gi, secKey, isAdmin) {
 function _normStage(v) {
   if (!v) return null;
   const s = String(v).replace(/\([^)]*\)/g, "").replace(/\s+/g, "").toLowerCase().trim();
-  if (["초기", "초기교육", "initial"].includes(s)) return "initial";
-  if (["보수", "보수교육", "정기", "정기교육", "recurrent", "recurring", "갱신"].includes(s)) return "recurrent";
+  if (["초기", "초기교육", "입문", "입문교육", "initial"].includes(s)) return "initial";
+  if ([
+    "보수", "보수교육", "정기", "정기교육", "갱신", "갱신교육", "재교육",
+    "recurrent", "recurring", "refresher", "recurrenttraining",
+  ].includes(s)) return "recurrent";
   return null;  // PASS, FAIL, 이수 등 result 값은 null 반환
 }
 
@@ -979,6 +982,7 @@ function openImportExcelModal() {
               records: payload,
             });
             const result = await importHistoryExcelData({ rows: payload, mode });
+            console.info("[history-cards] import result", result);
 
             // 상세 결과 구성
             const totalSaved = (result.createdCount ?? 0) + (result.updatedCount ?? 0);

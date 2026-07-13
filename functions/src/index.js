@@ -1093,18 +1093,31 @@ exports.saveEducationCycleConfig = onCall(OPTS, async (request) => {
   const payload = request.data && typeof request.data === "object" ? request.data : {};
   const itemId = normalizeText(payload.itemId);
   const branchId = normalizeText(payload.branchId);
-  const companyId = await resolveEducationCycleCompanyId({
+  const companyResolution = await resolveEducationCycleCompanyId({
     payloadCompanyId: normalizeText(payload.companyId),
     actor,
     itemId,
     branchId,
   });
+  const companyId = companyResolution.companyId;
   const trainingType = normalizeTrainingTypeValue(payload.trainingType);
   const subjectCode = normalizeText(payload.subjectCode);
   const subjectName = normalizeText(payload.subjectName);
 
   if (!companyId) {
-    throw new HttpsError("failed-precondition", "companyId를 결정할 수 없습니다.");
+    logger.warn("[saveEducationCycleConfig] company resolution failed", {
+      actorUid: request.auth.uid,
+      actorRole: actor.role ?? "",
+      payloadCompanyId: normalizeText(payload.companyId),
+      branchId,
+      itemId,
+      resolution: companyResolution,
+    });
+    throw new HttpsError(
+      "failed-precondition",
+      "companyId를 결정할 수 없습니다.",
+      companyResolution
+    );
   }
   if (!subjectCode && !subjectName) {
     throw new HttpsError("invalid-argument", "subjectCode 또는 subjectName이 필요합니다.");
@@ -1140,8 +1153,20 @@ exports.saveEducationCycleConfig = onCall(OPTS, async (request) => {
     updatedByName: actor.name ?? "",
   });
 
+  logger.info("[saveEducationCycleConfig] saved", {
+    actorUid: request.auth.uid,
+    companyId,
+    companyResolutionSource: companyResolution.source,
+    branchId,
+    itemId,
+    configKey,
+    cycleMonths: cycleInfo.value,
+    targetPath,
+  });
+
   return {
     companyId,
+    companyResolutionSource: companyResolution.source,
     branchId,
     itemId,
     configKey,
@@ -1173,12 +1198,42 @@ function normalizeTrainingTypeValue(value) {
   if (!raw) return "";   // 빈 값은 "" 반환 — 필터 없음으로 처리
   const map = {
     job: "job", "직무교육": "job", "직무 교육": "job",
+    initial: "job", recurrent: "job", recurring: "job", refresher: "job",
     legal: "legal", "법정교육": "legal", "법정 교육": "legal",
     online: "online", "온라인교육": "online", "온라인 교육": "online",
     external: "external", "외부교육": "external", "외부 교육": "external",
     other: "other", "기타": "other",
   };
   return map[raw] || map[normalizeText(value)] || "other";
+}
+
+function normalizeHistoryStage(...values) {
+  for (const value of values) {
+    const normalized = normalizeText(value)
+      .replace(/\([^)]*\)/g, "")
+      .replace(/\s+/g, "")
+      .toLowerCase();
+    if (["초기", "초기교육", "입문", "입문교육", "initial"].includes(normalized)) return "initial";
+    if ([
+      "보수", "보수교육", "정기", "정기교육", "갱신", "갱신교육", "재교육",
+      "recurrent", "recurring", "refresher", "recurrenttraining",
+    ].includes(normalized)) return "recurrent";
+  }
+  const context = values.map((value) => normalizeText(value).toLowerCase()).join("|");
+  if (/초기|입문|initial/.test(context)) return "initial";
+  if (/보수|정기|갱신|재교육|recurr|refresher/.test(context)) return "recurrent";
+  return "";
+}
+
+function normalizeHistoryImportType(row) {
+  const explicit = normalizeTrainingTypeValue(row?.trainingType);
+  if (explicit && explicit !== "other") return explicit;
+  const context = [row?.courseName, row?.subjectName, row?.sourceSheetName]
+    .map((value) => normalizeText(value).toLowerCase())
+    .join("|");
+  if (/법정/.test(context)) return "legal";
+  if (/직무|보수|정기|갱신|재교육|초기|입문/.test(context)) return "job";
+  return explicit || "other";
 }
 
 function normalizeDateMillis(value, label) {
@@ -1544,20 +1599,36 @@ function buildEducationCycleConfigKey(trainingType, subjectCode, subjectName) {
 }
 
 async function resolveEducationCycleCompanyId({ payloadCompanyId, actor, itemId, branchId }) {
-  if (payloadCompanyId) return payloadCompanyId;
-  if (normalizeText(actor?.companyId)) return normalizeText(actor.companyId);
+  const trace = {
+    payloadCompanyId: normalizeText(payloadCompanyId),
+    actorCompanyId: normalizeText(actor?.companyId),
+    actorBranchId: normalizeText(actor?.branchId),
+    itemId: normalizeText(itemId),
+    branchId: normalizeText(branchId),
+    itemCompanyId: "",
+    branchCompanyId: "",
+    actorBranchCompanyId: "",
+    branchCompanyIds: [],
+    companyIds: [],
+  };
+  const resolved = (companyId, source) => ({ companyId, source, trace });
+
+  if (trace.payloadCompanyId) return resolved(trace.payloadCompanyId, "payload");
+  if (trace.actorCompanyId) return resolved(trace.actorCompanyId, "actor");
 
   if (itemId) {
     const itemSnap = await db.ref(`trainingItems/${itemId}/companyId`).get();
     if (itemSnap.exists() && normalizeText(itemSnap.val())) {
-      return normalizeText(itemSnap.val());
+      trace.itemCompanyId = normalizeText(itemSnap.val());
+      return resolved(trace.itemCompanyId, "trainingItem");
     }
   }
 
   if (branchId) {
     const branchSnap = await db.ref(`branches/${branchId}/companyId`).get();
     if (branchSnap.exists() && normalizeText(branchSnap.val())) {
-      return normalizeText(branchSnap.val());
+      trace.branchCompanyId = normalizeText(branchSnap.val());
+      return resolved(trace.branchCompanyId, "branch");
     }
   }
 
@@ -1565,11 +1636,26 @@ async function resolveEducationCycleCompanyId({ payloadCompanyId, actor, itemId,
   if (actorBranchId) {
     const branchSnap = await db.ref(`branches/${actorBranchId}/companyId`).get();
     if (branchSnap.exists() && normalizeText(branchSnap.val())) {
-      return normalizeText(branchSnap.val());
+      trace.actorBranchCompanyId = normalizeText(branchSnap.val());
+      return resolved(trace.actorBranchCompanyId, "actorBranch");
     }
   }
 
-  return "";
+  const branchesSnap = await db.ref("branches").get();
+  trace.branchCompanyIds = [...new Set(Object.values(branchesSnap.val() ?? {})
+    .map((branch) => normalizeText(branch?.companyId))
+    .filter(Boolean))];
+  if (trace.branchCompanyIds.length === 1) {
+    return resolved(trace.branchCompanyIds[0], "uniqueBranchCompany");
+  }
+
+  const companiesSnap = await db.ref("companies").get();
+  trace.companyIds = Object.keys(companiesSnap.val() ?? {});
+  if (trace.companyIds.length === 1) {
+    return resolved(trace.companyIds[0], "uniqueCompany");
+  }
+
+  return resolved("", "unresolved");
 }
 
 function normalizeCycleMonths(value) {
@@ -1661,6 +1747,7 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
   let matchedExistingCount  = 0;
   let matchedRecordCount    = 0;
   const errors      = [];
+  const traceSamples = [];
   const parsedCount = rows.length;
 
   // dedupeKey 세트 (중복 방지)
@@ -1670,9 +1757,16 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
     // empNo: 탭·공백 완전 제거 (\tT259144 같은 패턴 처리)
     const empNoRaw   = normalizeImportEmpNo(row.empNo ?? row.employeeEmpNo ?? "");
     const empNameRaw = String(row.employeeName ?? row.name ?? "").replace(/\s+/g, " ").trim();
-    const trainingType = normalizeTrainingTypeValue(row.trainingType ?? "job");
+    const trainingType = normalizeHistoryImportType(row);
     const courseName   = normalizeText(row.courseName ?? row.subjectName ?? "");
     const subjectName  = normalizeText(row.subjectName ?? row.courseName ?? "");
+    const normalizedStage = normalizeHistoryStage(
+      row.educationStage,
+      row.subType,
+      row.initialOrRecurrent,
+      courseName,
+      row.sourceSheetName
+    );
     // normalizeDateMillis는 null을 반환할 수 있음 (throw 대신)
     let completedAt = null;
     try { completedAt = normalizeDateMillis(row.completedAt, "수료일"); } catch(e) { completedAt = null; }
@@ -1712,7 +1806,7 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
 
     // 기존 이력 매칭: trainingType + (courseName|subjectName) + completedAt
     const normalize = (s) => String(s ?? "").toLowerCase().replace(/[\s\(\)\[\]·]/g, "");
-    const existingRec = manualAll.find((r) => {
+    let existingRec = manualAll.find((r) => {
       if (r.uid !== employee.uid) return false;
       const rType  = normalize(r.trainingType ?? "");
       const rCourse = normalize(r.courseName ?? r.title ?? r.subjectName ?? "");
@@ -1724,14 +1818,26 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
              rDate === completedAt;
     });
 
+    // 과거 Import가 유형만 잘못 저장한 경우, 같은 과정·과목·날짜의 Excel 이력을 교정한다.
+    if (!existingRec) {
+      existingRec = manualAll.find((r) => {
+        if (r.uid !== employee.uid || normalizeText(r.source) !== "history_excel") return false;
+        const rCourse = normalize(r.courseName ?? r.title ?? r.subjectName ?? "");
+        const rSubject = normalize(r.subjectCode ?? r.subjectName ?? r.courseName ?? r.title ?? "");
+        return rCourse === normalize(courseName || subjectName) &&
+          rSubject === normalize(row.subjectCode || subjectName || courseName) &&
+          Number(r.completedAt ?? 0) === completedAt;
+      });
+    }
+
     const detailFields = {
       instructorName: normalizeText(row.instructorName),
       hours:          row.trainingHours != null ? Number(row.trainingHours) : undefined,
       startDate:      row.startDate     ? normalizeDateMillis(row.startDate, "시작일")  : undefined,
       endDate:        row.endDate       ? normalizeDateMillis(row.endDate,   "종료일")  : undefined,
       result:         normalizeText(row.result)        || "PASS",
-      subType:        normalizeText(row.educationStage || row.subType),
-      educationStage: normalizeText(row.educationStage || row.subType),
+      subType:        normalizedStage,
+      educationStage: normalizedStage,
       note:           normalizeText(row.note),
       source:         "history_excel",
     };
@@ -1746,12 +1852,36 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
         if (mode === "fill" && existing && existing !== "-" && existing !== "") continue;
         patch[k] = v;
       }
+      const existingStage = normalizeHistoryStage(existingRec.subType, existingRec.educationStage);
+      if (normalizeTrainingTypeValue(existingRec.trainingType) !== trainingType) {
+        patch.trainingType = trainingType;
+      }
+      if (normalizedStage && existingStage !== normalizedStage) {
+        patch.subType = normalizedStage;
+        patch.educationStage = normalizedStage;
+      }
       matchedExistingCount++;
       if (Object.keys(patch).length > 0) {
         patch.updatedAt    = Date.now();
         patch.updatedBy    = request.auth.uid;
-        updates[`manualTrainingHistories/${existingRec._id}`] = { ...existingRec, ...patch };
-        updates[`userManualTrainingHistories/${employee.uid}/${existingRec._id}`] = { ...existingRec, ...patch };
+        const correctedRecord = { ...existingRec, ...patch };
+        correctedRecord.dedupeKey = buildManualHistoryDedupeKey(correctedRecord);
+        updates[`manualTrainingHistories/${existingRec._id}`] = correctedRecord;
+        updates[`userManualTrainingHistories/${employee.uid}/${existingRec._id}`] = correctedRecord;
+        processedKeys.add(correctedRecord.dedupeKey);
+        if (traceSamples.length < 10 && trainingType === "job" && normalizedStage === "recurrent") {
+          traceSamples.push({
+            action: "updated",
+            sourceSheetName: normalizeText(row.sourceSheetName),
+            sourceRowNumber: row.sourceRowNumber ?? null,
+            importTraceId: normalizeText(row.importTraceId),
+            courseName,
+            subjectName,
+            trainingType,
+            subType: normalizedStage,
+            savedPath: `manualTrainingHistories/${existingRec._id}`,
+          });
+        }
         updatedCount++;
       } else {
         skippedCount++;
@@ -1804,6 +1934,19 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
 
       updates[`manualTrainingHistories/${historyId}`] = record;
       updates[`userManualTrainingHistories/${employee.uid}/${historyId}`] = record;
+      if (traceSamples.length < 10 && trainingType === "job" && normalizedStage === "recurrent") {
+        traceSamples.push({
+          action: "created",
+          sourceSheetName: record.sourceSheetName,
+          sourceRowNumber: record.sourceRowNumber,
+          importTraceId: record.importTraceId,
+          courseName: record.courseName,
+          subjectName: record.subjectName,
+          trainingType: record.trainingType,
+          subType: record.subType,
+          savedPath: `manualTrainingHistories/${historyId}`,
+        });
+      }
       createdCount++;
     }
   }
@@ -1833,6 +1976,8 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
     matchedEmployees: matchedEmpUids.size,
     skippedCount,
     errors: errors.slice(0, 30),
+    traceSamples,
   };
+  logger.info("[importHistoryExcelData] result", resultSummary);
   return resultSummary;
 });
