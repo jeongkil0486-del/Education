@@ -1140,7 +1140,7 @@ function historyCanonicalCourse(row) {
   if (match(["운항관리", "운항관리사", "운항통제", "flightdispatch"])) return { name: "운항관리", key: "job_operations", type: "job", stage: "" };
   if (match(["위험물", "위험물규정", "위험물교육", "dangerousgoods", "dangerousgoodsregulation", "dangerousgoodsregulations", "dg", "dgr"])) return { name: "위험물", key: "legal_dangerous_goods", type: "legal", stage: "" };
   if (match(["wb", "weightbalance"])) return { name: "W&B", key: "job_wb", type: "job", stage: "" };
-  const key = row.canonicalCourseKey || (trainingType === "job" && ["직무", "직무교육"].includes(courseKey) ? "job_duty" : `${trainingType}_${courseKey || "default"}`);
+  const key = row.canonicalCourseKey || (trainingType === "job" && ["직무", "직무교육", "job", "jobduty"].includes(courseKey) ? "job_duty" : `${trainingType}_${courseKey || "default"}`);
   return { name: row.canonicalCourseName || courseName, key, type: trainingType, stage: "" };
 }
 

@@ -57,7 +57,7 @@ function standardCourse(courseName, trainingType) {
   }
   const normalizedType = normalizeTrainingType(trainingType) || "other";
   const canonicalCourseName = text(courseName);
-  const canonicalCourseKey = normalizedType === "job" && ["직무", "직무교육"].includes(courseKey)
+  const canonicalCourseKey = normalizedType === "job" && ["직무", "직무교육", "job", "jobduty"].includes(courseKey)
     ? "job_duty"
     : `${normalizedType}_${courseKey || "default"}`;
   return {
