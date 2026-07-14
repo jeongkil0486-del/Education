@@ -370,10 +370,17 @@ async function fetchAllSessionCompletions() {
 
 function filterByTraining(histories, meta) {
   if (!meta) return [];
+  const normalizeKey = (value) => String(value ?? "").normalize("NFKC").toLowerCase().replace(/[^a-z0-9가-힣]+/g, "");
+  const isInstructorNote = (record) => normalizeTrainingType(record?.trainingType) === "job"
+    && normalizeKey(record?.note) === "직무사내강사";
+  const isInstructorMeta = normalizeKey(meta.subjectCode) === "jobinstructor"
+    || normalizeKey(meta.subjectName) === "사내강사";
   return histories.filter((h) => {
     if (!h) return false;
     const ht = normalizeTrainingType(h.trainingType);
     if (ht !== meta.trainingType) return false;
+    // 기존 직무 이력도 비고가 직무사내강사이면 사내강사 항목에서만 조회한다.
+    if (isInstructorNote(h)) return isInstructorMeta;
     if (meta.itemId && h.itemId) return h.itemId === meta.itemId;
     if (meta.subjectCode && h.subjectCode === meta.subjectCode) return true;
     if (meta.subjectName && (h.subjectName === meta.subjectName || h.title === meta.subjectName || h.courseName === meta.subjectName)) return true;
@@ -436,11 +443,13 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
 
     // 전년도
     const prevDates = [...new Set(recs.filter((r) => {
+      if (isInitialRec(r)) return false;
       return r.educationStage === "previous_year" || recordEducationYear(r) === PY;
     }).map((r) => toYmd(r.completedAt)).filter(Boolean))].sort();
 
     // 금년도
     const currDates = [...new Set(recs.filter((r) => {
+      if (isInitialRec(r)) return false;
       return r.educationStage === "current_year" || recordEducationYear(r) === CY;
     }).map((r) => toYmd(r.completedAt)).filter(Boolean))].sort();
 

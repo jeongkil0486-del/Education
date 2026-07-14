@@ -1150,6 +1150,10 @@ function historyCanonicalCourse(row) {
   const courseName = String(row.courseName ?? row.title ?? row.subjectName ?? "").trim();
   const courseKey = courseName.normalize("NFKC").toLowerCase().replace(/[^a-z0-9가-힣]+/g, "");
   const trainingType = normalizeTrainingType(row.trainingType);
+  const noteKey = String(row.note ?? "").normalize("NFKC").toLowerCase().replace(/[^a-z0-9가-힣]+/g, "");
+  if (trainingType === "job" && noteKey === "직무사내강사") {
+    return { name: "사내강사", key: "job_instructor", type: "job", stage: "" };
+  }
   if (row.classificationOverride && ["job", "legal", "online", "other"].includes(trainingType)) {
     const stage = normalizeTrainingSubType(row.subType, row.educationStage, row.initialOrRecurrent);
     return {
