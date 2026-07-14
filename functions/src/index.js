@@ -107,6 +107,7 @@ function materialVisibleToActor(material, actor) {
   if (allowedRoles.includes("instructor")) return true;
   const visibility = normalizeText(material.visibility).toLowerCase();
   if (["private", "owner", "assigned"].includes(visibility)) return false;
+  if (!normalizeText(material.companyId) && !["public", "common"].includes(visibility)) return false;
   // 기존 자료에는 visibility가 없으므로 같은 회사 자료는 기존 공용 정책으로 허용한다.
   return !visibility || ["public", "company", "common", "instructor", "instructors"].includes(visibility);
 }
