@@ -15,6 +15,7 @@ import { router } from "../core/router.js";
 import { modal } from "../utils/modal.js";
 import { loadEmployeeDeadlineDashboardRows } from "./employees.js";
 import { listAnnouncements } from "../core/admin-api.js";
+import { listMaterials } from "../services/material-service.js";
 
 export async function render(container) {
   const role = authStore.role;
@@ -41,11 +42,17 @@ let managementDashboardState = {
 async function renderManagementDashboard(container, role) {
   container.innerHTML = skeletonAdminDashboard();
   const isInstructor = role === ROLES.INSTRUCTOR;
-  const [deadlineData, notificationSettings] = await Promise.all([
-    safeLoad(() => loadEmployeeDeadlineDashboardRows(), { rows: [], branches: [], employees: [] }),
-    safeLoad(() => settingsDB.getNotifications(), {}),
+  const dashboardStartedAt = performance.now();
+  const [deadlineLoad, settingsLoad, announcementLoad, materialLoad] = await Promise.all([
+    loadDashboardResource("employee-deadlines", () => loadEmployeeDeadlineDashboardRows(), { rows: [], branches: [], employees: [] }),
+    loadDashboardResource("notification-settings", () => settingsDB.getNotifications(), {}),
+    loadDashboardResource("announcements", () => listAnnouncements(), { announcements: [] }),
+    loadDashboardResource("materials", () => listMaterials(), []),
   ]);
-  const announcementResult = await safeLoad(() => listAnnouncements(), { announcements: [] });
+  const deadlineData = deadlineLoad.value;
+  const notificationSettings = settingsLoad.value;
+  const announcementResult = announcementLoad.value;
+  const materials = materialLoad.value;
   const announcements = announcementResult.announcements ?? [];
 
   const roleScopedAnnouncements = announcements.filter((item) => announcementVisibleToRole(item, role));
@@ -53,8 +60,6 @@ async function renderManagementDashboard(container, role) {
     ? roleScopedAnnouncements.filter(isPublishedAnnouncement)
     : roleScopedAnnouncements;
   const publishedAnnouncements = visibleAnnouncements.filter(isPublishedAnnouncement);
-  const importantAnnouncements = visibleAnnouncements.filter(isImportantAnnouncement);
-  const unreadAnnouncements = visibleAnnouncements.filter((item) => !announcementReadBy(item, authStore.uid));
   const buckets = resolveDashboardDeadlineBuckets(notificationSettings);
   const maxSoonDays = Math.max(0, ...buckets.map((bucket) => bucket.days));
   const uniqueDeadlineRows = dedupeDeadlineRows(deadlineData.rows ?? []);
@@ -70,17 +75,35 @@ async function renderManagementDashboard(container, role) {
     role,
   };
 
-  const announcementCards = isInstructor
-    ? [
-      { label: "확인 가능 공지", value: visibleAnnouncements.length, action: "announcements", variant: "primary" },
-      { label: "미확인 공지", value: unreadAnnouncements.length, action: "announcements", variant: unreadAnnouncements.length ? "warning" : "success" },
-      { label: "중요 공지", value: importantAnnouncements.length, action: "announcements", variant: importantAnnouncements.length ? "danger" : "neutral" },
-    ]
-    : [
-      { label: "전체 공지", value: visibleAnnouncements.length, action: "announcements", variant: "primary" },
-      { label: "중요 공지", value: importantAnnouncements.length, action: "announcements", variant: importantAnnouncements.length ? "danger" : "neutral" },
-      { label: "게시 중 공지", value: publishedAnnouncements.length, action: "announcements", variant: "success" },
-    ];
+  const metricCards = [
+    {
+      label: "전체 인원",
+      value: deadlineLoad.error ? null : (deadlineData.employees ?? []).length,
+      suffix: "명",
+      action: "employees",
+      variant: "primary",
+      icon: iconUsers(),
+      error: deadlineLoad.error,
+    },
+    {
+      label: "공지사항",
+      value: announcementLoad.error ? null : publishedAnnouncements.length,
+      suffix: "건",
+      action: "announcements",
+      variant: "info",
+      icon: iconBell(),
+      error: announcementLoad.error,
+    },
+    {
+      label: "교육자료",
+      value: materialLoad.error ? null : materials.length,
+      suffix: "건",
+      action: "materials",
+      variant: "neutral",
+      icon: iconMaterials(),
+      error: materialLoad.error,
+    },
+  ];
   const deadlineCards = [
     { label: "교육기한 임박", rows: soonRows, action: "soon", variant: soonRows.length ? "warning" : "success" },
     { label: "교육기한 초과", rows: overdueRows, action: "overdue", variant: overdueRows.length ? "danger" : "success" },
@@ -94,7 +117,7 @@ async function renderManagementDashboard(container, role) {
       </div>
     </div>
     <div class="dashboard-grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
-      ${announcementCards.map(dashboardAnnouncementCard).join("")}
+      ${metricCards.map(dashboardMetricCard).join("")}
       ${deadlineCards.map(dashboardDeadlineCard).join("")}
     </div>
     <div class="dashboard-main" style="grid-template-columns:1fr 1fr">
@@ -121,16 +144,36 @@ async function renderManagementDashboard(container, role) {
   container.querySelectorAll('[data-dashboard-action="announcements"]').forEach((card) => {
     card.addEventListener("click", () => router.push("announcements"));
   });
+  container.querySelectorAll('[data-dashboard-action="employees"]').forEach((card) => {
+    card.addEventListener("click", () => router.push("employees"));
+  });
+  container.querySelectorAll('[data-dashboard-action="materials"]').forEach((card) => {
+    card.addEventListener("click", () => router.push("materials"));
+  });
   container.querySelectorAll('[data-dashboard-action="soon"], [data-dashboard-action="overdue"]').forEach((card) => {
     card.addEventListener("click", () => openDeadlineDashboardModal(card.dataset.dashboardAction));
   });
+  console.info("[dashboard] management dashboard ready", {
+    role,
+    employeeCount: deadlineLoad.error ? null : (deadlineData.employees ?? []).length,
+    announcementCount: announcementLoad.error ? null : publishedAnnouncements.length,
+    materialCount: materialLoad.error ? null : materials.length,
+    deadlineCount: uniqueDeadlineRows.length,
+    durationMs: Math.round(performance.now() - dashboardStartedAt),
+    resources: [deadlineLoad, settingsLoad, announcementLoad, materialLoad].map(({ label, durationMs, error }) => ({
+      label,
+      durationMs,
+      ok: !error,
+    })),
+  });
 }
 
-function dashboardAnnouncementCard(card) {
+function dashboardMetricCard(card) {
   return `<button type="button" class="stat-card" data-dashboard-action="${card.action}" style="text-align:left;cursor:pointer;border:0;width:100%">
-    <div class="stat-card__icon stat-card__icon--${card.variant}">${iconBell()}</div>
+    <div class="stat-card__icon stat-card__icon--${card.variant}">${card.icon}</div>
     <div class="stat-card__label">${esc(card.label)}</div>
-    <div class="stat-card__value">${card.value}</div>
+    <div class="stat-card__value">${card.error ? "-" : `${card.value}${card.suffix}`}</div>
+    ${card.error ? '<div style="font-size:var(--text-xs);color:var(--danger-600,#dc2626);margin-top:2px">불러오기 실패</div>' : ""}
   </button>`;
 }
 
@@ -729,6 +772,32 @@ function skeletonAdminDashboard() {
 /* ── Utilities ───────────────────────────────────────────── */
 
 /** DB 호출 실패 시 fallback 반환 — 화면이 죽지 않음 */
+async function loadDashboardResource(label, loader, fallback) {
+  const startedAt = performance.now();
+  let timeoutId = null;
+  try {
+    const timeout = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error(`${label} request timed out`)), 20000);
+    });
+    return {
+      label,
+      value: await Promise.race([loader(), timeout]),
+      error: null,
+      durationMs: Math.round(performance.now() - startedAt),
+    };
+  } catch (error) {
+    console.warn(`[dashboard] ${label} load failed:`, error?.message ?? error);
+    return {
+      label,
+      value: fallback,
+      error,
+      durationMs: Math.round(performance.now() - startedAt),
+    };
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
 async function safeLoad(fn, fallback = null) {
   try {
     return await fn();
@@ -777,5 +846,6 @@ const iconBuilding = () => ic("M2 18V4a1 1 0 011-1h14a1 1 0 011 1v14M2 18h16M8 1
 const iconMapPin   = () => ic("M10 10a3 3 0 100-6 3 3 0 000 6zm0 0c0 5-6 8-6 8h12s-6-3-6-8z");
 const iconShield   = () => ic("M10 2l7 3v5c0 4-3 7-7 9-4-2-7-5-7-9V5l7-3z");
 const iconUsers    = () => ic("M14 17v-1a4 4 0 00-4-4H6a4 4 0 00-4 4v1m8-9a3 3 0 11-6 0 3 3 0 016 0zm5 3a2 2 0 100-4 2 2 0 000 4zm2 6v-1a3 3 0 00-2-2.83");
+const iconMaterials = () => bookIcon();
 const iconSettings = () => ic("M10 12.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5zm6.5-2.5a6.5 6.5 0 01-.1.9l1.7 1.4-1.5 2.6-2-.8a6 6 0 01-1.6.9l-.3 2h-3l-.3-2a6 6 0 01-1.6-.9l-2 .8L4.4 14l1.7-1.4A6.5 6.5 0 016 12a6.5 6.5 0 01.1-.9L4.4 9.7l1.5-2.6 2 .8A6 6 0 019.5 7l.3-2h3l.3 2a6 6 0 011.6.9l2-.8 1.5 2.6-1.7 1.3A6.5 6.5 0 0116.5 12z");
 const iconBell     = () => ic("M10 2a4 4 0 00-4 4v3.5L4 13h12l-2-3.5V6a4 4 0 00-4-4zm-2 13a2 2 0 004 0");

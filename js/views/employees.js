@@ -419,16 +419,6 @@ export async function loadEmployeeDeadlineDashboardRows() {
     items,
   };
 
-  const scopedHistories = authStore.role === ROLES.INSTRUCTOR
-    ? await listInstructorBranchHistories()
-    : null;
-  const [manualAll, sessionAll] = scopedHistories
-    ? [scopedHistories.manualHistories ?? [], scopedHistories.sessionHistories ?? []]
-    : await Promise.all([
-      manualTrainingHistoriesDB.listAll().catch(() => []),
-      fetchAllSessionCompletions(),
-    ]);
-  const allHistories = [...manualAll, ...sessionAll];
   const standardKeys = new Set([
     LEDGER_JOB_DUTY_KEY,
     LEDGER_JOB_INSTRUCTOR_KEY,
@@ -444,10 +434,33 @@ export async function loadEmployeeDeadlineDashboardRows() {
     if (standardKeys.has(canonicalKey) && !metaByKey.has(canonicalKey)) metaByKey.set(canonicalKey, meta);
   }
 
+  // 교육이력 요청과 주기 설정 요청은 서로 의존하지 않으므로 동시에 시작한다.
+  const companyIdByKey = new Map();
+  for (const [canonicalKey, meta] of metaByKey) {
+    companyIdByKey.set(canonicalKey, getEffectiveCompanyId(meta, references.branches?.[0]));
+  }
+  const companyIds = [...new Set([...companyIdByKey.values()].filter(Boolean))];
+  const cycleConfigsPromise = Promise.all(companyIds.map(async (companyId) => [
+    companyId,
+    await educationCycleConfigsDB.listAll(companyId).catch(() => []),
+  ]));
+
+  const scopedHistories = authStore.role === ROLES.INSTRUCTOR
+    ? await listInstructorBranchHistories()
+    : null;
+  const [manualAll, sessionAll] = scopedHistories
+    ? [scopedHistories.manualHistories ?? [], scopedHistories.sessionHistories ?? []]
+    : await Promise.all([
+      manualTrainingHistoriesDB.listAll().catch(() => []),
+      fetchAllSessionCompletions(),
+    ]);
+  const allHistories = [...manualAll, ...sessionAll];
+  const configsByCompany = new Map(await cycleConfigsPromise);
+
   const rows = [];
   for (const [canonicalKey, meta] of metaByKey) {
-    const companyId = getEffectiveCompanyId(meta, references.branches?.[0]);
-    const config = await loadEducationCycleConfig(companyId, meta).catch(() => null);
+    const companyId = companyIdByKey.get(canonicalKey);
+    const config = findEducationCycleConfig(configsByCompany.get(companyId) ?? [], meta);
     const cycleMonths = Number(config?.cycleMonths ?? 0) || 0;
     const relevant = filterByTraining(allHistories, meta);
     for (const summary of aggregateLedger(references.employees ?? [], relevant, meta, cycleMonths)) {
@@ -1681,8 +1694,16 @@ async function loadEducationCycleConfig(companyId, meta) {
   // 기존 저장 데이터에는 itemId/표시명/legacy key가 혼재한다. 직접 경로 조회가
   // 실패한 경우 회사 설정 목록을 canonical key로 비교해 동일 항목을 찾는다.
   const selectedCanonicalKey = canonicalLedgerMetaKey(meta);
-  const selectedType = normalizeTrainingType(meta?.trainingType);
   const configs = await educationCycleConfigsDB.listAll(companyId).catch(() => []);
+  return findEducationCycleConfig(configs, meta, selectedCanonicalKey);
+}
+
+function findEducationCycleConfig(configs, meta, selectedCanonicalKey = canonicalLedgerMetaKey(meta)) {
+  const lookupKeys = new Set(educationCycleLookupKeys(meta));
+  const exact = configs.find((config) => lookupKeys.has(String(config?.id ?? "")));
+  if (exact) return exact;
+
+  const selectedType = normalizeTrainingType(meta?.trainingType);
   return configs.find((config) => {
     if (meta?.itemId && config?.itemId && String(meta.itemId) === String(config.itemId)) return true;
     const configType = normalizeTrainingType(config?.trainingType || String(config?.id ?? "").split("__")[0]);
