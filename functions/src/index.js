@@ -1871,7 +1871,7 @@ exports.listAuditLogs = onCall(OPTS, async (request) => {
   if (!companyId) throw new HttpsError("failed-precondition", "회사 정보를 확인할 수 없습니다.");
 
   const payload = request.data && typeof request.data === "object" ? request.data : {};
-  return listCompanyAuditLogs({
+  const filters = {
     companyId,
     limit: payload.limit,
     beforeCreatedAt: payload.beforeCreatedAt,
@@ -1882,7 +1882,30 @@ exports.listAuditLogs = onCall(OPTS, async (request) => {
     branchId: normalizeText(payload.branchId),
     actorName: normalizeText(payload.actorName),
     targetQuery: normalizeText(payload.targetQuery),
-  });
+  };
+  try {
+    return await listCompanyAuditLogs(filters);
+  } catch (error) {
+    logger.error("[audit] list failed", {
+      requesterUid: request.auth.uid,
+      requesterRole: actor.role,
+      companyId,
+      filters: {
+        limit: filters.limit,
+        beforeCreatedAt: filters.beforeCreatedAt,
+        from: filters.from,
+        to: filters.to,
+        action: filters.action,
+        status: filters.status,
+        branchId: filters.branchId,
+        hasActorQuery: Boolean(filters.actorName),
+        hasTargetQuery: Boolean(filters.targetQuery),
+      },
+      message: error?.message,
+      stack: error?.stack,
+    });
+    throw new HttpsError("internal", "감사 로그 조회 중 오류가 발생했습니다.");
+  }
 });
 
 function announcementBranchIds(record) {

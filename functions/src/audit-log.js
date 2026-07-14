@@ -74,6 +74,44 @@ function trainingHistorySnapshot(record = {}) {
   }) ?? {};
 }
 
+function auditTimestamp(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && Number.isFinite(Number(value))) return Number(value);
+  if (value && typeof value === "object") {
+    const seconds = Number(value.seconds ?? value._seconds);
+    const nanoseconds = Number(value.nanoseconds ?? value._nanoseconds ?? 0);
+    if (Number.isFinite(seconds)) return (seconds * 1000) + Math.floor((Number.isFinite(nanoseconds) ? nanoseconds : 0) / 1e6);
+  }
+  return 0;
+}
+
+function normalizedAuditRow(id, value) {
+  const row = value && typeof value === "object" ? value : {};
+  return {
+    id: text(id),
+    companyId: text(row.companyId),
+    action: text(row.action, 80),
+    category: text(row.category, 80),
+    actorUid: text(row.actorUid),
+    actorName: text(row.actorName),
+    actorRole: text(row.actorRole),
+    actorBranchId: text(row.actorBranchId),
+    actorBranchName: text(row.actorBranchName),
+    targetType: text(row.targetType),
+    targetUid: text(row.targetUid),
+    targetName: text(row.targetName),
+    targetEmpNo: text(row.targetEmpNo),
+    targetBranchId: text(row.targetBranchId),
+    targetBranchName: text(row.targetBranchName),
+    summary: text(row.summary, 300),
+    before: sanitizeValue(row.before) ?? {},
+    after: sanitizeValue(row.after) ?? {},
+    metadata: sanitizeValue(row.metadata) ?? {},
+    status: text(row.status || "SUCCESS", 40),
+    createdAt: auditTimestamp(row.createdAt),
+  };
+}
+
 function createAuditLogger({ db, logger, resolveCompanyId }) {
   async function writeAuditLog(payload = {}) {
     const actor = payload.actor ?? {};
@@ -128,18 +166,27 @@ function createAuditLogger({ db, logger, resolveCompanyId }) {
 
   async function listCompanyAuditLogs({ companyId, limit = 100, beforeCreatedAt, from, to, action, status, branchId, actorName, targetQuery }) {
     const pageSize = Math.min(Math.max(Number(limit) || 100, 1), 100);
-    const scanLimit = Math.min(Math.max(pageSize * 5, 100), 500);
-    let query = db.ref("auditLogs").orderByChild("createdAt");
-    const upperBound = Number(beforeCreatedAt || to || Date.now());
-    if (Number.isFinite(upperBound)) query = query.endAt(upperBound);
-    if (Number(from) > 0) query = query.startAt(Number(from));
-    const snap = await query.limitToLast(scanLimit).get();
+    const cursor = Number(beforeCreatedAt);
+    const fromTimestamp = Number(from);
+    const toTimestamp = Number(to);
+    const upperBound = Math.min(
+      Number.isFinite(cursor) && cursor > 0 ? cursor : Number.POSITIVE_INFINITY,
+      Number.isFinite(toTimestamp) && toTimestamp > 0 ? toTimestamp : Number.POSITIVE_INFINITY
+    );
+    // /auditLogs에는 Rules 인덱스를 추가하지 않는다. Admin SDK로 단순 조회한 뒤
+    // 회사 범위, 필터, 정렬, 페이지 처리를 서버 메모리에서 수행한다.
+    const snap = await db.ref("auditLogs").get();
     const actorNeedle = text(actorName).toLowerCase();
     const targetNeedle = text(targetQuery).toLowerCase();
     const rows = [];
+    if (!snap.exists()) {
+      return { logs: [], items: [], nextCursor: null, limit: pageSize };
+    }
     snap.forEach((child) => {
-      const row = { id: child.key, ...child.val() };
+      const row = normalizedAuditRow(child.key, child.val());
       if (text(row.companyId) !== text(companyId)) return;
+      if (row.createdAt > upperBound) return;
+      if (Number.isFinite(fromTimestamp) && fromTimestamp > 0 && row.createdAt < fromTimestamp) return;
       if (action && text(row.action) !== text(action)) return;
       if (status && text(row.status) !== text(status)) return;
       if (branchId && ![row.actorBranchId, row.targetBranchId].map(text).includes(text(branchId))) return;
@@ -151,6 +198,7 @@ function createAuditLogger({ db, logger, resolveCompanyId }) {
     const page = rows.slice(0, pageSize);
     return {
       logs: page,
+      items: page,
       nextCursor: page.length === pageSize ? Number(page[page.length - 1].createdAt || 0) - 1 : null,
       limit: pageSize,
     };
