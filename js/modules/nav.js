@@ -38,6 +38,7 @@ const NAV_CONFIG = {
       items: [
         { path: "employees", label: TEXT.routes.employees, icon: iconUsers() },
         { path: "history-cards", label: TEXT.routes.historyCards, icon: iconHistory() },
+        { path: "audit-logs", label: TEXT.routes.auditLogs, icon: iconHistory() },
       ],
     },
     {

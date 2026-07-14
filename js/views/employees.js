@@ -1319,6 +1319,7 @@ async function openResetConfirmModal() {
             const result = await resetSelectedManualTrainingHistories({
               uids: Array.from(selectedUids),
               resetAllForUser: true,
+              auditContext: "employee_ledger",
             });
             toast.success(`초기화 완료: ${result.deletedCount ?? 0}건 삭제`);
             modal.close();
@@ -1909,7 +1910,7 @@ async function parseHistoryUploadFileInline(event) {
     if (!trainingType || !currentYear) { previewEl.innerHTML = metaError("양식 메타데이터가 손상되었습니다."); return; }
 
     const metaCY = Number(currentYear), metaPY = Number(previousYear);
-    selectedTemplateMeta = { trainingType, subjectCode, subjectName, typeLabel, currentYear: metaCY, previousYear: metaPY };
+    selectedTemplateMeta = { trainingType, subjectCode, subjectName, typeLabel, currentYear: metaCY, previousYear: metaPY, fileName: file.name };
 
     const dataSheet = wb.Sheets[wb.SheetNames.find((n) => n !== "_meta") ?? wb.SheetNames[0]];
     const allRows   = XLSX.utils.sheet_to_json(dataSheet, { header: 1, defval: "" });
@@ -2098,7 +2099,14 @@ async function submitHistoryUploadInline() {
   if (resultEl)  resultEl.textContent = "";
 
   try {
-    const result = await bulkImportManualTrainingHistories({ rows: historyEntries });
+    const result = await bulkImportManualTrainingHistories({
+      rows: historyEntries,
+      metadata: {
+        fileName: selectedTemplateMeta.fileName ?? "",
+        branchId: getSelectedBranch()?.id ?? "",
+        branchName: getSelectedBranch()?.name ?? "",
+      },
+    });
     console.info("[ledger-upload] savedYearValues", result?.savedYearValues ?? []);
     const msg = `✅ 등록 ${result.succeededCount ?? 0}건 · 중복 ${result.skippedCount ?? 0}건 · 실패 ${result.failedCount ?? 0}건`;
     if (resultEl) resultEl.innerHTML = `<span style="color:var(--color-success,#16a34a)">${esc(msg)}</span>`;

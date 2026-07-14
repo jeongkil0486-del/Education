@@ -7,11 +7,22 @@ const admin = require("firebase-admin");
 const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { classifyTraining, reconcileHistoryRecords } = require("./training-classification");
+const {
+  changedFields,
+  createAuditLogger,
+  employeeTarget,
+  trainingHistorySnapshot,
+} = require("./audit-log");
 
 admin.initializeApp();
 
 const auth = admin.auth();
 const db = admin.database();
+const { writeAuditLogSafe, listCompanyAuditLogs } = createAuditLogger({
+  db,
+  logger,
+  resolveCompanyId: resolveActorCompanyId,
+});
 
 const EMAIL_DOMAIN = "tas.local";
 const OPTS = { region: "us-central1", cors: true };
@@ -766,6 +777,29 @@ exports.upsertManualTrainingHistory = onCall(OPTS, async (request) => {
   });
   await reconcileManualHistoryClassifications([uid]);
 
+  const existingRecord = existingSnap?.exists() ? existingSnap.val() : null;
+  const historyChanges = existingRecord
+    ? changedFields(trainingHistorySnapshot(existingRecord), trainingHistorySnapshot(record), [
+      "trainingType", "subType", "courseName", "subjectName", "completedAt", "startDate", "endDate",
+      "instructorName", "hours", "result", "note",
+    ])
+    : { before: {}, after: trainingHistorySnapshot(record) };
+  await writeAuditLogSafe({
+    actor,
+    companyId: record.companyId,
+    action: historyId ? "UPDATE_TRAINING_HISTORY" : "CREATE_TRAINING_HISTORY",
+    category: "HISTORY",
+    target: employeeTarget(employee, uid),
+    summary: `${employee.name ?? "직원"}(${employee.empNo ?? "-"}) 교육이력 ${historyId ? "수정" : "추가"}`,
+    before: historyChanges.before,
+    after: historyChanges.after,
+    metadata: {
+      historyId: targetId,
+      trainingItem: record.subjectName || record.courseName || record.title,
+      trainingDate: record.completedAt,
+    },
+  });
+
   return { historyId: targetId, uid, message: historyId ? "개인 교육이력 수정 완료" : "개인 교육이력 등록 완료" };
 });
 
@@ -907,6 +941,31 @@ exports.bulkImportManualTrainingHistories = onCall(OPTS, async (request) => {
     failedCount: failed.length,
     yearValueTrace,
   });
+  const affectedEmployees = [...affectedUids].map((uid) => ({ uid, ...(users[uid] ?? {}) }));
+  const affectedBranchIds = [...new Set(affectedEmployees.map((employee) => normalizeText(employee.branchId)).filter(Boolean))];
+  const affectedBranchNames = [...new Set(affectedEmployees.map((employee) => normalizeText(employee.branchName)).filter(Boolean))];
+  const uploadMetadata = request.data?.metadata && typeof request.data.metadata === "object" ? request.data.metadata : {};
+  await writeAuditLogSafe({
+    actor,
+    companyId: actor.companyId || affectedEmployees[0]?.companyId,
+    action: "IMPORT_EMPLOYEE_LEDGER",
+    category: "IMPORT",
+    target: {
+      type: "EMPLOYEE_LEDGER",
+      branchId: affectedBranchIds.length === 1 ? affectedBranchIds[0] : "",
+      branchName: affectedBranchNames.length === 1 ? affectedBranchNames[0] : "",
+    },
+    summary: `${affectedBranchNames.length === 1 ? affectedBranchNames[0] : "직원관리대장"} 교육이력 업로드: 등록 ${succeeded.length}건, 중복 ${skipped.length}건, 실패 ${failed.length}건`,
+    metadata: {
+      fileName: normalizeText(uploadMetadata.fileName),
+      affectedEmployeeCount: affectedUids.size,
+      affectedHistoryCount: succeeded.length,
+      successCount: succeeded.length,
+      duplicateCount: skipped.length,
+      failureCount: failed.length,
+    },
+    status: failed.length ? (succeeded.length || skipped.length ? "PARTIAL_SUCCESS" : "FAILED") : "SUCCESS",
+  });
   return {
     succeededCount: succeeded.length,
     skippedCount: skipped.length,
@@ -1027,6 +1086,43 @@ exports.replaceEmployeeManualTrainingHistories = onCall(OPTS, async (request) =>
   }
   if (Object.keys(updates).length) await db.ref().update(updates);
   await reconcileManualHistoryClassifications([uid]);
+  const beforeSummary = {
+    trainingType,
+    subjectCode,
+    subjectName,
+    dates: matchingRecords.map((record) => record.completedAt).filter(Boolean),
+    instructorName: latestExisting.instructorName,
+    hours: latestExisting.hours,
+    note: latestExisting.note,
+  };
+  const afterSummary = {
+    trainingType,
+    subjectCode,
+    subjectName,
+    dates: stages.map((stage) => stage.completedAt),
+    instructorName,
+    hours,
+    note,
+  };
+  const summaryChanges = changedFields(beforeSummary, afterSummary, [
+    "trainingType", "subjectCode", "subjectName", "dates", "instructorName", "hours", "note",
+  ]);
+  await writeAuditLogSafe({
+    actor,
+    companyId: employee.companyId || actor.companyId,
+    action: "UPDATE_TRAINING_HISTORY",
+    category: "HISTORY",
+    target: employeeTarget(employee, uid),
+    summary: `${employee.name ?? "직원"}(${employee.empNo ?? "-"}) ${subjectName || "교육"} 이력 수정`,
+    before: summaryChanges.before,
+    after: summaryChanges.after,
+    metadata: {
+      trainingItem: subjectName,
+      deletedHistoryCount: deletedCount,
+      createdHistoryCount: stages.length,
+      affectedHistoryCount: Math.max(deletedCount, stages.length),
+    },
+  });
   return { uid, deletedCount, createdCount: stages.length, message: "교육이력을 수정했습니다." };
 });
 
@@ -1048,15 +1144,20 @@ exports.deleteEmployeeHistory = onCall(OPTS, async (request) => {
   if (!employeeSnap.exists() || employeeSnap.val()?.role !== "employee") {
     throw new HttpsError("not-found", "직원 정보를 찾을 수 없습니다.");
   }
-  assertEmployeeHistoryScope(actor, employeeSnap.val());
+  const employee = employeeSnap.val();
+  assertEmployeeHistoryScope(actor, employee);
 
   const updates = {};
+  let deletedRecord = null;
+  let deletedRecordId = historyId || sessionId || trainingId;
   if (source === "session") {
     if (!sessionId) throw new HttpsError("invalid-argument", "회차 ID가 필요합니다.");
+    deletedRecord = (await db.ref(`sessionCompletions/${sessionId}/${uid}`).get()).val();
     updates[`sessionCompletions/${sessionId}/${uid}`] = null;
     updates[`userSessionCompletions/${uid}/${sessionId}`] = null;
   } else if (source === "legacy") {
     if (!trainingId) throw new HttpsError("invalid-argument", "교육 ID가 필요합니다.");
+    deletedRecord = (await db.ref(`trainingCompletions/${trainingId}/${uid}`).get()).val();
     updates[`trainingCompletions/${trainingId}/${uid}`] = null;
     updates[`userCompletions/${uid}/${trainingId}`] = null;
   } else {
@@ -1065,11 +1166,29 @@ exports.deleteEmployeeHistory = onCall(OPTS, async (request) => {
     if (!historySnap.exists() || historySnap.val()?.uid !== uid) {
       throw new HttpsError("not-found", "개인 교육이력을 찾을 수 없습니다.");
     }
+    deletedRecord = historySnap.val();
     updates[`manualTrainingHistories/${historyId}`] = null;
     updates[`userManualTrainingHistories/${uid}/${historyId}`] = null;
   }
 
   await db.ref().update(updates);
+  const deletedSummary = trainingHistorySnapshot({ ...deletedRecord, historyId: deletedRecordId, source });
+  await writeAuditLogSafe({
+    actor,
+    companyId: employee.companyId || actor.companyId,
+    action: "DELETE_TRAINING_HISTORY",
+    category: "HISTORY",
+    target: employeeTarget(employee, uid),
+    summary: `${employee.name ?? "직원"}(${employee.empNo ?? "-"}) 교육이력 삭제`,
+    before: deletedSummary,
+    metadata: {
+      historyId: deletedRecordId,
+      source,
+      trainingItem: deletedSummary.subjectName || deletedSummary.courseName,
+      trainingDate: deletedSummary.completedAt || deletedSummary.endDate || deletedSummary.startDate,
+      affectedHistoryCount: 1,
+    },
+  });
   return { uid, source, sessionId, trainingId, historyId, message: "교육이력 삭제 완료" };
 });
 
@@ -1270,6 +1389,25 @@ exports.updateEmployeeManagementProfile = onCall(OPTS, async (request) => {
   updates.updatedByName = actor.name ?? "";
 
   await db.ref(`users/${uid}`).update(updates);
+  const profileFields = [
+    "name", "empNo", "birthDate", "hireDate", "joinDate", "employmentDate", "entryType",
+    "internalLicense", "externalLicense", "position", "jobTitle", "branchId", "branchName",
+    "departmentName", "departmentId", "rank", "note",
+  ];
+  const profileChanges = changedFields(employee, { ...employee, ...updates }, profileFields);
+  if (Object.keys(profileChanges.after).length) {
+    await writeAuditLogSafe({
+      actor,
+      companyId: employee.companyId || actor.companyId,
+      action: "UPDATE_EMPLOYEE_PROFILE",
+      category: "EMPLOYEE",
+      target: employeeTarget({ ...employee, ...updates }, uid),
+      summary: `${updates.name ?? employee.name ?? "직원"}(${updates.empNo ?? employee.empNo ?? "-"}) 인적사항 수정`,
+      before: profileChanges.before,
+      after: profileChanges.after,
+      metadata: { changedFields: Object.keys(profileChanges.after) },
+    });
+  }
 
   return {
     uid,
@@ -1468,6 +1606,43 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
       + Object.keys(completionSnaps[1].val() ?? {}).length
       + countUidRecords(completionSnaps[2].val(), firstUid)
       + Object.keys(completionSnaps[3].val() ?? {}).length;
+  }
+  if (uniqueDeletedHistoryIds.length) {
+    const affectedEmployeeUids = [...new Set([...Object.keys(deletedByUid), ...targetUids])];
+    const affectedEmployeeSnaps = await Promise.all(affectedEmployeeUids.map((targetUid) => db.ref(`users/${targetUid}`).get()));
+    const affectedEmployees = affectedEmployeeSnaps
+      .map((snap, index) => snap.exists() ? { uid: affectedEmployeeUids[index], ...snap.val() } : null)
+      .filter(Boolean);
+    const auditContext = normalizeText(request.data?.auditContext).toLowerCase();
+    const isLedgerReset = auditContext === "employee_ledger";
+    const branchIds = [...new Set(affectedEmployees.map((employee) => normalizeText(employee.branchId)).filter(Boolean))];
+    const branchNames = [...new Set(affectedEmployees.map((employee) => normalizeText(employee.branchName)).filter(Boolean))];
+    const singleEmployee = affectedEmployees.length === 1 ? affectedEmployees[0] : null;
+    await writeAuditLogSafe({
+      actor,
+      companyId: actor.companyId || affectedEmployees[0]?.companyId,
+      action: isLedgerReset ? "RESET_EMPLOYEE_LEDGER" : "RESET_EMPLOYEE_HISTORY",
+      category: isLedgerReset ? "EMPLOYEE_LEDGER" : "HISTORY",
+      target: isLedgerReset
+        ? {
+          type: "EMPLOYEE_LEDGER",
+          branchId: branchIds.length === 1 ? branchIds[0] : "",
+          branchName: branchNames.length === 1 ? branchNames[0] : "",
+        }
+        : employeeTarget(singleEmployee ?? firstEmployee ?? {}, singleEmployee?.uid || firstUid),
+      summary: isLedgerReset
+        ? `${branchNames.length === 1 ? branchNames[0] : "직원관리대장"} ${affectedEmployees.length}명 개인이력 ${uniqueDeletedHistoryIds.length}건 초기화`
+        : `${singleEmployee?.name ?? firstEmployee?.name ?? "직원"}(${singleEmployee?.empNo ?? firstEmployee?.empNo ?? "-"}) 개인이력 ${uniqueDeletedHistoryIds.length}건 초기화`,
+      metadata: {
+        affectedEmployeeCount: affectedEmployees.length,
+        affectedHistoryCount: uniqueDeletedHistoryIds.length,
+        deletedManualCount: deletedSourceCounts.manual,
+        deletedManualExcelCount: deletedSourceCounts.manual_excel,
+        deletedHistoryExcelCount: deletedSourceCounts.history_excel,
+        requestedSources,
+        scope: scope || (requestedSources.length === 3 ? "all" : "custom"),
+      },
+    });
   }
   return {
     employeeUid: firstUid,
@@ -1685,6 +1860,30 @@ async function resolveActorCompanyId(actor) {
   });
   return companyIds.size === 1 ? Array.from(companyIds)[0] : "";
 }
+
+exports.listAuditLogs = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await getUserProfile(request.auth.uid);
+  if (!actor || actor.role !== "hq_admin") {
+    throw new HttpsError("permission-denied", "감사 로그를 조회할 권한이 없습니다.");
+  }
+  const companyId = await resolveActorCompanyId(actor);
+  if (!companyId) throw new HttpsError("failed-precondition", "회사 정보를 확인할 수 없습니다.");
+
+  const payload = request.data && typeof request.data === "object" ? request.data : {};
+  return listCompanyAuditLogs({
+    companyId,
+    limit: payload.limit,
+    beforeCreatedAt: payload.beforeCreatedAt,
+    from: payload.from,
+    to: payload.to,
+    action: normalizeText(payload.action),
+    status: normalizeText(payload.status),
+    branchId: normalizeText(payload.branchId),
+    actorName: normalizeText(payload.actorName),
+    targetQuery: normalizeText(payload.targetQuery),
+  });
+});
 
 function announcementBranchIds(record) {
   return Array.from(new Set([

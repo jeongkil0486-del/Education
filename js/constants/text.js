@@ -42,6 +42,7 @@ export const TEXT = {
     employeeDetail: "직원 상세",
     statistics: "통계",
     announcements: "공지사항",
+    auditLogs: "감사 로그",
     templates: "교육 템플릿",
     notificationSettings: "알림 설정",
     slideshow: "슬라이드쇼",

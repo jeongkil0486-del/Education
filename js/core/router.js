@@ -17,6 +17,7 @@ const routes = [
   { path: "employee-detail", title: TEXT.routes.employeeDetail, allow: [ROLES.HQ_ADMIN], view: () => import("../views/employee-detail.js").then((m) => m.render) },
   { path: "statistics", title: TEXT.routes.statistics, allow: [ROLES.HQ_ADMIN], view: () => import("../views/statistics.js").then((m) => m.render) },
   { path: "announcements", title: TEXT.routes.announcements, allow: null, view: () => import("../views/announcements.js").then((m) => m.render) },
+  { path: "audit-logs", title: TEXT.routes.auditLogs, allow: [ROLES.HQ_ADMIN], view: () => import("../views/audit-logs.js").then((m) => m.render) },
   { path: "templates", title: TEXT.routes.templates, allow: [ROLES.HQ_ADMIN], view: () => import("../views/templates.js").then((m) => m.render) },
   { path: "notification-settings", title: TEXT.routes.notificationSettings, allow: [ROLES.HQ_ADMIN], view: () => import("../views/notification-settings.js").then((m) => m.render) },
   { path: "slideshow", title: TEXT.routes.slideshow, allow: [ROLES.INSTRUCTOR, ROLES.HQ_ADMIN], view: () => import("../views/slideshow.js").then((m) => m.render) },
