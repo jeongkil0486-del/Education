@@ -371,16 +371,31 @@ async function fetchAllSessionCompletions() {
 function filterByTraining(histories, meta) {
   if (!meta) return [];
   const normalizeKey = (value) => String(value ?? "").normalize("NFKC").toLowerCase().replace(/[^a-z0-9가-힣]+/g, "");
-  const isInstructorNote = (record) => normalizeTrainingType(record?.trainingType) === "job"
-    && normalizeKey(record?.note) === "직무사내강사";
-  const isInstructorMeta = normalizeKey(meta.subjectCode) === "jobinstructor"
-    || normalizeKey(meta.subjectName) === "사내강사";
+  const instructorKey = "job_instructor";
+  const noteValue = (record) => record?.note ?? record?.memo ?? record?.remark ?? record?.remarks ?? record?.["비고"] ?? "";
+  const canonicalRecordKey = (record) => {
+    const type = normalizeTrainingType(record?.trainingType);
+    const noteKey = normalizeKey(noteValue(record));
+    if (type === "job" && noteKey === "직무사내강사") return instructorKey;
+    const raw = normalizeKey(record?.canonicalCourseKey || record?.subjectCode || record?.canonicalCourseName || record?.courseName || record?.title || record?.subjectName);
+    if (["jobinstructor", "사내강사", "사내강사양성과정", "instructortraining"].includes(raw)) return instructorKey;
+    return raw;
+  };
+  const canonicalMetaKey = () => {
+    const raw = normalizeKey(meta.subjectCode || meta.subjectName);
+    return ["jobinstructor", "사내강사", "사내강사양성과정", "instructortraining"].includes(raw)
+      ? instructorKey
+      : raw;
+  };
+  const selectedKey = canonicalMetaKey();
   return histories.filter((h) => {
     if (!h) return false;
     const ht = normalizeTrainingType(h.trainingType);
     if (ht !== meta.trainingType) return false;
-    // 기존 직무 이력도 비고가 직무사내강사이면 사내강사 항목에서만 조회한다.
-    if (isInstructorNote(h)) return isInstructorMeta;
+    const recordKey = canonicalRecordKey(h);
+    // 사내강사 선택은 canonical instructor만 허용하며, instructor는 다른 직무 항목에서 항상 제외한다.
+    if (selectedKey === instructorKey) return recordKey === instructorKey;
+    if (recordKey === instructorKey) return false;
     if (meta.itemId && h.itemId) return h.itemId === meta.itemId;
     if (meta.subjectCode && h.subjectCode === meta.subjectCode) return true;
     if (meta.subjectName && (h.subjectName === meta.subjectName || h.title === meta.subjectName || h.courseName === meta.subjectName)) return true;
