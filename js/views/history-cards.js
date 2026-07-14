@@ -895,6 +895,10 @@ function courseGroupRows(group, gi, secKey, isAdmin) {
   const tone    = rep.dueStatus === "overdue" ? "danger"
                 : rep.dueStatus === "soon"    ? "warning"
                 : rep.dueStatus === "normal"  ? "success" : "neutral";
+  const statusLabel = rep.dueStatusLabel ?? DUE_STATUS_LABELS[rep.dueStatus] ?? "–";
+  const statusCell = !statusLabel || statusLabel === "-"
+    ? "-"
+    : `<span class="chip chip--${tone}">${esc(statusLabel)}</span>`;
   const occurrenceCount = countCourseOccurrences(members);
   const subjCount = `<span style="color:var(--gray-400);font-size:11px;margin-left:4px">(${occurrenceCount}건)</span>`;
 
@@ -912,7 +916,7 @@ function courseGroupRows(group, gi, secKey, isAdmin) {
       <td>${subType}</td>
       <td style="white-space:nowrap">${rep.nextDueDate ? formatDate(rep.nextDueDate) : "–"}</td>
       <td style="white-space:nowrap">${days}</td>
-      <td><span class="chip chip--${tone}">${esc(rep.dueStatusLabel ?? DUE_STATUS_LABELS[rep.dueStatus] ?? "–")}</span></td>
+      <td>${statusCell}</td>
       <td>${esc(rep.note || "–")}</td>
       ${isAdmin ? `<td style="text-align:center;padding:0 4px"><button type="button" class="hc-course-move-handle" draggable="true" data-move-id="${esc(moveId)}" aria-label="과정 이동" title="끌어서 섹션 이동 · 클릭하면 이동 메뉴" style="border:0;background:transparent;color:var(--gray-400);cursor:grab;padding:6px 4px;font-size:13px;line-height:1">⋮⋮</button></td>` : ""}
     </tr>`;

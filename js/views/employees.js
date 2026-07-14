@@ -573,6 +573,9 @@ function renderLedgerTable() {
             : r.dueStatus === "normal" ? "success" : "neutral";
           const days = r.daysRemaining === null ? "–"
             : r.daysRemaining < 0 ? `${Math.abs(r.daysRemaining)}일 초과` : `${r.daysRemaining}일`;
+          const statusCell = !r.dueStatusLabel || r.dueStatusLabel === "-"
+            ? "-"
+            : `<span class="chip chip--${tone}" style="font-size:var(--text-xs)">${esc(r.dueStatusLabel)}</span>`;
           return `<tr data-uid="${esc(r.uid)}" class="${isChecked ? "row--selected" : ""}" title="더블클릭: 이력카드" style="${isChecked ? "background:var(--brand-50,#eff6ff)" : ""}">
             ${isHQAdmin ? `<td style="text-align:center"><input type="checkbox" class="chk-row" data-uid="${esc(r.uid)}" ${isChecked ? "checked" : ""}></td>` : ""}
             <td style="font-weight:var(--weight-medium)">${esc(r.name)}</td>
@@ -585,7 +588,7 @@ function renderLedgerTable() {
             <td style="font-size:var(--text-xs)">${esc(r.currDates.join(", ") || "–")}</td>
             <td style="font-size:var(--text-xs)">${r.nextDueDate ? esc(formatDateYMD(r.nextDueDate)) : "–"}</td>
             <td style="font-size:var(--text-xs)">${esc(days)}</td>
-            <td><span class="chip chip--${tone}" style="font-size:var(--text-xs)">${esc(r.dueStatusLabel)}</span></td>
+            <td>${statusCell}</td>
             <td style="font-size:var(--text-xs)">${esc(r.note || "–")}</td>
             ${isHQAdmin ? `<td style="text-align:right;white-space:nowrap">
               <button class="btn btn--ghost btn--sm btn-view-card" data-uid="${esc(r.uid)}" style="padding:2px 6px;font-size:var(--text-xs)">이력카드</button>
