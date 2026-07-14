@@ -590,8 +590,9 @@ function logLedgerMatchDiagnostics({
     }];
   }));
   const rowsWithHistory = (ledgerRows ?? []).filter((row) => row.hasHistory);
-  const recurrentRows = rowsWithHistory.filter((row) => row._dueCompletedDate);
-  const cycleConfiguredRows = recurrentRows.filter((row) => row.cycleMonths > 0);
+  const recurrentRows = rowsWithHistory.filter((row) => row._hasRecurrent);
+  const initialOnlyRows = rowsWithHistory.filter((row) => row._initialOnly);
+  const cycleConfiguredRows = rowsWithHistory.filter((row) => row.cycleMonths > 0 && row._cycleBaseDate);
   const failedDueRows = cycleConfiguredRows.filter((row) => !row.nextDueDate);
 
   console.info("[employees] ledger match diagnostics", {
@@ -627,19 +628,20 @@ function logLedgerMatchDiagnostics({
     aggregateCounts: {
       employees: ledgerEmployees.length,
       matchedHistoryZero: ledgerEmployees.length - rowsWithHistory.length,
-      initialOnly: rowsWithHistory.filter((row) => row._dueReason === "initial_only").length,
+      initialOnly: initialOnlyRows.length,
       recurrent: recurrentRows.length,
       cycleConfigFound: cycleConfiguredRows.length,
       nextDueDateCalculated: cycleConfiguredRows.filter((row) => row.nextDueDate).length,
-      recurrentWithConfigButNoDue: failedDueRows.length,
+      eligibleWithConfigButNoDue: failedDueRows.length,
     },
-    recurrentWithConfigButNoDue: failedDueRows.map((row) => ({
+    eligibleWithConfigButNoDue: failedDueRows.map((row) => ({
       name: row.name,
       empNo: row.empNo,
       uid: row.uid,
       canonicalKey: selectedTrainingKey,
       matchedRows: relevant.filter((history) => historyBelongsToEmployee(history, row._emp)).length,
-      latestRecurrentDate: row._dueCompletedDate,
+      latestRecurrentDate: row._latestRecurrentDate,
+      cycleBaseDate: row._cycleBaseDate,
       latestHistoryStage: ledgerRecordStage(row._latestHistory),
       cycleMonths: row.cycleMonths,
       reason: row._dueReason,
@@ -655,7 +657,8 @@ function logLedgerMatchDiagnostics({
       computedYearValues: { [PY]: row.prevDates, [CY]: row.currDates },
       computedInitialDate: row.initialDate,
       computedLatestDate: row.lastDate,
-      dueCompletedDate: row._dueCompletedDate,
+      latestRecurrentDate: row._latestRecurrentDate,
+      cycleBaseDate: row._cycleBaseDate,
       latestHistoryStage: ledgerRecordStage(row._latestHistory),
       nextDueDate: row.nextDueDate,
       remainingDays: row.daysRemaining,
@@ -809,10 +812,13 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
     const latestDatedStage = ledgerRecordStage(latestDatedEntry?.record);
     const latestRecurrentEntry = recurrentEntries.at(-1)
       ?? (!latestDatedStage && uniqueDates.length > 1 ? latestDatedEntry : null);
-    const dueCompletedDate = latestRecurrentEntry?.date ?? null;
-    const initialOnly = Boolean(lastDate && !dueCompletedDate);
-    const dueRow = dueCompletedDate ? applyDueMetadata([{
-      completedAt: new Date(dueCompletedDate).getTime(),
+    const latestRecurrentDate = latestRecurrentEntry?.date ?? null;
+    const initialOnly = Boolean(lastDate && !latestRecurrentDate);
+    // 직원관리대장에서는 초기 회차도 주기의 시작점이다. 최신 보수 회차가 없으면
+    // 초기교육일을 사용하고, legacy 데이터의 stage/date가 불완전하면 최종 유효일로 보완한다.
+    const cycleBaseDate = latestRecurrentDate ?? initialDate ?? lastDate;
+    const dueRow = cycleBaseDate ? applyDueMetadata([{
+      completedAt: new Date(cycleBaseDate).getTime(),
       cycleMonths: effectiveCycle,
       subType: "recurrent",
     }])[0] : null;
@@ -820,11 +826,9 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
     // daysRemaining 기반 직접 상태 결정
     let dueStatus, dueStatusLabel, daysRemaining, nextDueDate, dueReason;
     if (!lastDate) {
-      dueStatus = "none"; dueStatusLabel = "미이수"; daysRemaining = null; nextDueDate = null; dueReason = "no_valid_date";
-    } else if (initialOnly) {
-      dueStatus = "not_applicable"; dueStatusLabel = "-"; daysRemaining = null; nextDueDate = null; dueReason = "initial_only";
+      dueStatus = "none"; dueStatusLabel = "-"; daysRemaining = null; nextDueDate = null; dueReason = recs.length ? "no_valid_date" : "no_history";
     } else if (!effectiveCycle) {
-      dueStatus = "unconfigured"; dueStatusLabel = "주기 미설정"; daysRemaining = null; nextDueDate = null; dueReason = "cycle_missing";
+      dueStatus = "unconfigured"; dueStatusLabel = "-"; daysRemaining = null; nextDueDate = null; dueReason = "cycle_missing";
     } else {
       daysRemaining = dueRow?.daysRemaining ?? null;
       nextDueDate   = dueRow?.nextDueDate   ?? null;
@@ -842,7 +846,10 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
       cycleMonths: effectiveCycle, hasHistory: recs.length > 0,
       dueStatus, dueStatusLabel, daysRemaining, nextDueDate,
       _latestHistory: latestRecurrentEntry?.record ?? lastRec,
-      _dueCompletedDate: dueCompletedDate,
+      _latestRecurrentDate: latestRecurrentDate,
+      _cycleBaseDate: cycleBaseDate,
+      _hasRecurrent: Boolean(latestRecurrentDate),
+      _initialOnly: initialOnly,
       _dueReason: dueReason,
       // 수정 모달용 원본 필드
       _emp: emp,
