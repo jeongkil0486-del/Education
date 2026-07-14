@@ -972,8 +972,8 @@ function renderLedgerTable() {
             <td style="font-size:var(--text-xs)">${esc(r.position)}</td>
             <td style="font-size:var(--text-xs)">${esc(r.initialDate ?? "–")}</td>
             <td style="font-size:var(--text-xs)">${esc(r.lastDate ?? "–")}</td>
-            <td style="font-size:var(--text-xs)">${esc(r.prevDates.join(", ") || "–")}</td>
-            <td style="font-size:var(--text-xs)">${esc(r.currDates.join(", ") || "–")}</td>
+            <td class="employee-year-column" style="font-size:var(--text-xs)">${renderLedgerYearDates(r.prevDates)}</td>
+            <td class="employee-year-column" style="font-size:var(--text-xs)">${renderLedgerYearDates(r.currDates)}</td>
             <td style="font-size:var(--text-xs)">${r.nextDueDate ? esc(formatDateYMD(r.nextDueDate)) : "–"}</td>
             <td style="font-size:var(--text-xs)">${esc(days)}</td>
             <td>${statusCell}</td>
@@ -1060,7 +1060,17 @@ function sortableLedgerHeader(key, label) {
   const active = ledgerSort.key === key && ledgerSort.direction !== "none";
   const icon = active ? (ledgerSort.direction === "asc" ? "▲" : "▼") : "";
   const ariaSort = !active ? "none" : ledgerSort.direction === "asc" ? "ascending" : "descending";
-  return `<th data-sort-key="${esc(key)}" tabindex="0" role="columnheader" aria-sort="${ariaSort}" style="cursor:pointer;user-select:none;white-space:nowrap" title="클릭하여 정렬">${esc(label)}${icon ? ` <span aria-hidden="true" style="font-size:10px">${icon}</span>` : ""}</th>`;
+  const className = key === "prevDates" || key === "currDates" ? "employee-year-column" : "";
+  return `<th class="${className}" data-sort-key="${esc(key)}" tabindex="0" role="columnheader" aria-sort="${ariaSort}" style="cursor:pointer;user-select:none;white-space:nowrap" title="클릭하여 정렬">${esc(label)}${icon ? ` <span aria-hidden="true" style="font-size:10px">${icon}</span>` : ""}</th>`;
+}
+
+function renderLedgerYearDates(value) {
+  const rawDates = Array.isArray(value)
+    ? value
+    : String(value ?? "").split(",");
+  const dates = [...new Set(rawDates.map((date) => String(date ?? "").trim()).filter(Boolean))];
+  if (!dates.length) return "–";
+  return `<div class="employee-year-date-list">${dates.map((date) => `<span>${esc(date)}</span>`).join("")}</div>`;
 }
 
 function cycleLedgerSort(key) {

@@ -569,6 +569,22 @@
   color: var(--gray-400);
 }
 
+/* Employee ledger year-date cells */
+#ledger-table .employee-year-column {
+  width: 96px;
+  min-width: 96px;
+  max-width: 96px;
+}
+
+#ledger-table .employee-year-date-list {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
 /* ─── 교육이력카드 전용 CSS (scope: .hc-wrap) ─── */
 .hc-wrap .hc-summary-grid {
   display: grid;
