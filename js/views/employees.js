@@ -550,10 +550,18 @@ function logLedgerMatchDiagnostics({
     allHistoryRowsCount: allHistories.length,
     matchedHistoryRowsCount: relevant.length,
     matchedHistoryRowsSample: relevant.slice(0, 10).map((row) => ({
+      id: row?.id ?? row?.historyId ?? "",
+      source: row?._source ?? row?.source ?? "manual",
       employeeUid: historyEmployeeUid(row),
       trainingType: row?.trainingType ?? "",
+      stage: row?.stage ?? "",
+      trainingStage: row?.trainingStage ?? "",
       subType: row?.subType ?? "",
+      courseStage: row?.courseStage ?? "",
+      isInitial: row?.isInitial ?? null,
+      resolvedStage: ledgerRecordStage(row),
       courseName: row?.courseName ?? row?.title ?? "",
+      subjectName: row?.subjectName ?? "",
       canonicalKey: canonicalLedgerRecordKey(row),
       educationYear: row?.educationYear ?? null,
       educationStage: row?.educationStage ?? "",
@@ -574,6 +582,8 @@ function logLedgerMatchDiagnostics({
       computedYearValues: { [PY]: row.prevDates, [CY]: row.currDates },
       computedInitialDate: row.initialDate,
       computedLatestDate: row.lastDate,
+      dueCompletedDate: row._dueCompletedDate,
+      latestHistoryStage: ledgerRecordStage(row._latestHistory),
       nextDueDate: row.nextDueDate,
       remainingDays: row.daysRemaining,
       status: row.dueStatusLabel,
@@ -585,8 +595,11 @@ function logLedgerMatchDiagnostics({
 
 function ledgerRecordStage(record) {
   const values = [
+    record?.stage,
+    record?.trainingStage,
     record?.subType,
     record?.educationStage,
+    record?.courseStage,
     record?.educationType,
     record?.initialRecurrent,
     record?.initialOrRecurrent,
@@ -603,6 +616,8 @@ function ledgerRecordStage(record) {
 
   const initialValues = new Set(["initial", "초기", "초기교육", "입문", "입문교육"]);
   if (values.some((value) => initialValues.has(value))) return "initial";
+  if (record?.isInitial === true) return "initial";
+  if (record?.isInitial === false) return "recurrent";
   return "";
 }
 
@@ -681,9 +696,9 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
     const lastDate = uniqueDates.at(-1) ?? null;
 
     const datesForYear = (year) => [...new Set(recs.filter((record) => {
-      // 서버는 초기 이력에도 educationYear를 자동 채운다. 따라서 stage를 먼저
-      // 판정하지 않으면 초기교육일이 연도 열에 다시 포함된다.
-      if (isInitialRec(record)) return false;
+      // 초기교육 기준일과 동일한 초기 레코드만 연도 열에서 제외한다. 이후 연도에
+      // 입력된 별도 회차가 legacy 데이터에서 initial로 남아 있어도 숨기지 않는다.
+      if (isInitialRec(record) && recordDate(record) === initialDate) return false;
       const explicitYear = explicitRecordEducationYear(record);
       if (explicitYear !== null) return explicitYear === year;
       return recordEducationYear(record) === year;
@@ -708,18 +723,18 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
       .find(Boolean) ?? 0;
     const effectiveCycle = globalCycleMonths || itemCycle || historyCycle || Number(lastRec?.cycleMonths ?? 0) || 0;
 
-    // applyDueMetadata 적용
-    const hasExplicitRecurrent = recs.some(isRecurrentRec);
-    const initialOnly = Boolean(
-      initialDate
-      && lastDate
-      && initialDate === lastDate
-      && !hasExplicitRecurrent
-    );
-    const dueRow = lastDate ? applyDueMetadata([{
-      completedAt: new Date(lastDate).getTime(),
+    // 예정일은 전체 최종일이 아니라 최신 보수/정기 회차를 기준으로 계산한다.
+    // 명시 stage가 없는 legacy 데이터는 서로 다른 날짜가 2개 이상일 때 최신 회차를
+    // 보수로 간주한다. 보수 이후 잘못 저장된 초기 레코드가 있어도 기준일을 덮지 않는다.
+    const recurrentEntries = datedRecords.filter((entry) => isRecurrentRec(entry.record));
+    const latestRecurrentEntry = recurrentEntries.at(-1)
+      ?? (uniqueDates.length > 1 ? datedRecords.at(-1) : null);
+    const dueCompletedDate = latestRecurrentEntry?.date ?? null;
+    const initialOnly = Boolean(lastDate && !dueCompletedDate);
+    const dueRow = dueCompletedDate ? applyDueMetadata([{
+      completedAt: new Date(dueCompletedDate).getTime(),
       cycleMonths: effectiveCycle,
-      subType: initialOnly ? "initial" : "recurrent",
+      subType: "recurrent",
     }])[0] : null;
 
     // daysRemaining 기반 직접 상태 결정
@@ -746,6 +761,8 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
       initialDate, lastDate, prevDates, currDates, note,
       cycleMonths: effectiveCycle, hasHistory: recs.length > 0,
       dueStatus, dueStatusLabel, daysRemaining, nextDueDate,
+      _latestHistory: latestRecurrentEntry?.record ?? lastRec,
+      _dueCompletedDate: dueCompletedDate,
       // 수정 모달용 원본 필드
       _emp: emp,
     };
