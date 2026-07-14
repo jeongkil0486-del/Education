@@ -689,6 +689,11 @@ exports.bulkImportManualTrainingHistories = onCall(OPTS, async (request) => {
           ...existing,
           educationStage: existing.educationStage || record.educationStage,
           educationType: existing.educationType || record.educationType,
+          instructorName: existing.instructorName || record.instructorName,
+          hours: Number(existing.hours ?? 0) || Number(record.hours ?? 0) || 0,
+          startDate: existing.startDate || record.startDate || record.completedAt,
+          endDate: existing.endDate || record.endDate || record.completedAt,
+          note: existing.note || record.note || "",
           source: existing.source || record.source,
           updatedAt: now,
           updatedBy: request.auth.uid,
@@ -755,11 +760,19 @@ exports.replaceEmployeeManualTrainingHistories = onCall(OPTS, async (request) =>
       return millis;
     })
   )).sort((a, b) => a - b);
-  const currentYear = new Date().getUTCFullYear();
+  const suppliedYearDates = payload.yearDates && typeof payload.yearDates === "object"
+    ? payload.yearDates
+    : {};
+  const yearStages = Object.entries(suppliedYearDates)
+    .filter(([year]) => /^\d{4}$/.test(String(year)))
+    .flatMap(([year, values]) => normalizeDates(values, Number(year), `${year}년`)
+      .map((completedAt) => ({ completedAt, educationStage: `year_${year}`, educationType: "recurrent" })));
   const stages = [
     ...normalizeDates(payload.initialDates, null, "초기교육").map((completedAt) => ({ completedAt, educationStage: "initial", educationType: "initial" })),
-    ...normalizeDates(payload.previousYearDates, currentYear - 1, "전년도").map((completedAt) => ({ completedAt, educationStage: "previous_year", educationType: "recurrent" })),
-    ...normalizeDates(payload.currentYearDates, currentYear, "금년도").map((completedAt) => ({ completedAt, educationStage: "current_year", educationType: "recurrent" })),
+    ...(yearStages.length ? yearStages : [
+      ...normalizeDates(payload.previousYearDates, null, "전년도").map((completedAt) => ({ completedAt, educationStage: `year_${new Date(completedAt).getUTCFullYear()}`, educationType: "recurrent" })),
+      ...normalizeDates(payload.currentYearDates, null, "금년도").map((completedAt) => ({ completedAt, educationStage: `year_${new Date(completedAt).getUTCFullYear()}`, educationType: "recurrent" })),
+    ]),
   ];
 
   const userHistorySnap = await db.ref(`userManualTrainingHistories/${uid}`).get();
@@ -771,11 +784,13 @@ exports.replaceEmployeeManualTrainingHistories = onCall(OPTS, async (request) =>
     if (subjectCode) return normalizeText(record.subjectCode) === subjectCode;
     return normalizeText(record.subjectName || record.title || record.courseName) === subjectName;
   };
+  const matchingRecords = Object.entries(currentRecords)
+    .filter(([, record]) => ["manual", "manual_excel"].includes(normalizeText(record?.source).toLowerCase()) && matchesIdentity(record))
+    .map(([historyId, record]) => ({ historyId, ...record }));
+  const latestExisting = [...matchingRecords].sort((a, b) => Number(b.completedAt ?? 0) - Number(a.completedAt ?? 0))[0] ?? {};
   const updates = {};
   let deletedCount = 0;
-  for (const [historyId, record] of Object.entries(currentRecords)) {
-    const source = normalizeText(record?.source).toLowerCase();
-    if (!["manual", "manual_excel"].includes(source) || !matchesIdentity(record)) continue;
+  for (const { historyId } of matchingRecords) {
     updates[`manualTrainingHistories/${historyId}`] = null;
     updates[`userManualTrainingHistories/${uid}/${historyId}`] = null;
     deletedCount += 1;
@@ -783,8 +798,26 @@ exports.replaceEmployeeManualTrainingHistories = onCall(OPTS, async (request) =>
 
   const now = Date.now();
   const cycleMonths = Math.max(0, Number(payload.cycleMonths) || 0);
+  const requestedHours = Number(payload.hours);
+  const defaultDuration = Number(payload.defaultDuration);
+  const hours = Number.isFinite(requestedHours) && requestedHours > 0
+    ? requestedHours
+    : Number.isFinite(defaultDuration) && defaultDuration > 0
+      ? defaultDuration
+      : Math.max(0, Number(latestExisting.hours ?? 0) || 0);
+  const instructorName = normalizeText(payload.instructorName) || normalizeText(latestExisting.instructorName);
+  const result = normalizeText(payload.result) || normalizeText(latestExisting.result) || "PASS";
+  const note = payload.note === undefined ? normalizeText(latestExisting.note) : normalizeText(payload.note);
   for (const stage of stages) {
     const historyId = db.ref("manualTrainingHistories").push().key;
+    const normalized = normalizeManualHistory({
+      trainingType, subjectCode, subjectName,
+      title: subjectName, courseName: subjectName,
+      completedAt: stage.completedAt, startDate: stage.completedAt, endDate: stage.completedAt,
+      educationStage: stage.educationStage, educationType: stage.educationType,
+      instructorName, hours, result, note, cycleMonths,
+      itemId, source: "manual",
+    }, employee, request.auth.uid, actor.name ?? "");
     const record = {
       historyId, uid,
       empNo: employee.empNo ?? "",
@@ -793,13 +826,8 @@ exports.replaceEmployeeManualTrainingHistories = onCall(OPTS, async (request) =>
       branchName: employee.branchName ?? "",
       companyId: employee.companyId ?? actor.companyId ?? null,
       companyName: employee.companyName ?? actor.companyName ?? "",
-      trainingType, subjectCode, subjectName, itemId,
-      title: subjectName, courseName: subjectName,
-      completedAt: stage.completedAt,
-      educationStage: stage.educationStage,
-      educationType: stage.educationType,
-      source: "manual", cycleMonths,
-      result: "PASS", completionStatus: "completed", status: "completed",
+      ...normalized,
+      source: "manual", completionStatus: "completed", status: "completed",
       createdAt: now, createdBy: request.auth.uid, createdByName: actor.name ?? "",
       updatedAt: now, updatedBy: request.auth.uid, updatedByName: actor.name ?? "",
     };
@@ -1255,10 +1283,14 @@ exports.saveEducationCycleConfig = onCall(OPTS, async (request) => {
   }
 
   const cycleInfo = normalizeCycleMonths(payload.cycleMonths ?? payload.value ?? payload.months);
+  const hasDefaultDuration = Object.prototype.hasOwnProperty.call(payload, "defaultDuration");
+  const durationInfo = normalizeDefaultDuration(payload.defaultDuration);
   const configKey = buildEducationCycleConfigKey(trainingType, subjectCode, subjectName);
   const targetPath = `educationCycleConfigs/${companyId}/${configKey}`;
+  const existingConfigSnap = await db.ref(targetPath).get();
+  const existingConfig = existingConfigSnap.val() ?? {};
 
-  if (cycleInfo.unset) {
+  if (cycleInfo.unset && (!hasDefaultDuration || durationInfo.unset)) {
     await db.ref(targetPath).remove();
     return {
       companyId,
@@ -1266,12 +1298,17 @@ exports.saveEducationCycleConfig = onCall(OPTS, async (request) => {
       subjectCode,
       subjectName,
       cycleMonths: null,
+      defaultDuration: null,
       unset: true,
       message: "교육 주기 설정을 해제했습니다.",
     };
   }
 
+  const defaultDuration = hasDefaultDuration
+    ? durationInfo.value
+    : Math.max(0, Number(existingConfig.defaultDuration ?? 0) || 0) || null;
   await db.ref(targetPath).set({
+    ...existingConfig,
     companyId,
     scope: "company",
     itemId,
@@ -1279,6 +1316,7 @@ exports.saveEducationCycleConfig = onCall(OPTS, async (request) => {
     subjectCode,
     subjectName,
     cycleMonths: cycleInfo.value,
+    defaultDuration,
     updatedAt: admin.database.ServerValue.TIMESTAMP,
     updatedBy: request.auth.uid,
     updatedByName: actor.name ?? "",
@@ -1292,6 +1330,7 @@ exports.saveEducationCycleConfig = onCall(OPTS, async (request) => {
     itemId,
     configKey,
     cycleMonths: cycleInfo.value,
+    defaultDuration,
     targetPath,
   });
 
@@ -1305,6 +1344,7 @@ exports.saveEducationCycleConfig = onCall(OPTS, async (request) => {
     subjectCode,
     subjectName,
     cycleMonths: cycleInfo.value,
+    defaultDuration,
     unset: false,
     message: "교육 주기 설정이 저장되었습니다.",
   };
@@ -1402,9 +1442,13 @@ function normalizeManualHistory(data, employee, actorUid, actorName) {
     educationType: data?.educationType,
     initialOrRecurrent: data?.initialOrRecurrent,
     trainingPhase: data?.trainingPhase,
+    note: data?.note,
   });
   const trainingType = classification.trainingType || normalizeTrainingTypeValue(data?.trainingType);
   const title = classification.canonicalCourseName || rawCourseName;
+  const isNoteCourseOverride = classification.stageSource === "note_override";
+  const storedSubjectName = isNoteCourseOverride ? classification.canonicalCourseName : subjectName;
+  const storedSubjectCode = isNoteCourseOverride ? classification.canonicalCourseKey : normalizeText(data?.subjectCode);
   const completedAt = normalizeDateMillis(data?.completedAt || data?.completionDate, "수료일");
   if (!title) throw new Error("교육과정명이 필요합니다.");
   if (!subjectName) throw new Error("교육 세부분류 또는 교육과목이 필요합니다.");
@@ -1418,9 +1462,10 @@ function normalizeManualHistory(data, employee, actorUid, actorName) {
     canonicalCourseKey: classification.canonicalCourseKey,
     sectionKey: classification.sectionKey,
     stageSource: classification.stageSource,
-    itemId: normalizeText(data?.itemId),
-    subjectCode: normalizeText(data?.subjectCode),
-    subjectName,
+    itemId: isNoteCourseOverride ? "" : normalizeText(data?.itemId),
+    subjectCode: storedSubjectCode,
+    subjectName: storedSubjectName,
+    originalSubjectName: isNoteCourseOverride ? subjectName : "",
     title,
     courseName: classification.canonicalCourseName || normalizeText(data?.courseName || title),
     instructorName: normalizeText(data?.instructorName),
@@ -1861,6 +1906,20 @@ function normalizeCycleMonths(value) {
   }
 
   return { unset: false, value: numeric };
+}
+
+function normalizeDefaultDuration(value) {
+  if (value === null || value === undefined || value === "") {
+    return { unset: true, value: null };
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || !Number.isInteger(numeric)) {
+    throw new HttpsError("invalid-argument", "교육시간은 정수 시간만 입력할 수 있습니다.");
+  }
+  if (numeric < 0 || numeric > 100) {
+    throw new HttpsError("invalid-argument", "교육시간은 0~100시간 범위에서만 설정할 수 있습니다.");
+  }
+  return numeric === 0 ? { unset: true, value: null } : { unset: false, value: numeric };
 }
 
 function simplifyError(err) {

@@ -73,6 +73,18 @@ function standardCourse(courseName, trainingType) {
 function classifyTraining(input = {}) {
   const rawCourseName = text(input.courseName || input.title || input.subjectName);
   const rawTrainingType = normalizeTrainingType(input.trainingType);
+  // 관리대장 직무 이력의 명시 비고는 과정 분류보다 우선한다. 원문 비고는 레코드에 그대로 보존한다.
+  const isJobInstructorNote = rawTrainingType === "job" && key(input.note) === "직무사내강사";
+  if (isJobInstructorNote) {
+    return {
+      canonicalCourseName: "사내강사",
+      canonicalCourseKey: "job_instructor",
+      trainingType: "job",
+      subType: normalizeStage(input.subType, input.educationStage, input.educationType, input.initialOrRecurrent, input.trainingPhase),
+      sectionKey: "job_recurring",
+      stageSource: "note_override",
+    };
+  }
   if (input.classificationOverride === true && rawTrainingType) {
     const subType = normalizeStage(input.subType, input.educationStage, input.initialOrRecurrent);
     const canonicalCourseName = text(input.canonicalCourseName || rawCourseName);
