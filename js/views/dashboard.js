@@ -58,7 +58,9 @@ async function renderManagementDashboard(container, role) {
   const buckets = resolveDashboardDeadlineBuckets(notificationSettings);
   const maxSoonDays = Math.max(0, ...buckets.map((bucket) => bucket.days));
   const uniqueDeadlineRows = dedupeDeadlineRows(deadlineData.rows ?? []);
-  const soonRows = uniqueDeadlineRows.filter((row) => row.daysRemaining !== null && row.daysRemaining >= 0 && row.daysRemaining <= maxSoonDays);
+  const soonRows = notificationSettings?.showExpiringSoon === false
+    ? []
+    : uniqueDeadlineRows.filter((row) => row.daysRemaining !== null && row.daysRemaining >= 0 && row.daysRemaining <= maxSoonDays);
   const overdueRows = uniqueDeadlineRows.filter((row) => row.daysRemaining !== null && row.daysRemaining < 0);
 
   managementDashboardState = {
@@ -100,7 +102,7 @@ async function renderManagementDashboard(container, role) {
         <div class="card__header"><div><div class="card__title">공지 현황</div><div class="card__subtitle">기존 공지사항 데이터를 기준으로 집계합니다.</div></div></div>
         <div class="card__body" style="display:flex;flex-direction:column;gap:var(--space-3)">
           ${publishedAnnouncements.length
-            ? publishedAnnouncements.slice(0, 5).map(announcementItem).join("")
+            ? publishedAnnouncements.slice(0, 5).map(announcementDashboardItem).join("")
             : '<div class="empty-state">게시 중인 공지사항이 없습니다.</div>'}
         </div>
       </div>
@@ -194,6 +196,13 @@ function isImportantAnnouncement(item) {
 function announcementReadBy(item, uid) {
   const candidates = [item?.readBy, item?.viewedBy, item?.acknowledgedBy, item?.readUids];
   return candidates.some((value) => Array.isArray(value) ? value.includes(uid) : value && typeof value === "object" ? !!value[uid] : false);
+}
+
+function announcementDashboardItem(item) {
+  return `<button type="button" data-dashboard-action="announcements" class="announcement-item ${isImportantAnnouncement(item) ? "announcement-item--important" : ""}" style="border:0;text-align:left;cursor:pointer;width:100%">
+    <div class="announcement-item__title">${esc(item.title ?? "공지사항")}</div>
+    <div class="announcement-item__meta">${isImportantAnnouncement(item) ? "중요 · " : ""}${formatDate(item.publishedAt ?? item.createdAt)}</div>
+  </button>`;
 }
 
 function deadlineBucketForRow(row, buckets) {
