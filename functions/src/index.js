@@ -637,6 +637,7 @@ exports.bulkImportManualTrainingHistories = onCall(OPTS, async (request) => {
   const skipped = [];
   const batchKeys = new Set();
   const affectedUids = new Set();
+  const yearValueTrace = [];
 
   for (let index = 0; index < rows.length; index += 1) {
     const sourceRow = rows[index] ?? {};
@@ -650,6 +651,14 @@ exports.bulkImportManualTrainingHistories = onCall(OPTS, async (request) => {
       if (inputName && inputName !== normalizeText(employee.name)) throw new Error("사번과 이름이 일치하지 않습니다.");
 
       const normalized = normalizeManualHistory(sourceRow, employee, request.auth.uid, actor.name ?? "");
+      if (yearValueTrace.length < 10) {
+        yearValueTrace.push({
+          empNo,
+          educationYear: normalized.educationYear,
+          completedAt: normalized.completedAt,
+          educationStage: normalized.educationStage,
+        });
+      }
       const historyId = db.ref("manualTrainingHistories").push().key;
       const now = Date.now();
 
@@ -720,6 +729,7 @@ exports.bulkImportManualTrainingHistories = onCall(OPTS, async (request) => {
 
   if (Object.keys(updates).length) await db.ref().update(updates);
   await reconcileManualHistoryClassifications(affectedUids);
+  logger.info("[bulkImportManualTrainingHistories] savedYearValues", { yearValueTrace });
   return {
     succeededCount: succeeded.length,
     skippedCount: skipped.length,
@@ -727,6 +737,7 @@ exports.bulkImportManualTrainingHistories = onCall(OPTS, async (request) => {
     succeeded,
     skipped,
     failed,
+    savedYearValues: yearValueTrace,
   };
 });
 
@@ -766,12 +777,12 @@ exports.replaceEmployeeManualTrainingHistories = onCall(OPTS, async (request) =>
   const yearStages = Object.entries(suppliedYearDates)
     .filter(([year]) => /^\d{4}$/.test(String(year)))
     .flatMap(([year, values]) => normalizeDates(values, Number(year), `${year}년`)
-      .map((completedAt) => ({ completedAt, educationStage: `year_${year}`, educationType: "recurrent" })));
+      .map((completedAt) => ({ completedAt, educationYear: Number(year), educationStage: `year_${year}`, educationType: "recurrent" })));
   const stages = [
     ...normalizeDates(payload.initialDates, null, "초기교육").map((completedAt) => ({ completedAt, educationStage: "initial", educationType: "initial" })),
     ...(yearStages.length ? yearStages : [
-      ...normalizeDates(payload.previousYearDates, null, "전년도").map((completedAt) => ({ completedAt, educationStage: `year_${new Date(completedAt).getUTCFullYear()}`, educationType: "recurrent" })),
-      ...normalizeDates(payload.currentYearDates, null, "금년도").map((completedAt) => ({ completedAt, educationStage: `year_${new Date(completedAt).getUTCFullYear()}`, educationType: "recurrent" })),
+      ...normalizeDates(payload.previousYearDates, null, "전년도").map((completedAt) => ({ completedAt, educationYear: new Date(completedAt).getUTCFullYear(), educationStage: `year_${new Date(completedAt).getUTCFullYear()}`, educationType: "recurrent" })),
+      ...normalizeDates(payload.currentYearDates, null, "금년도").map((completedAt) => ({ completedAt, educationYear: new Date(completedAt).getUTCFullYear(), educationStage: `year_${new Date(completedAt).getUTCFullYear()}`, educationType: "recurrent" })),
     ]),
   ];
 
@@ -814,7 +825,7 @@ exports.replaceEmployeeManualTrainingHistories = onCall(OPTS, async (request) =>
       trainingType, subjectCode, subjectName,
       title: subjectName, courseName: subjectName,
       completedAt: stage.completedAt, startDate: stage.completedAt, endDate: stage.completedAt,
-      educationStage: stage.educationStage, educationType: stage.educationType,
+      educationStage: stage.educationStage, educationYear: stage.educationYear, educationType: stage.educationType,
       instructorName, hours, result, note, cycleMonths,
       itemId, source: "manual",
     }, employee, request.auth.uid, actor.name ?? "");
@@ -1456,6 +1467,7 @@ function normalizeManualHistory(data, employee, actorUid, actorName) {
 
   const cycleMonths = Math.max(0, Number(data?.cycleMonths ?? data?.retrainingCycleMonths ?? 0) || 0);
   const hours = Math.max(0, Number(data?.hours ?? data?.trainingHours ?? 0) || 0);
+  const educationYear = normalizeEducationYear(data?.educationYear, data?.educationStage, completedAt);
   return {
     trainingType,
     canonicalCourseName: classification.canonicalCourseName,
@@ -1476,6 +1488,7 @@ function normalizeManualHistory(data, employee, actorUid, actorName) {
     result: normalizeText(data?.result || "PASS").toUpperCase(),
     subType: classification.subType || normalizeText(data?.subType),
     educationStage: classification.subType || normalizeText(data?.educationStage),
+    educationYear,
     educationType: normalizeText(data?.educationType),
     source: normalizeText(data?.source) || "manual",
     initialRecurrent: normalizeText(data?.initialRecurrent),
@@ -1485,6 +1498,15 @@ function normalizeManualHistory(data, employee, actorUid, actorName) {
     enteredBy: actorUid,
     enteredByName: actorName,
   };
+}
+
+function normalizeEducationYear(value, stage, completedAt) {
+  const direct = Number(value);
+  if (Number.isInteger(direct) && direct >= 2000 && direct <= 2100) return direct;
+  const stageMatch = String(stage ?? "").match(/^year_(\d{4})$/);
+  if (stageMatch) return Number(stageMatch[1]);
+  const date = new Date(Number(completedAt));
+  return Number.isFinite(date.getTime()) ? date.getUTCFullYear() : null;
 }
 
 async function reconcileManualHistoryClassifications(uids) {

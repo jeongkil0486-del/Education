@@ -425,16 +425,23 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
     const initialDates = initialRecs.map((r) => toYmd(r.completedAt)).filter(Boolean).sort();
     const initialDate  = initialDates[0] ?? null;
 
+    const recordEducationYear = (record) => {
+      const explicit = Number(record?.educationYear);
+      if (Number.isInteger(explicit) && explicit >= 2000 && explicit <= 2100) return explicit;
+      const stageMatch = String(record?.educationStage ?? "").match(/^year_(\d{4})$/);
+      if (stageMatch) return Number(stageMatch[1]);
+      const ymd = toYmd(record?.completedAt);
+      return ymd ? Number(ymd.slice(0, 4)) : null;
+    };
+
     // 전년도
     const prevDates = [...new Set(recs.filter((r) => {
-      if (r.educationStage) return r.educationStage === "previous_year" || r.educationStage === `year_${PY}`;
-      const y = toYmd(r.completedAt); return y?.startsWith(String(PY));
+      return r.educationStage === "previous_year" || recordEducationYear(r) === PY;
     }).map((r) => toYmd(r.completedAt)).filter(Boolean))].sort();
 
     // 금년도
     const currDates = [...new Set(recs.filter((r) => {
-      if (r.educationStage) return r.educationStage === "current_year" || r.educationStage === `year_${CY}`;
-      const y = toYmd(r.completedAt); return y?.startsWith(String(CY));
+      return r.educationStage === "current_year" || recordEducationYear(r) === CY;
     }).map((r) => toYmd(r.completedAt)).filter(Boolean))].sort();
 
     // 최종교육일은 실제 입력된 날짜 중 가장 최신값이다. 초기교육의 월/일로 보정하지 않는다.
@@ -1370,6 +1377,7 @@ async function parseHistoryUploadFileInline(event) {
       const year = match[1] ? Number(match[1]) : 2000 + Number(match[2]);
       return year >= 2000 && year <= 2100 ? { year, index } : null;
     }).filter(Boolean);
+    console.info("[ledger-upload] detectedYears", yearColumns.map(({ year }) => year));
     const col = {
       name:     headers.indexOf("성명"),
       empNo:    headers.indexOf("사번"),
@@ -1427,6 +1435,10 @@ async function parseHistoryUploadFileInline(event) {
     const invalid    = nonSkipped.filter((r) => r._errors.length);
     const valid      = nonSkipped.filter((r) => !r._errors.length);
     const skippedCnt = pendingHistoryRows.filter((r) => r._skip).length;
+    console.info("[ledger-upload] preview yearValues", pendingHistoryRows.slice(0, 3).map((row) => ({
+      empNo: row.empNo,
+      yearValues: row.yearDates,
+    })));
 
     previewEl.innerHTML = `
       <div style="margin-bottom:var(--space-2)">
@@ -1504,7 +1516,7 @@ async function submitHistoryUploadInline() {
     const stages = [
       ...row.initialDates.map((d) => ({ completedAt: d, educationStage: "initial",       educationType: "initial" })),
       ...Object.entries(row.yearDates ?? {}).flatMap(([year, dates]) =>
-        dates.map((d) => ({ completedAt: d, educationStage: `year_${year}`, educationType: "recurrent" }))
+        dates.map((d) => ({ completedAt: d, educationYear: Number(year), educationStage: `year_${year}`, educationType: "recurrent" }))
       ),
     ];
     // 초기/전년도/금년도 날짜가 없고 최종교육일만 있으면 latest_only로 이력 1건 생성
@@ -1529,11 +1541,17 @@ async function submitHistoryUploadInline() {
   }
 
   if (!historyEntries.length) { toast.warning("업로드할 날짜가 없습니다."); return; }
+  console.info("[ledger-upload] payload yearValues", historyEntries.slice(0, 6).map((entry) => ({
+    empNo: entry.empNo,
+    educationYear: entry.educationYear,
+    completedAt: entry.completedAt,
+  })));
   if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = "업로드 중..."; }
   if (resultEl)  resultEl.textContent = "";
 
   try {
     const result = await bulkImportManualTrainingHistories({ rows: historyEntries });
+    console.info("[ledger-upload] savedYearValues", result?.savedYearValues ?? []);
     const msg = `✅ 등록 ${result.succeededCount ?? 0}건 · 중복 ${result.skippedCount ?? 0}건 · 실패 ${result.failedCount ?? 0}건`;
     if (resultEl) resultEl.innerHTML = `<span style="color:var(--color-success,#16a34a)">${esc(msg)}</span>`;
     toast.success(msg);
