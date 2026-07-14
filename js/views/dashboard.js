@@ -14,6 +14,7 @@ import { formatDate, isOverdue, isExpiringSoon, daysFromNow } from "../utils/dat
 import { router } from "../core/router.js";
 import { modal } from "../utils/modal.js";
 import { loadEmployeeDeadlineDashboardRows } from "./employees.js";
+import { listAnnouncements } from "../core/admin-api.js";
 
 export async function render(container) {
   const role = authStore.role;
@@ -43,10 +44,8 @@ async function renderManagementDashboard(container, role) {
     safeLoad(() => loadEmployeeDeadlineDashboardRows(), { rows: [], branches: [], employees: [] }),
     safeLoad(() => settingsDB.getNotifications(), {}),
   ]);
-  const dashboardCompanyId = authStore.companyId ?? deadlineData.company?.id ?? null;
-  const announcements = dashboardCompanyId
-    ? await safeLoad(() => announcementsDB.list(dashboardCompanyId), [])
-    : [];
+  const announcementResult = await safeLoad(() => listAnnouncements(), { announcements: [] });
+  const announcements = announcementResult.announcements ?? [];
 
   const roleScopedAnnouncements = announcements.filter((item) => announcementVisibleToRole(item, role));
   const visibleAnnouncements = isInstructor

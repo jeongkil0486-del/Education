@@ -1145,8 +1145,44 @@ exports.updateEmployeeManagementProfile = onCall(OPTS, async (request) => {
       : request.data ?? {};
 
   const updates = buildEmployeeManagementUpdates(source);
-  if (actor.role === "instructor" && updates.branchId && normalizeText(updates.branchId) !== normalizeText(employee.branchId)) {
-    throw new HttpsError("permission-denied", "강사는 직원을 다른 지점으로 이동할 수 없습니다.");
+  if (Object.prototype.hasOwnProperty.call(source, "name")) {
+    const name = normalizeText(source.name);
+    if (!name) throw new HttpsError("invalid-argument", "성명은 비워둘 수 없습니다.");
+    updates.name = name;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(source, "empNo")) {
+    const empNo = normalizeEmpNo(source.empNo);
+    if (!empNo) throw new HttpsError("invalid-argument", "사번은 비워둘 수 없습니다.");
+    if (actor.role === "instructor" && empNo !== normalizeEmpNo(employee.empNo)) {
+      throw new HttpsError("permission-denied", "강사는 직원 사번을 변경할 수 없습니다.");
+    }
+    if (actor.role !== "instructor" && empNo !== normalizeEmpNo(employee.empNo)) {
+      const usersSnap = await db.ref("users").get();
+      let duplicate = false;
+      usersSnap.forEach((child) => {
+        if (child.key !== uid && normalizeEmpNo(child.val()?.empNo).toLowerCase() === empNo.toLowerCase()) duplicate = true;
+      });
+      if (duplicate) throw new HttpsError("already-exists", "이미 사용 중인 사번입니다.");
+      updates.empNo = empNo;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(source, "branchId")) {
+    const branchId = normalizeText(source.branchId);
+    if (actor.role === "instructor" && branchId !== normalizeText(employee.branchId)) {
+      throw new HttpsError("permission-denied", "강사는 직원을 다른 지점으로 이동할 수 없습니다.");
+    }
+    if (actor.role !== "instructor" && branchId !== normalizeText(employee.branchId)) {
+      if (!branchId) throw new HttpsError("invalid-argument", "지점은 비워둘 수 없습니다.");
+      const branchSnap = await db.ref(`branches/${branchId}`).get();
+      if (!branchSnap.exists()) throw new HttpsError("invalid-argument", "선택한 지점을 찾을 수 없습니다.");
+      if (employee.companyId && branchSnap.val()?.companyId && employee.companyId !== branchSnap.val().companyId) {
+        throw new HttpsError("permission-denied", "다른 회사 지점으로 이동할 수 없습니다.");
+      }
+      updates.branchId = branchId;
+      updates.branchName = branchSnap.val()?.name ?? branchSnap.val()?.code ?? "";
+    }
   }
   if (!Object.keys(updates).length) {
     throw new HttpsError("invalid-argument", "업데이트할 관리 프로필 필드가 없습니다.");
@@ -2115,7 +2151,6 @@ function buildEmployeeManagementUpdates(source) {
     "position",
     "jobTitle",
     "note",
-    "birthDate",
     "entryType",
     "internalLicense",
     "externalLicense",
@@ -2130,7 +2165,7 @@ function buildEmployeeManagementUpdates(source) {
     }
   });
 
-  ["hireDate", "joinDate", "employmentDate"].forEach((field) => {
+  ["birthDate", "hireDate", "joinDate", "employmentDate"].forEach((field) => {
     if (Object.prototype.hasOwnProperty.call(source, field)) {
       updates[field] = normalizeProfileDate(source[field]);
     }

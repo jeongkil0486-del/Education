@@ -218,6 +218,7 @@ function normHours(v) {
 function normDate(v) {
   if (v == null || v === "") return null;
   const n = Number(v);
+  if (Number.isFinite(n) && n >= 100000000000) return Math.round(n);
   if (Number.isFinite(n) && n >= 30000 && n < 2958466) {
     return Math.round((n - 25569) * 86400 * 1000);
   }
@@ -226,6 +227,7 @@ function normDate(v) {
   s = s.replace(/ 00:00:00$/, "").trim();
   // 범위면 첫 번째만
   s = s.split(/[~–\n]/)[0].trim();
+  s = s.replace(/(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일?/, "$1-$2-$3");
   // 구분자 통일
   s = s.replace(/[.]/g, "-");
   const d = new Date(s);
@@ -433,37 +435,81 @@ function detectEmpInfo(sheet, headerRow) {
     externalLicense: "",
     branchName: "",
     position: "",
+    diagnostics: [],
   };
-  const aliases = new Map([
-    ["성명", "name"], ["이름", "name"], ["성명name", "name"],
-    ["사번", "empNo"], ["사번idnbr", "empNo"], ["직원번호", "empNo"],
-    ["생년월일", "birthDate"], ["생일", "birthDate"],
-    ["입사일", "hireDate"], ["입사일자", "hireDate"],
-    ["신입경력", "entryType"], ["신입/경력", "entryType"], ["경력구분", "entryType"],
-    ["사내자격", "internalLicense"], ["사내자격증", "internalLicense"],
-    ["사외자격", "externalLicense"], ["사외자격증", "externalLicense"],
-    ["지점", "branchName"], ["소속지점", "branchName"], ["근무지", "branchName"],
-    ["직책", "position"], ["직급직책", "position"], ["직급/직책", "position"], ["직급", "position"],
-  ]);
-  const limit = Math.min(headerRow + 1, 15);
+  const labelKey = (value) => norm(value).replace(/[^a-z0-9가-힣]/g, "");
+  const aliasEntries = {
+    name: ["성명", "이름", "name", "성명name"],
+    empNo: ["사번", "직원번호", "employeeno", "employeeid", "empno", "idnbr", "사번idnbr"],
+    birthDate: ["생년월일", "생년월일", "생년", "dob", "dateofbirth", "birthdate", "birthday"],
+    hireDate: ["입사일", "입사일자", "입사년월일", "채용일", "hiredate", "joindate", "employmentdate"],
+    entryType: ["신입경력", "경력구분", "채용구분", "입사구분", "경력여부", "employmenttype", "careertype"],
+    internalLicense: ["사내자격", "사내자격증", "내부자격", "internallicense", "internalqualification"],
+    externalLicense: ["사외자격", "사외자격증", "외부자격", "externallicense", "externalqualification"],
+    branchName: ["지점", "소속지점", "소속", "부서", "근무지", "branch", "department", "station"],
+    position: ["직책", "직급직책", "직급", "position", "jobtitle", "title"],
+  };
+  const aliases = new Map();
+  Object.entries(aliasEntries).forEach(([field, values]) => values.forEach((value) => aliases.set(labelKey(value), field)));
+  const qualifications = { internalLicense: [], externalLicense: [] };
+  const emptyValues = new Set(["", "-", "없음", "해당없음", "na", "n/a", "none"]);
+  const cellRef = (row, col) => {
+    let letters = "";
+    for (let n = col + 1; n > 0; n = Math.floor((n - 1) / 26)) letters = String.fromCharCode(65 + ((n - 1) % 26)) + letters;
+    return `${letters}${row + 1}`;
+  };
+  const limit = Math.min(Math.max(headerRow + 1, 15), sheet.maxRow, 50);
   for (let r = 0; r <= limit; r++) {
     for (let c = 0; c <= sheet.maxCol; c++) {
       const v = rawCell(sheet, r, c);
       if (!v) continue;
-      const key = norm(v);
+      const key = labelKey(v);
       const field = aliases.get(key);
-      if (!field || info[field]) continue;
-      for (let dc = 1; dc <= 5; dc++) {
-        const cand = rawCell(sheet, r, c + dc);
-        if (!hasCellValue(cand) || aliases.has(norm(cand))) continue;
-        if (field === "name") info.name = normName(String(cand));
-        else if (field === "empNo") info.empNo = normEmpNo(String(cand));
-        else if (field === "birthDate" || field === "hireDate") info[field] = normDate(cand);
-        else info[field] = String(cand).trim();
-        if (info[field]) break;
+      if (!field) continue;
+      const candidates = [];
+      for (let dc = 1; dc <= 6 && c + dc <= sheet.maxCol; dc++) {
+        const adjacent = rawCell(sheet, r, c + dc);
+        const adjacentField = aliases.get(labelKey(adjacent));
+        if (adjacentField === field) continue;
+        if (adjacentField) break;
+        candidates.push({ row: r, col: c + dc });
+      }
+      for (let dr = 1; dr <= 4 && r + dr <= sheet.maxRow; dr++) {
+        const adjacent = rawCell(sheet, r + dr, c);
+        const adjacentField = aliases.get(labelKey(adjacent));
+        if (adjacentField === field) continue;
+        if (adjacentField) break;
+        candidates.push({ row: r + dr, col: c });
+      }
+      for (const location of candidates) {
+        if (location.row > sheet.maxRow || location.col > sheet.maxCol) continue;
+        const cand = rawCell(sheet, location.row, location.col);
+        const raw = String(cand ?? "").trim();
+        if (!hasCellValue(cand) || aliases.has(labelKey(cand)) || emptyValues.has(labelKey(raw))) continue;
+        let normalized = raw;
+        if (field === "name") normalized = normName(raw);
+        else if (field === "empNo") normalized = normEmpNo(raw);
+        else if (field === "birthDate" || field === "hireDate") normalized = normDate(cand);
+        if (!normalized) continue;
+        info.diagnostics.push({
+          field,
+          label: String(v).trim(),
+          labelCell: cellRef(r, c),
+          valueCell: cellRef(location.row, location.col),
+          rawValue: raw,
+          normalizedValue: normalized,
+        });
+        if (field === "internalLicense" || field === "externalLicense") {
+          if (!qualifications[field].includes(String(normalized))) qualifications[field].push(String(normalized));
+        } else if (!info[field]) {
+          info[field] = normalized;
+        }
+        if (field !== "internalLicense" && field !== "externalLicense") break;
       }
     }
   }
+  info.internalLicense = qualifications.internalLicense.join(" / ");
+  info.externalLicense = qualifications.externalLicense.join(" / ");
   return info;
 }
 
@@ -1143,12 +1189,14 @@ export async function analyzeExcel(file) {
   let empInfo = {
     name: "", empNo: "", birthDate: null, hireDate: null, entryType: "",
     internalLicense: "", externalLicense: "", branchName: "", position: "",
+    diagnostics: [],
   };
   for (const sheetRaw of sheetRaws) {
     const hr = findHeaderRow(sheetRaw);
     const info = detectEmpInfo(sheetRaw, hr >= 0 ? hr : 12);
     for (const [key, value] of Object.entries(info)) {
-      if (!empInfo[key] && value) empInfo[key] = value;
+      if (key === "diagnostics") empInfo.diagnostics.push(...(Array.isArray(value) ? value : []));
+      else if (!empInfo[key] && value) empInfo[key] = value;
     }
   }
 

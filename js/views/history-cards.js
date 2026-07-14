@@ -9,7 +9,7 @@ import {
   DUE_STATUS_LABELS,
 } from "../services/training-service.js";
 import { authStore, ROLES } from "../core/auth.js";
-import { deleteEmployeeHistory, upsertManualTrainingHistory, resetSelectedManualTrainingHistories, moveEmployeeHistoryCourse } from "../core/admin-api.js";
+import { deleteEmployeeHistory, upsertManualTrainingHistory, resetSelectedManualTrainingHistories, moveEmployeeHistoryCourse, updateEmployeeManagementProfile } from "../core/admin-api.js";
 import {
   exportEmployeeHistoryCard,
 } from "../services/history-card-export.js";
@@ -143,7 +143,7 @@ export async function render(container, params = {}) {
 
         <!-- 인적사항 -->
         <div class="card" style="margin-bottom:var(--space-4)">
-          <div class="card__header"><div class="card__title">인적사항</div></div>
+          <div class="card__header"><div class="card__title">인적사항</div>${canManageEmployeeHistory() ? '<button class="btn btn--secondary btn--sm" id="btn-edit-profile">수정</button>' : ""}</div>
           <div class="card__body" id="hc-profile"></div>
         </div>
 
@@ -164,6 +164,7 @@ export async function render(container, params = {}) {
   document.getElementById("btn-download-card")?.addEventListener("click", handleDownload);
   document.getElementById("btn-reset-all-history")?.addEventListener("click", openResetAllHistoryModal);
   document.getElementById("btn-deselect")?.addEventListener("click", deselectEmployee);
+  document.getElementById("btn-edit-profile")?.addEventListener("click", openEmployeeProfileModal);
   document.getElementById("hc-search")?.addEventListener("input", onFilter);
   document.getElementById("hc-branch")?.addEventListener("change", onFilter);
   const sectionsEl = document.getElementById("hc-sections");
@@ -318,6 +319,7 @@ async function loadCard(uid) {
   try {
     const { employee, rows } = await buildEmployeeHistoryRowsV2(uid);
     S.selectedEmployee = employee;
+    S.employees = S.employees.map((item) => (item.id ?? item.uid) === uid ? { ...item, ...employee } : item);
     S.rows = rows;
 
     if (dlBtn) dlBtn.disabled = false;
@@ -422,13 +424,13 @@ function renderProfile(emp) {
   const fields = [
     { label: "성명",      value: emp?.name ?? "–" },
     { label: "사번",      value: emp?.empNo ?? "–" },
-    { label: "생년월일",  value: emp?.birthDate ? formatDate(emp.birthDate) : "–" },
-    { label: "입사일",    value: emp?.hireDate || emp?.joinDate ? formatDate(emp.hireDate ?? emp.joinDate) : "–" },
-    { label: "신입/경력", value: emp?.entryType ?? "–" },
-    { label: "사내 자격", value: emp?.internalLicense ?? "–" },
-    { label: "사외 자격", value: emp?.externalLicense ?? "–" },
+    { label: "생년월일",  value: emp?.birthDate || emp?.birth || emp?.birthday ? formatDate(emp.birthDate ?? emp.birth ?? emp.birthday) : "–" },
+    { label: "입사일",    value: emp?.hireDate || emp?.joinDate || emp?.employmentDate ? formatDate(emp.hireDate ?? emp.joinDate ?? emp.employmentDate) : "–" },
+    { label: "신입/경력", value: emp?.entryType ?? emp?.employmentType ?? emp?.careerType ?? "–" },
+    { label: "사내 자격", value: emp?.internalLicense ?? emp?.internalQualification ?? "–" },
+    { label: "사외 자격", value: emp?.externalLicense ?? emp?.externalQualification ?? "–" },
     { label: "지점",      value: emp?.branchName ?? "–" },
-    { label: "직책",      value: emp?.position ?? "–" },
+    { label: "직책",      value: emp?.position ?? emp?.jobTitle ?? emp?.title ?? "–" },
   ];
 
   el.innerHTML = `
@@ -439,6 +441,62 @@ function renderProfile(emp) {
           <div style="font-size:var(--text-sm);font-weight:var(--weight-medium);color:var(--gray-800)">${esc(value)}</div>
         </div>`).join("")}
     </div>`;
+}
+
+function openEmployeeProfileModal() {
+  const employee = S.selectedEmployee;
+  if (!employee || !canManageEmployeeHistory()) return;
+  const instructor = authStore.role === ROLES.INSTRUCTOR;
+  const dateValue = (value) => {
+    if (!value) return "";
+    const date = new Date(Number(value) || value);
+    return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
+  };
+  const selectedBranchId = employee.branchId ?? "";
+  const branchOptions = S.branches.map((branch) => {
+    const id = branch.id ?? branch.branchId;
+    return `<option value="${esc(id)}" ${id === selectedBranchId ? "selected" : ""}>${esc(branch.name ?? branch.code ?? id)}</option>`;
+  }).join("");
+  modal.open({
+    title: "인적사항 수정",
+    size: "lg",
+    body: `<div style="display:grid;gap:var(--space-4)">
+      <div class="form-row"><div class="form-group"><label class="form-label form-label--required">성명</label><input class="form-control" id="profile-name" value="${esc(employee.name ?? "")}"></div><div class="form-group"><label class="form-label">사번</label><input class="form-control" id="profile-emp-no" value="${esc(employee.empNo ?? "")}" ${instructor ? "readonly" : ""}></div></div>
+      <div class="form-row"><div class="form-group"><label class="form-label">생년월일</label><input class="form-control" type="date" id="profile-birth-date" value="${dateValue(employee.birthDate ?? employee.birth ?? employee.birthday)}"></div><div class="form-group"><label class="form-label">입사일</label><input class="form-control" type="date" id="profile-hire-date" value="${dateValue(employee.hireDate ?? employee.joinDate ?? employee.employmentDate)}"></div></div>
+      <div class="form-row"><div class="form-group"><label class="form-label">신입/경력</label><input class="form-control" id="profile-entry-type" value="${esc(employee.entryType ?? employee.employmentType ?? employee.careerType ?? "")}"></div><div class="form-group"><label class="form-label">직책</label><input class="form-control" id="profile-position" value="${esc(employee.position ?? employee.jobTitle ?? employee.title ?? "")}"></div></div>
+      <div class="form-row"><div class="form-group"><label class="form-label">사내 자격</label><input class="form-control" id="profile-internal-license" value="${esc(employee.internalLicense ?? employee.internalQualification ?? "")}"></div><div class="form-group"><label class="form-label">사외 자격</label><input class="form-control" id="profile-external-license" value="${esc(employee.externalLicense ?? employee.externalQualification ?? "")}"></div></div>
+      <div class="form-group"><label class="form-label">지점</label><select class="form-control" id="profile-branch" ${instructor ? "disabled" : ""}>${branchOptions}</select>${instructor ? '<div class="form-hint">강사는 직원의 소속 지점을 변경할 수 없습니다.</div>' : ""}</div>
+    </div>`,
+    actions: [
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      { label: "저장", variant: "primary", onClick: async () => {
+        const name = String(document.getElementById("profile-name")?.value ?? "").trim();
+        if (!name) { toast.warning("성명을 입력해 주세요."); return; }
+        modal.setLoading("저장", true);
+        try {
+          const profile = {
+            name,
+            empNo: document.getElementById("profile-emp-no")?.value ?? employee.empNo ?? "",
+            birthDate: document.getElementById("profile-birth-date")?.value || null,
+            hireDate: document.getElementById("profile-hire-date")?.value || null,
+            entryType: document.getElementById("profile-entry-type")?.value ?? "",
+            internalLicense: document.getElementById("profile-internal-license")?.value ?? "",
+            externalLicense: document.getElementById("profile-external-license")?.value ?? "",
+            position: document.getElementById("profile-position")?.value ?? "",
+            branchId: instructor ? employee.branchId : document.getElementById("profile-branch")?.value,
+          };
+          const result = await updateEmployeeManagementProfile({ uid: employee.uid ?? employee.id, profile });
+          modal.close();
+          await loadCard(employee.uid ?? employee.id);
+          renderEmployeeList();
+          toast.success(result.message);
+        } catch (err) {
+          toast.error(err?.message ?? "인적사항 저장에 실패했습니다.");
+          modal.setLoading("저장", false);
+        }
+      } },
+    ],
+  });
 }
 
 /* ──────────────────────────────────────────────────────────
@@ -1390,27 +1448,32 @@ function openImportExcelModal() {
 
 function renderProfileImportPreview(profile = {}, employee = null) {
   const definitions = [
-    ["birthDate", "생년월일", employee?.birthDate],
-    ["hireDate", "입사일", employee?.hireDate ?? employee?.joinDate],
-    ["entryType", "신입/경력", employee?.entryType],
-    ["internalLicense", "사내 자격", employee?.internalLicense],
-    ["externalLicense", "사외 자격", employee?.externalLicense],
+    ["name", "성명", employee?.name],
+    ["empNo", "사번", employee?.empNo],
+    ["birthDate", "생년월일", employee?.birthDate ?? employee?.birth ?? employee?.birthday],
+    ["hireDate", "입사일", employee?.hireDate ?? employee?.joinDate ?? employee?.employmentDate],
+    ["entryType", "신입/경력", employee?.entryType ?? employee?.employmentType ?? employee?.careerType],
+    ["internalLicense", "사내 자격", employee?.internalLicense ?? employee?.internalQualification],
+    ["externalLicense", "사외 자격", employee?.externalLicense ?? employee?.externalQualification],
     ["branchName", "지점", employee?.branchName],
-    ["position", "직책", employee?.position],
+    ["position", "직책", employee?.position ?? employee?.jobTitle ?? employee?.title],
   ];
-  const changes = definitions.flatMap(([key, label, current]) => {
-      if (profile[key] === null || profile[key] === undefined || String(profile[key]).trim() === "") return [];
+  const changes = definitions.map(([key, label, current]) => {
+      if (profile[key] === null || profile[key] === undefined || String(profile[key]).trim() === "") {
+        return `<div><strong>${esc(label)}</strong>: <span style="color:var(--gray-400)">미탐지</span></div>`;
+      }
       const next = key === "birthDate" || key === "hireDate" ? formatDate(profile[key]) : String(profile[key]);
       const before = current ? (key === "birthDate" || key === "hireDate" ? formatDate(current) : String(current)) : "-";
-      if (next === before) return [];
+      const unchanged = next === before ? " (변경 없음)" : "";
       const scopeNote = key === "branchName" && authStore.role === ROLES.INSTRUCTOR ? " (강사는 기존 지점 유지)" : "";
-      return [`<div><strong>${esc(label)}</strong>: ${esc(before)} → ${esc(next)}${scopeNote}</div>`];
+      return `<div><strong>${esc(label)}</strong>: ${esc(before)} → ${esc(next)}${unchanged}${scopeNote}</div>`;
     });
-  if (!changes.length) {
-    return '<div style="margin-bottom:var(--space-3);font-size:var(--text-xs);color:var(--gray-500)">엑셀에서 변경할 인적사항이 감지되지 않았습니다.</div>';
-  }
+  const diagnostics = Array.isArray(profile.diagnostics) ? profile.diagnostics : [];
+  const diagnosticHtml = diagnostics.length ? `<details style="margin-top:var(--space-2)"><summary style="cursor:pointer">탐지 진단 ${diagnostics.length}건</summary><div style="display:grid;gap:3px;margin-top:6px">${diagnostics.map((row) =>
+    `<div>${esc(row.label)} (${esc(row.labelCell)} → ${esc(row.valueCell)}): ${esc(row.rawValue)} → ${esc(String(row.normalizedValue))} [${esc(row.field)}]</div>`
+  ).join("")}</div></details>` : "";
   return `<div style="margin-bottom:var(--space-3);padding:var(--space-3);background:var(--gray-50);border-radius:var(--radius-md);font-size:var(--text-xs);display:grid;gap:4px">
-    <strong>인적사항 변경 미리보기</strong>${changes.join("")}
+    <strong>인적사항 탐지 및 변경 미리보기</strong>${changes.join("")}${diagnosticHtml}
   </div>`;
 }
 
