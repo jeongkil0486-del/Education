@@ -350,6 +350,7 @@ async function runLedgerQuery() {
       relevant,
       branchEmployees,
       ledgerEmployees,
+      ledgerRows,
     });
 
     document.getElementById("ledger-title").textContent = `${branchLabel} · ${trainingLabel}`;
@@ -482,6 +483,7 @@ function logLedgerMatchDiagnostics({
   relevant,
   branchEmployees,
   ledgerEmployees,
+  ledgerRows,
 }) {
   const matchedCounts = new Map();
   for (const history of relevant) {
@@ -522,8 +524,25 @@ function logLedgerMatchDiagnostics({
     allEmployeesCount: branchEmployees.length,
     allHistoryRowsCount: allHistories.length,
     matchedHistoryRowsCount: relevant.length,
+    matchedHistoryRowsSample: relevant.slice(0, 10).map((row) => ({
+      employeeUid: historyEmployeeUid(row),
+      trainingType: row?.trainingType ?? "",
+      subType: row?.subType ?? "",
+      courseName: row?.courseName ?? row?.title ?? "",
+      canonicalKey: canonicalLedgerRecordKey(row),
+      educationYear: row?.educationYear ?? null,
+      educationStage: row?.educationStage ?? "",
+      completedAt: row?.completedAt ?? null,
+      startDate: row?.startDate ?? null,
+      endDate: row?.endDate ?? null,
+    })),
     perEmployeeMatchedCount,
     finalRenderedCount: ledgerEmployees.length,
+    displayedYearValues: (ledgerRows ?? []).filter((row) => row.hasHistory).slice(0, 10).map((row) => ({
+      employeeUid: row.uid,
+      empNo: row.empNo,
+      computedYearValues: { [PY]: row.prevDates, [CY]: row.currDates },
+    })),
     keySamples,
   });
 }
@@ -572,26 +591,42 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
     const initialDates = initialRecs.map((r) => toYmd(r.completedAt)).filter(Boolean).sort();
     const initialDate  = initialDates[0] ?? null;
 
-    const recordEducationYear = (record) => {
+    const explicitRecordEducationYear = (record) => {
       const explicit = Number(record?.educationYear);
       if (Number.isInteger(explicit) && explicit >= 2000 && explicit <= 2100) return explicit;
       const stageMatch = String(record?.educationStage ?? "").match(/^year_(\d{4})$/);
       if (stageMatch) return Number(stageMatch[1]);
-      const ymd = toYmd(record?.completedAt);
+      if (record?.educationStage === "previous_year") return PY;
+      if (record?.educationStage === "current_year") return CY;
+      return null;
+    };
+
+    const recordDate = (record) => {
+      const raw = [record?.completedAt, record?.endDate, record?.startDate]
+        .find((value) => value !== null && value !== undefined && value !== "");
+      return toYmd(raw);
+    };
+
+    const recordEducationYear = (record) => {
+      const explicit = explicitRecordEducationYear(record);
+      if (explicit !== null) return explicit;
+      const ymd = recordDate(record);
       return ymd ? Number(ymd.slice(0, 4)) : null;
     };
 
+    const datesForYear = (year) => [...new Set(recs.filter((record) => {
+      const explicitYear = explicitRecordEducationYear(record);
+      // 관리대장 연도 열에서 입력된 회차는 서버의 초기/보수 재분류보다 우선한다.
+      if (explicitYear !== null) return explicitYear === year;
+      if (isInitialRec(record)) return false;
+      return recordEducationYear(record) === year;
+    }).map(recordDate).filter(Boolean))].sort();
+
     // 전년도
-    const prevDates = [...new Set(recs.filter((r) => {
-      if (isInitialRec(r)) return false;
-      return r.educationStage === "previous_year" || recordEducationYear(r) === PY;
-    }).map((r) => toYmd(r.completedAt)).filter(Boolean))].sort();
+    const prevDates = datesForYear(PY);
 
     // 금년도
-    const currDates = [...new Set(recs.filter((r) => {
-      if (isInitialRec(r)) return false;
-      return r.educationStage === "current_year" || recordEducationYear(r) === CY;
-    }).map((r) => toYmd(r.completedAt)).filter(Boolean))].sort();
+    const currDates = datesForYear(CY);
 
     // 최종교육일은 실제 입력된 날짜 중 가장 최신값이다. 초기교육의 월/일로 보정하지 않는다.
     const allDates    = recs.map((r) => toYmd(r.completedAt)).filter(Boolean).sort();
@@ -1672,14 +1707,14 @@ async function submitHistoryUploadInline() {
     if (stages.length === 0 && row.lastDate) {
       stages.push({ completedAt: row.lastDate, educationStage: "latest_only", educationType: "recurrent" });
     }
-    for (const { completedAt, educationStage, educationType } of stages) {
+    for (const { completedAt, educationYear, educationStage, educationType } of stages) {
       historyEntries.push({
         empNo: row.empNo, employeeName: row.name,
         hireDate: row.joinDate || "",
         position: row.position || "",
         trainingType, subjectCode, subjectName,
         title: subjectName, courseName: subjectName,
-        completedAt, educationStage, educationType,
+        completedAt, educationYear, educationStage, educationType,
         startDate: completedAt, endDate: completedAt,
         source: "manual_excel", note: row.note ?? "",
         instructorName: row.instructorName ?? "",
