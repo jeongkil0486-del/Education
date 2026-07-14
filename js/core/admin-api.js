@@ -16,6 +16,9 @@ const resetSelectedManualTrainingHistoriesCallable = httpsCallable(functions, "r
 const saveEducationCycleConfigCallable         = httpsCallable(functions, "saveEducationCycleConfig");
 const replaceEmployeeManualTrainingHistoriesCallable = httpsCallable(functions, "replaceEmployeeManualTrainingHistories");
 const moveEmployeeHistoryCourseCallable = httpsCallable(functions, "moveEmployeeHistoryCourse");
+const listInstructorBranchEmployeesCallable = httpsCallable(functions, "listInstructorBranchEmployees");
+const getManagedEmployeeProfileCallable = httpsCallable(functions, "getManagedEmployeeProfile");
+const listInstructorBranchHistoriesCallable = httpsCallable(functions, "listInstructorBranchHistories");
 
 export async function createEmployeeAccounts(payload) {
   const result = await createEmployeesCallable(payload);
@@ -156,6 +159,21 @@ export async function replaceEmployeeManualTrainingHistories(payload) {
 
 export async function moveEmployeeHistoryCourse(payload) {
   const result = await moveEmployeeHistoryCourseCallable(payload);
+  return result.data;
+}
+
+export async function listInstructorBranchEmployees() {
+  const result = await listInstructorBranchEmployeesCallable({});
+  return result.data;
+}
+
+export async function getManagedEmployeeProfile(payload) {
+  const result = await getManagedEmployeeProfileCallable(payload);
+  return result.data;
+}
+
+export async function listInstructorBranchHistories() {
+  const result = await listInstructorBranchHistoriesCallable({});
   return result.data;
 }
 

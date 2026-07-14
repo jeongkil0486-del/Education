@@ -26,6 +26,7 @@ import {
   saveEducationCycleConfig,
   replaceEmployeeManualTrainingHistories,
   getEducationCycleConfig,
+  listInstructorBranchHistories,
 } from "../core/admin-api.js";
 import { manualTrainingHistoriesDB, sessionCompletionsDB, educationCycleConfigsDB } from "../core/db.js";
 import { modal } from "../utils/modal.js";
@@ -38,6 +39,7 @@ const PY = CY - 1;
 
 /* ─── 모듈 상태 ─────────────────────────────────────────── */
 let viewState = { company: null, branches: [], employees: [], items: [] };
+let instructorScopedManualHistories = [];
 let pendingHistoryRows   = [];
 let selectedTemplateMeta = null;
 let ledgerRows    = [];
@@ -96,6 +98,7 @@ function getEffectiveCompanyId(trainingMeta = getSelectedTrainingMeta(), branch 
 ═══════════════════════════════════════════════════════ */
 export async function render(container) {
   const isHQAdmin = authStore.role === ROLES.HQ_ADMIN;
+  const isInstructor = authStore.role === ROLES.INSTRUCTOR;
 
   container.innerHTML = `<div style="padding:var(--space-2);text-align:center;color:var(--gray-400);font-size:var(--text-sm)">로딩 중...</div>`;
 
@@ -114,7 +117,7 @@ export async function render(container) {
     <div class="section-header">
       <div>
         <div class="section-title">직원관리대장</div>
-        <div class="section-subtitle">지점과 교육 항목을 선택하여 직원별 교육 현황을 관리합니다.</div>
+        <div class="section-subtitle">${isInstructor ? "담당 지점 직원의 교육 현황을 조회하고 관리합니다." : "지점과 교육 항목을 선택하여 직원별 교육 현황을 관리합니다."}</div>
       </div>
       <div style="display:flex;gap:var(--space-2);flex-wrap:wrap;align-items:center">
         ${isHQAdmin ? `
@@ -251,6 +254,13 @@ export async function render(container) {
   const trainingSel = document.getElementById("ledger-training");
   const searchBtn   = document.getElementById("btn-ledger-search");
 
+  if (isInstructor && branchSel) {
+    const managedBranch = viewState.branches[0];
+    branchSel.value = managedBranch?.id ?? managedBranch?.branchId ?? "";
+    branchSel.disabled = true;
+    branchSel.title = "강사는 담당 지점만 조회할 수 있습니다.";
+  }
+
   const checkBtnState = () => {
     const ok = !!(branchSel?.value && trainingSel?.value);
     if (searchBtn) searchBtn.disabled = !ok;
@@ -324,10 +334,16 @@ async function runLedgerQuery() {
     currentLedgerMeta = { branchId, branchLabel, trainingVal, trainingMeta, cycleMonths, defaultDuration, companyId: effectiveCompanyId };
 
     const branchEmployees = viewState.employees.filter((e) => matchesBranch(e, branchId));
-    const [manualAll, sessionAll] = await Promise.all([
-      manualTrainingHistoriesDB.listAll().catch(() => []),
-      fetchAllSessionCompletions(),
-    ]);
+    const scopedHistories = authStore.role === ROLES.INSTRUCTOR
+      ? await listInstructorBranchHistories()
+      : null;
+    const [manualAll, sessionAll] = scopedHistories
+      ? [scopedHistories.manualHistories ?? [], scopedHistories.sessionHistories ?? []]
+      : await Promise.all([
+        manualTrainingHistoriesDB.listAll().catch(() => []),
+        fetchAllSessionCompletions(),
+      ]);
+    instructorScopedManualHistories = scopedHistories ? manualAll : [];
 
     const allHistories = [...manualAll, ...sessionAll];
     const relevant = filterByTraining(allHistories, trainingMeta);
@@ -910,6 +926,7 @@ function renderLedgerTable() {
   const el = document.getElementById("ledger-table");
   if (!el) return;
   const isHQAdmin = authStore.role === ROLES.HQ_ADMIN;
+  const canManageEmployee = isHQAdmin || authStore.role === ROLES.INSTRUCTOR;
 
   let rows = ledgerRows;
 
@@ -950,7 +967,7 @@ function renderLedgerTable() {
           ${sortableLedgerHeader("initialDate", "초기교육")}${sortableLedgerHeader("lastDate", "최종교육일")}
           ${sortableLedgerHeader("prevDates", `${PY}년`)}${sortableLedgerHeader("currDates", `${CY}년`)}
           ${sortableLedgerHeader("nextDueDate", "다음 예정일")}${sortableLedgerHeader("daysRemaining", "남은 일수")}${sortableLedgerHeader("dueStatus", "상태")}${sortableLedgerHeader("note", "비고")}
-          ${isHQAdmin ? "<th style='width:60px'>관리</th>" : ""}
+          ${canManageEmployee ? "<th style='width:60px'>관리</th>" : ""}
         </tr>
       </thead>
       <tbody>
@@ -978,7 +995,7 @@ function renderLedgerTable() {
             <td style="font-size:var(--text-xs)">${esc(days)}</td>
             <td>${statusCell}</td>
             <td style="font-size:var(--text-xs)">${esc(r.note || "–")}</td>
-            ${isHQAdmin ? `<td style="text-align:right;white-space:nowrap">
+            ${canManageEmployee ? `<td style="text-align:right;white-space:nowrap">
               <button class="btn btn--ghost btn--sm btn-view-card" data-uid="${esc(r.uid)}" style="padding:2px 6px;font-size:var(--text-xs)">이력카드</button>
               <button class="btn btn--ghost btn--sm btn-edit-emp" data-uid="${esc(r.uid)}" style="padding:2px 6px;font-size:var(--text-xs)">수정</button>
             </td>` : ""}
@@ -1019,6 +1036,9 @@ function renderLedgerTable() {
       chk.addEventListener("click", (e) => e.stopPropagation());
     });
 
+  }
+
+  if (canManageEmployee) {
     // 이력카드 버튼
     el.querySelectorAll(".btn-view-card").forEach((btn) => {
       btn.addEventListener("click", (e) => {
@@ -1242,7 +1262,7 @@ async function openResetConfirmModal() {
    교육이력 수정 모달 (수동/Excel 이력만 편집)
 ═══════════════════════════════════════════════════════ */
 async function openEditEmployeeModal(row) {
-  if (authStore.role !== ROLES.HQ_ADMIN || !currentLedgerMeta?.trainingMeta) {
+  if (![ROLES.HQ_ADMIN, ROLES.INSTRUCTOR].includes(authStore.role) || !currentLedgerMeta?.trainingMeta) {
     toast.error("현재 교육 항목의 이력을 수정할 수 없습니다.");
     return;
   }
@@ -1251,7 +1271,9 @@ async function openEditEmployeeModal(row) {
   const trainingLabel = trainingMeta.label ?? trainingMeta.subjectName ?? currentLedgerMeta.trainingVal;
   let manualRecords = [];
   try {
-    const all = await manualTrainingHistoriesDB.listAll();
+    const all = authStore.role === ROLES.INSTRUCTOR
+      ? instructorScopedManualHistories
+      : await manualTrainingHistoriesDB.listAll();
     manualRecords = all.filter((record) =>
       record?.uid === row.uid &&
       ["manual", "manual_excel"].includes(String(record.source ?? "").toLowerCase()) &&

@@ -14,6 +14,7 @@ import {
   usersDB,
   educationCycleConfigsDB,
 } from "../core/db.js";
+import { getManagedEmployeeProfile, listInstructorBranchEmployees } from "../core/admin-api.js";
 
 export const DEADLINE_SOON_DAYS = 3;
 
@@ -220,6 +221,9 @@ export function sortByRecent(items, field = "createdAt") {
 }
 
 export function getAssignedBranchIds(profile = authStore.profile) {
+  const primaryBranchId = String(profile?.branchId ?? "").trim();
+  if (primaryBranchId) return [primaryBranchId];
+
   const value = profile?.assignedBranches;
   if (Array.isArray(value)) {
     return Array.from(new Set(value.map(String).map((id) => id.trim()).filter(Boolean)));
@@ -227,6 +231,7 @@ export function getAssignedBranchIds(profile = authStore.profile) {
   if (value && typeof value === "object") {
     return Object.entries(value).filter(([, enabled]) => !!enabled).map(([id]) => id);
   }
+  if (typeof value === "string" && value.trim()) return [value.trim()];
   return [];
 }
 
@@ -247,6 +252,15 @@ export function canAccessEmployeeHistory(employee, assignedBranchIds = getAssign
 }
 
 async function assertEmployeeHistoryAccess(uid) {
+  if (authStore.role === ROLES.INSTRUCTOR) {
+    const result = await getManagedEmployeeProfile({ uid });
+    if (!result?.employee) {
+      const error = new Error("조회 권한이 없는 직원입니다.");
+      error.code = "permission-denied";
+      throw error;
+    }
+    return result.employee;
+  }
   const employee = await usersDB.get(uid);
   const assignedBranchIds = authStore.role === ROLES.INSTRUCTOR
     ? await getLatestAssignedBranchIds()
@@ -262,6 +276,20 @@ async function assertEmployeeHistoryAccess(uid) {
 }
 
 export async function loadTrainingReferences() {
+  if (authStore.role === ROLES.INSTRUCTOR) {
+    const scope = await listInstructorBranchEmployees();
+    const employees = Array.isArray(scope?.employees) ? scope.employees : [];
+    const branches = Array.isArray(scope?.branches) ? scope.branches : [];
+    return {
+      company: scope?.company ?? { id: authStore.companyId ?? null, name: authStore.profile?.companyName ?? "" },
+      branches: sortByRecent(branches, "createdAt"),
+      users: employees,
+      employees,
+      instructors: [],
+      templates: [],
+    };
+  }
+
   const [branches, allUsers, templates, latestAssignedBranchIds] = await Promise.all([
     branchesDB.listAll(),
     usersDB.listAll(),

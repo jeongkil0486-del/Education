@@ -62,6 +62,13 @@ const NAV_CONFIG = {
       ],
     },
     {
+      group: TEXT.nav.groups.people,
+      items: [
+        { path: "employees", label: TEXT.routes.employees, icon: iconUsers() },
+        { path: "history-cards", label: TEXT.routes.historyCards, icon: iconHistory() },
+      ],
+    },
+    {
       group: TEXT.nav.groups.info,
       items: [
         { path: "announcements", label: TEXT.routes.announcements, icon: iconBell() },

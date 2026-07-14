@@ -64,6 +64,7 @@ const historyCardSortBySection = Object.fromEntries(
 );
 const historyMoveGroups = new Map();
 let activeHistoryMoveId = "";
+const canManageEmployeeHistory = () => [ROLES.HQ_ADMIN, ROLES.INSTRUCTOR].includes(authStore.role);
 
 /* ──────────────────────────────────────────────────────────
    render
@@ -81,7 +82,7 @@ export async function render(container, params = {}) {
           ${authStore.role === ROLES.HQ_ADMIN || authStore.role === ROLES.SUPER_ADMIN ? `
             <button class="btn btn--secondary" id="btn-import-excel">기존 교육이력 가져오기</button>
           ` : ''}
-          ${authStore.role === ROLES.HQ_ADMIN ? '<button class="btn btn--secondary" id="btn-add-manual-history" disabled>개인 이력 추가</button>' : ''}
+          ${canManageEmployeeHistory() ? '<button class="btn btn--secondary" id="btn-add-manual-history" disabled>개인 이력 추가</button>' : ''}
           ${authStore.role === ROLES.HQ_ADMIN ? '<button class="btn btn--danger btn--sm" id="btn-reset-all-history" disabled style="margin-left:auto">개인이력 전체 초기화</button>' : ''}
           <button class="btn btn--primary" id="btn-download-card" disabled>이력카드 다운로드</button>
         </div>
@@ -204,7 +205,7 @@ async function initView(initialUid = "") {
   try {
     const [references, items] = await Promise.all([
       loadTrainingReferences(),
-      authStore.role === ROLES.HQ_ADMIN ? listManagedItems().catch(() => []) : Promise.resolve([]),
+      canManageEmployeeHistory() ? listManagedItems().catch(() => []) : Promise.resolve([]),
     ]);
 
     S.employees = references.employees ?? [];
@@ -217,6 +218,12 @@ async function initView(initialUid = "") {
     if (branchSel) {
       branchSel.innerHTML = `<option value="">전체 지점</option>` +
         S.branches.map((b) => `<option value="${b.id}">${esc(b.name ?? b.code ?? b.id)}</option>`).join("");
+      if (authStore.role === ROLES.INSTRUCTOR) {
+        branchSel.value = S.branches[0]?.id ?? "";
+        branchSel.disabled = true;
+        branchSel.title = "강사는 담당 지점만 조회할 수 있습니다.";
+        S.selectedBranchId = branchSel.value;
+      }
     }
 
     if (initialUid) {
@@ -563,7 +570,7 @@ function renderSections(rows) {
   el.innerHTML = SECTION_ORDER.map((secKey) => {
     const sRows   = sectionMap[secKey] ?? [];
     const groups  = sortCourseGroups(groupRows(sRows), secKey);
-    const isAdmin = authStore.role === ROLES.HQ_ADMIN;
+    const isAdmin = canManageEmployeeHistory();
 
     return `
       <div class="card hc-section-card" data-hc-drop-section="${esc(secKey)}" style="margin-bottom:var(--space-4);transition:outline-color .15s,background-color .15s">
@@ -649,7 +656,7 @@ function renderSections(rows) {
     });
   });
 
-  if (authStore.role === ROLES.HQ_ADMIN) {
+  if (canManageEmployeeHistory()) {
     const clearDropHighlights = () => {
       el.querySelectorAll(".hc-section-card").forEach((card) => {
         card.style.outline = "";
@@ -701,7 +708,7 @@ function renderSections(rows) {
   }
 
   // 수정 버튼
-  if (authStore.role === ROLES.HQ_ADMIN) {
+  if (canManageEmployeeHistory()) {
     el.querySelectorAll(".hc-edit-history").forEach((btn) => {
       btn.addEventListener("click", () => {
         const row = S.rows.find((item) => item._source === "manual" && String(item.historyId) === String(btn.dataset.historyId));
@@ -738,7 +745,7 @@ function renderSections(rows) {
 }
 
 function openMoveCourseModal(moveId, preferredTarget = "") {
-  if (authStore.role !== ROLES.HQ_ADMIN || !S.selectedEmployeeId) return;
+  if (!canManageEmployeeHistory() || !S.selectedEmployeeId) return;
   const group = historyMoveGroups.get(moveId);
   if (!group) {
     toast.error("이동할 과정을 찾을 수 없습니다.");

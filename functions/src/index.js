@@ -546,12 +546,114 @@ exports.deleteManagedAccount = onCall(OPTS, async (request) => {
       : "삭제 완료",
   };
 });
+exports.listInstructorBranchEmployees = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await ensureInstructorProfile(request.auth.uid);
+  const branchIds = resolveInstructorBranchIds(actor);
+  if (!branchIds.length) {
+    throw new HttpsError("failed-precondition", "강사 계정에 담당 지점이 설정되어 있지 않습니다.");
+  }
 
+  const [usersSnap, branchesSnap] = await Promise.all([
+    db.ref("users").get(),
+    db.ref("branches").get(),
+  ]);
+  const branchSet = new Set(branchIds);
+  const employees = [];
+  usersSnap.forEach((child) => {
+    const user = child.val() ?? {};
+    if (user.role !== "employee" || !branchSet.has(normalizeText(user.branchId))) return;
+    if (actor.companyId && user.companyId && actor.companyId !== user.companyId) return;
+    employees.push({ uid: child.key, id: child.key, ...user });
+  });
+  const branches = [];
+  branchesSnap.forEach((child) => {
+    if (!branchSet.has(child.key)) return;
+    const branch = child.val() ?? {};
+    if (actor.companyId && branch.companyId && actor.companyId !== branch.companyId) return;
+    branches.push({ id: child.key, branchId: child.key, ...branch });
+  });
 
+  logger.info("[listInstructorBranchEmployees] scoped result", {
+    actorUid: actor.uid,
+    branchIds,
+    employeeCount: employees.length,
+  });
+  return {
+    company: { id: actor.companyId ?? null, name: actor.companyName ?? "" },
+    branchIds,
+    branches,
+    employees,
+  };
+});
+
+exports.getManagedEmployeeProfile = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const uid = normalizeText(request.data?.uid);
+  if (!uid) throw new HttpsError("invalid-argument", "직원 UID가 필요합니다.");
+  const actor = await ensureEmployeeHistoryActor(request.auth.uid);
+  const employeeSnap = await db.ref(`users/${uid}`).get();
+  if (!employeeSnap.exists() || employeeSnap.val()?.role !== "employee") {
+    throw new HttpsError("not-found", "직원 정보를 찾을 수 없습니다.");
+  }
+  const employee = { uid, id: uid, ...employeeSnap.val() };
+  assertEmployeeHistoryScope(actor, employee);
+  return { employee };
+});
+
+exports.listInstructorBranchHistories = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await ensureInstructorProfile(request.auth.uid);
+  const branchIds = resolveInstructorBranchIds(actor);
+  if (!branchIds.length) {
+    throw new HttpsError("failed-precondition", "강사 계정에 담당 지점이 설정되어 있지 않습니다.");
+  }
+  const branchSet = new Set(branchIds);
+  const usersSnap = await db.ref("users").get();
+  const employeeUids = new Set();
+  usersSnap.forEach((child) => {
+    const user = child.val() ?? {};
+    if (user.role === "employee" && branchSet.has(normalizeText(user.branchId)) &&
+        (!actor.companyId || !user.companyId || actor.companyId === user.companyId)) {
+      employeeUids.add(child.key);
+    }
+  });
+
+  const [manualSnap, sessionSnap] = await Promise.all([
+    db.ref("manualTrainingHistories").get(),
+    db.ref("sessionCompletions").get(),
+  ]);
+  const manualHistories = [];
+  manualSnap.forEach((child) => {
+    const record = child.val() ?? {};
+    if (!employeeUids.has(normalizeText(record.uid))) return;
+    manualHistories.push({ id: child.key, historyId: record.historyId ?? child.key, ...record });
+  });
+  const sessionHistories = [];
+  sessionSnap.forEach((sessionChild) => {
+    sessionChild.forEach((employeeChild) => {
+      if (!employeeUids.has(employeeChild.key)) return;
+      sessionHistories.push({
+        ...employeeChild.val(),
+        uid: employeeChild.val()?.uid ?? employeeChild.key,
+        sessionId: employeeChild.val()?.sessionId ?? sessionChild.key,
+        _source: "session",
+      });
+    });
+  });
+  logger.info("[listInstructorBranchHistories] scoped result", {
+    actorUid: actor.uid,
+    branchIds,
+    employeeCount: employeeUids.size,
+    manualCount: manualHistories.length,
+    sessionCount: sessionHistories.length,
+  });
+  return { branchIds, manualHistories, sessionHistories };
+});
 
 exports.upsertManualTrainingHistory = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
-  const actor = await ensureHQAdminProfile(request.auth.uid);
+  const actor = await ensureEmployeeHistoryManagerProfile(request.auth.uid);
 
   const historyId = normalizeText(request.data?.historyId);
   const uid = normalizeText(request.data?.uid);
@@ -562,7 +664,7 @@ exports.upsertManualTrainingHistory = onCall(OPTS, async (request) => {
     throw new HttpsError("not-found", "직원 정보를 찾을 수 없습니다.");
   }
   const employee = employeeSnap.val();
-  assertSameCompany(actor, employee);
+  assertEmployeeHistoryScope(actor, employee);
 
   const normalized = normalizeManualHistory(request.data, employee, request.auth.uid, actor.name ?? "");
   const targetId = historyId || db.ref("manualTrainingHistories").push().key;
@@ -743,7 +845,7 @@ exports.bulkImportManualTrainingHistories = onCall(OPTS, async (request) => {
 
 exports.replaceEmployeeManualTrainingHistories = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
-  const actor = await ensureHQAdminProfile(request.auth.uid);
+  const actor = await ensureEmployeeHistoryManagerProfile(request.auth.uid);
   const payload = request.data ?? {};
   const uid = normalizeText(payload.uid);
   const trainingType = normalizeTrainingTypeValue(payload.trainingType);
@@ -759,7 +861,7 @@ exports.replaceEmployeeManualTrainingHistories = onCall(OPTS, async (request) =>
     throw new HttpsError("not-found", "직원 정보를 찾을 수 없습니다.");
   }
   const employee = employeeSnap.val();
-  assertSameCompany(actor, employee);
+  assertEmployeeHistoryScope(actor, employee);
 
   const normalizeDates = (values, expectedYear, label) => Array.from(new Set(
     (Array.isArray(values) ? values : []).map((value) => {
@@ -853,7 +955,7 @@ exports.replaceEmployeeManualTrainingHistories = onCall(OPTS, async (request) =>
 
 exports.deleteEmployeeHistory = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
-  await ensureHQAdmin(request.auth.uid);
+  const actor = await ensureEmployeeHistoryManagerProfile(request.auth.uid);
 
   const uid = normalizeText(request.data?.uid);
   const source = normalizeText(request.data?.source);
@@ -864,6 +966,12 @@ exports.deleteEmployeeHistory = onCall(OPTS, async (request) => {
   if (!uid || !["session", "legacy", "manual"].includes(source)) {
     throw new HttpsError("invalid-argument", "삭제할 교육이력 정보가 올바르지 않습니다.");
   }
+
+  const employeeSnap = await db.ref(`users/${uid}`).get();
+  if (!employeeSnap.exists() || employeeSnap.val()?.role !== "employee") {
+    throw new HttpsError("not-found", "직원 정보를 찾을 수 없습니다.");
+  }
+  assertEmployeeHistoryScope(actor, employeeSnap.val());
 
   const updates = {};
   if (source === "session") {
@@ -907,7 +1015,7 @@ function historyMoveCourseKey(trainingType, courseName) {
 
 exports.moveEmployeeHistoryCourse = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
-  const actor = await ensureHQAdminProfile(request.auth.uid);
+  const actor = await ensureEmployeeHistoryManagerProfile(request.auth.uid);
   const uid = normalizeText(request.data?.uid);
   const sourceSection = normalizeText(request.data?.sourceSection);
   const targetSection = normalizeText(request.data?.targetSection);
@@ -928,7 +1036,7 @@ exports.moveEmployeeHistoryCourse = onCall(OPTS, async (request) => {
   if (!employeeSnap.exists() || employeeSnap.val()?.role !== "employee") {
     throw new HttpsError("not-found", "직원 정보를 찾을 수 없습니다.");
   }
-  assertSameCompany(actor, employeeSnap.val());
+  assertEmployeeHistoryScope(actor, employeeSnap.val());
 
   const uniqueRecords = [];
   const seen = new Set();
@@ -1012,7 +1120,7 @@ exports.moveEmployeeHistoryCourse = onCall(OPTS, async (request) => {
 
 exports.updateEmployeeManagementProfile = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
-  const actor = await ensureHQAdminProfile(request.auth.uid);
+  const actor = await ensureEmployeeHistoryManagerProfile(request.auth.uid);
 
   const uid = normalizeText(request.data?.uid || request.data?.employeeUid || request.data?.targetUid);
   if (!uid) {
@@ -1028,7 +1136,7 @@ exports.updateEmployeeManagementProfile = onCall(OPTS, async (request) => {
   if (employee.role !== "employee") {
     throw new HttpsError("failed-precondition", "직원 계정만 처리할 수 있습니다.");
   }
-  assertSameCompany(actor, employee);
+  assertEmployeeHistoryScope(actor, employee);
 
   const source = request.data?.profile && typeof request.data.profile === "object"
     ? request.data.profile
@@ -1037,6 +1145,9 @@ exports.updateEmployeeManagementProfile = onCall(OPTS, async (request) => {
       : request.data ?? {};
 
   const updates = buildEmployeeManagementUpdates(source);
+  if (actor.role === "instructor" && updates.branchId && normalizeText(updates.branchId) !== normalizeText(employee.branchId)) {
+    throw new HttpsError("permission-denied", "강사는 직원을 다른 지점으로 이동할 수 없습니다.");
+  }
   if (!Object.keys(updates).length) {
     throw new HttpsError("invalid-argument", "업데이트할 관리 프로필 필드가 없습니다.");
   }
@@ -1367,6 +1478,62 @@ async function ensureHQAdminProfile(uid) {
     throw new HttpsError("permission-denied", "본사 교육관리자만 개인 교육이력을 관리할 수 있습니다.");
   }
   return { uid, ...snap.val() };
+}
+
+function resolveInstructorBranchIds(profile) {
+  const primary = normalizeText(profile?.branchId);
+  if (primary) return [primary];
+  const assigned = profile?.assignedBranches;
+  if (Array.isArray(assigned)) {
+    return Array.from(new Set(assigned.map(normalizeText).filter(Boolean)));
+  }
+  if (assigned && typeof assigned === "object") {
+    return Object.entries(assigned)
+      .filter(([, enabled]) => !!enabled)
+      .map(([branchId]) => normalizeText(branchId))
+      .filter(Boolean);
+  }
+  const assignedString = normalizeText(assigned);
+  return assignedString ? [assignedString] : [];
+}
+
+async function getUserProfile(uid) {
+  const snap = await db.ref(`users/${uid}`).get();
+  return snap.exists() ? { uid, ...snap.val() } : null;
+}
+
+async function ensureInstructorProfile(uid) {
+  const actor = await getUserProfile(uid);
+  if (!actor || actor.role !== "instructor") {
+    throw new HttpsError("permission-denied", "강사만 담당 지점 직원 목록을 조회할 수 있습니다.");
+  }
+  return actor;
+}
+
+async function ensureEmployeeHistoryActor(uid) {
+  const actor = await getUserProfile(uid);
+  if (!actor || !["hq_admin", "instructor", "super_admin"].includes(actor.role)) {
+    throw new HttpsError("permission-denied", "직원 교육이력을 조회할 권한이 없습니다.");
+  }
+  return actor;
+}
+
+async function ensureEmployeeHistoryManagerProfile(uid) {
+  const actor = await getUserProfile(uid);
+  if (!actor || !["hq_admin", "instructor"].includes(actor.role)) {
+    throw new HttpsError("permission-denied", "직원 교육이력을 관리할 권한이 없습니다.");
+  }
+  return actor;
+}
+
+function assertEmployeeHistoryScope(actor, employee) {
+  assertSameCompany(actor, employee);
+  if (actor?.role !== "instructor") return;
+  const branchIds = resolveInstructorBranchIds(actor);
+  const employeeBranchId = normalizeText(employee?.branchId);
+  if (!employeeBranchId || !branchIds.includes(employeeBranchId)) {
+    throw new HttpsError("permission-denied", "담당 지점 밖의 직원은 조회하거나 수정할 수 없습니다.");
+  }
 }
 
 function assertSameCompany(actor, employee) {
