@@ -332,17 +332,12 @@ async function runLedgerQuery() {
     const allHistories = [...manualAll, ...sessionAll];
     const relevant = filterByTraining(allHistories, trainingMeta);
     const selectedTrainingKey = canonicalLedgerMetaKey(trainingMeta);
-    const relevantEmployeeUids = new Set(relevant.map(historyEmployeeUid).filter(Boolean));
-    const instructorEmployeeUids = new Set(
-      allHistories
-        .filter((history) => canonicalLedgerRecordKey(history) === LEDGER_JOB_INSTRUCTOR_KEY)
-        .map(historyEmployeeUid)
-        .filter(Boolean)
-    );
+    const instructorHistories = allHistories
+      .filter((history) => canonicalLedgerRecordKey(history) === LEDGER_JOB_INSTRUCTOR_KEY);
     const ledgerEmployees = selectedTrainingKey === LEDGER_JOB_INSTRUCTOR_KEY
-      ? branchEmployees.filter((employee) => relevantEmployeeUids.has(String(employee.id ?? employee.uid ?? "")))
+      ? branchEmployees.filter((employee) => relevant.some((history) => historyBelongsToEmployee(history, employee)))
       : selectedTrainingKey === LEDGER_JOB_DUTY_KEY
-        ? branchEmployees.filter((employee) => !instructorEmployeeUids.has(String(employee.id ?? employee.uid ?? "")))
+        ? branchEmployees.filter((employee) => !instructorHistories.some((history) => historyBelongsToEmployee(history, employee)))
         : branchEmployees;
     ledgerRows = aggregateLedger(ledgerEmployees, relevant, trainingMeta, cycleMonths);
     logLedgerMatchDiagnostics({
@@ -403,7 +398,61 @@ function normalizeLedgerTrainingKey(value) {
 }
 
 function historyEmployeeUid(record) {
-  return String(record?.uid ?? record?.employeeUid ?? record?.userId ?? "").trim();
+  return String(
+    record?.employeeUid
+    ?? record?.uid
+    ?? record?.userId
+    ?? record?.employeeId
+    ?? record?.staffUid
+    ?? ""
+  ).trim();
+}
+
+function normalizedEmployeeNumber(record) {
+  return normalizeLedgerTrainingKey(record?.empNo ?? record?.employeeNo ?? "");
+}
+
+function resolveEmployeeIdentityKeys(employee) {
+  const keys = new Set();
+  for (const value of [
+    employee?.id,
+    employee?.uid,
+    employee?.employeeUid,
+    employee?.userId,
+    employee?.employeeId,
+    employee?.staffUid,
+  ]) {
+    const uid = String(value ?? "").trim();
+    if (uid) keys.add(`uid:${uid}`);
+  }
+  const empNo = normalizedEmployeeNumber(employee);
+  if (empNo) keys.add(`emp:${empNo}`);
+  return keys;
+}
+
+function resolveHistoryEmployeeIdentity(row) {
+  const keys = new Set();
+  for (const value of [
+    row?.employeeUid,
+    row?.uid,
+    row?.userId,
+    row?.employeeId,
+    row?.staffUid,
+  ]) {
+    const uid = String(value ?? "").trim();
+    if (uid) keys.add(`uid:${uid}`);
+  }
+  const empNo = normalizedEmployeeNumber(row);
+  if (empNo) keys.add(`emp:${empNo}`);
+  return keys;
+}
+
+function historyBelongsToEmployee(row, employee) {
+  const historyKeys = resolveHistoryEmployeeIdentity(row);
+  for (const key of resolveEmployeeIdentityKeys(employee)) {
+    if (historyKeys.has(key)) return true;
+  }
+  return false;
 }
 
 function ledgerHistoryNote(record) {
@@ -419,22 +468,24 @@ function ledgerHistoryNote(record) {
 
 function canonicalLedgerKey(value) {
   const raw = normalizeLedgerTrainingKey(value);
-  if (["jobinstructor", "사내강사", "사내강사양성과정", "instructortraining"].includes(raw)) {
+  if (["jobinstructor", "사내강사", "사내강사양성과정", "instructortraining"].includes(raw)
+    || (raw.includes("사내강사") && (raw.includes("양성교육") || raw.includes("양성과정")))) {
     return LEDGER_JOB_INSTRUCTOR_KEY;
   }
   if ([
     "jobduty", "jobinitial", "jobrecurrent", "jobrecurring",
     "직무", "직무교육", "직무초기교육", "직무보수교육",
   ].includes(raw)) return LEDGER_JOB_DUTY_KEY;
-  if (["jobwb", "wb", "weightbalance", "탑재관리"].includes(raw)) return "job_wb";
+  if (["jobwb", "wb", "weightbalance", "탑재관리"].includes(raw) || raw.includes("탑재관리")) return "job_wb";
   if ([
     "joboperations", "flightoperations", "운항관리", "운항담당",
     "운항관리사", "운항통제", "flightdispatch",
-  ].includes(raw)) return "job_operations";
+  ].includes(raw) || raw.includes("운항담당자")) return "job_operations";
   if (["legalsms", "sms", "sms교육", "safetymanagementsystem", "안전관리시스템", "안전관리시스템교육"].includes(raw)) {
     return "legal_sms";
   }
-  if (["legalsecurity", "항공보안", "항공보안교육", "aviationsecurity", "보안교육"].includes(raw)) {
+  if (["legalsecurity", "항공보안", "항공보안교육", "aviationsecurity", "보안교육"].includes(raw)
+    || raw.includes("항공보안") || raw.includes("aviationsecurity")) {
     return "legal_security";
   }
   if ([
@@ -510,25 +561,23 @@ function logLedgerMatchDiagnostics({
   cycleConfigLookupKeys,
   resolvedCycleConfig,
 }) {
-  const matchedCounts = new Map();
-  for (const history of relevant) {
-    const uid = historyEmployeeUid(history);
-    if (uid) matchedCounts.set(uid, (matchedCounts.get(uid) ?? 0) + 1);
-  }
   const perEmployeeMatchedCount = branchEmployees
     .map((employee) => {
       const uid = String(employee.id ?? employee.uid ?? "");
-      return { uid, name: employee.name ?? "", matchedCount: matchedCounts.get(uid) ?? 0 };
+      const matchedCount = relevant.filter((history) => historyBelongsToEmployee(history, employee)).length;
+      return { uid, empNo: employee.empNo ?? employee.employeeNo ?? "", name: employee.name ?? "", matchedCount };
     })
     .sort((a, b) => b.matchedCount - a.matchedCount)
     .slice(0, 10);
 
   const diagnosticKeys = [
     LEDGER_JOB_DUTY_KEY,
+    LEDGER_JOB_INSTRUCTOR_KEY,
     "job_wb",
     "job_operations",
     "legal_sms",
     "legal_security",
+    "legal_dangerous_goods",
   ];
   const options = buildTrainingOptions(viewState.items);
   const keySamples = Object.fromEntries(diagnosticKeys.map((key) => {
@@ -540,6 +589,10 @@ function logLedgerMatchDiagnostics({
       matchedKeys: [...new Set(matches.slice(0, 5).flatMap((history) => [...ledgerRecordKeys(history)]))],
     }];
   }));
+  const rowsWithHistory = (ledgerRows ?? []).filter((row) => row.hasHistory);
+  const recurrentRows = rowsWithHistory.filter((row) => row._dueCompletedDate);
+  const cycleConfiguredRows = recurrentRows.filter((row) => row.cycleMonths > 0);
+  const failedDueRows = cycleConfiguredRows.filter((row) => !row.nextDueDate);
 
   console.info("[employees] ledger match diagnostics", {
     selectedTrainingItem: trainingMeta,
@@ -571,6 +624,26 @@ function logLedgerMatchDiagnostics({
     })),
     perEmployeeMatchedCount,
     finalRenderedCount: ledgerEmployees.length,
+    aggregateCounts: {
+      employees: ledgerEmployees.length,
+      matchedHistoryZero: ledgerEmployees.length - rowsWithHistory.length,
+      initialOnly: rowsWithHistory.filter((row) => row._dueReason === "initial_only").length,
+      recurrent: recurrentRows.length,
+      cycleConfigFound: cycleConfiguredRows.length,
+      nextDueDateCalculated: cycleConfiguredRows.filter((row) => row.nextDueDate).length,
+      recurrentWithConfigButNoDue: failedDueRows.length,
+    },
+    recurrentWithConfigButNoDue: failedDueRows.map((row) => ({
+      name: row.name,
+      empNo: row.empNo,
+      uid: row.uid,
+      canonicalKey: selectedTrainingKey,
+      matchedRows: relevant.filter((history) => historyBelongsToEmployee(history, row._emp)).length,
+      latestRecurrentDate: row._dueCompletedDate,
+      latestHistoryStage: ledgerRecordStage(row._latestHistory),
+      cycleMonths: row.cycleMonths,
+      reason: row._dueReason,
+    })),
     cycleConfigLookupKeys,
     resolvedCycleConfig: resolvedCycleConfig ? {
       cycleMonths: resolvedCycleConfig.cycleMonths ?? 0,
@@ -588,6 +661,7 @@ function logLedgerMatchDiagnostics({
       remainingDays: row.daysRemaining,
       status: row.dueStatusLabel,
       note: row.note,
+      reason: row._dueReason,
     })),
     keySamples,
   });
@@ -597,6 +671,7 @@ function ledgerRecordStage(record) {
   const values = [
     record?.stage,
     record?.trainingStage,
+    record?.type,
     record?.subType,
     record?.educationStage,
     record?.courseStage,
@@ -607,7 +682,7 @@ function ledgerRecordStage(record) {
   ].map((value) => normalizeLedgerTrainingKey(value)).filter(Boolean);
 
   const recurrentValues = new Set([
-    "recurrent", "recurring", "refresher", "retraining",
+    "recurrent", "recurring", "regular", "renewal", "refresher", "retraining", "recurrenttraining",
     "보수", "보수교육", "정기", "정기교육", "갱신", "갱신교육", "재교육",
   ]);
   if (values.some((value) => recurrentValues.has(value) || /^year\d{4}$/.test(value))) {
@@ -630,27 +705,30 @@ function isRecurrentRec(record) {
 }
 
 function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths = 0) {
-  const byUid = new Map();
-  for (const h of histories) {
-    const uid = historyEmployeeUid(h); if (!uid) continue;
-    if (!byUid.has(uid)) byUid.set(uid, []);
-    byUid.get(uid).push(h);
-  }
-
   return employees.map((emp) => {
     const uid  = String(emp.id ?? emp.uid ?? "").trim();
-    const recs = byUid.get(uid) ?? [];
+    const recs = histories.filter((history) => historyBelongsToEmployee(history, emp));
 
     const toYmd = (v) => {
       if (!v) return null;
       if (v instanceof Date) return isNaN(v.getTime()) ? null : formatDateYMD(v.getTime());
-      const n = Number(v);
+      if (typeof v === "object") {
+        const seconds = Number(v?.seconds ?? v?._seconds);
+        if (Number.isFinite(seconds)) return formatDateYMD(seconds * 1000);
+      }
+      const raw = String(v).trim();
+      if (!raw) return null;
+      const n = Number(raw);
       if (Number.isFinite(n) && n > 1e11) return formatDateYMD(n);
+      if (Number.isFinite(n) && n >= 1e9 && n <= 1e11) return formatDateYMD(n * 1000);
       if (Number.isFinite(n) && n >= 60 && n <= 2958465) {
         const d = new Date(Math.round((n - 25569) * 86400 * 1000));
         return isNaN(d.getTime()) ? null : formatDateYMD(d.getTime());
       }
-      const d = new Date(String(v));
+      const normalizedDate = /^\d{4}[./]\d{1,2}[./]\d{1,2}$/.test(raw)
+        ? raw.replace(/[.]/g, "-").replace(/\//g, "-")
+        : raw;
+      const d = new Date(normalizedDate);
       return isNaN(d.getTime()) ? null : formatDateYMD(d.getTime());
     };
 
@@ -727,8 +805,10 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
     // 명시 stage가 없는 legacy 데이터는 서로 다른 날짜가 2개 이상일 때 최신 회차를
     // 보수로 간주한다. 보수 이후 잘못 저장된 초기 레코드가 있어도 기준일을 덮지 않는다.
     const recurrentEntries = datedRecords.filter((entry) => isRecurrentRec(entry.record));
+    const latestDatedEntry = datedRecords.at(-1) ?? null;
+    const latestDatedStage = ledgerRecordStage(latestDatedEntry?.record);
     const latestRecurrentEntry = recurrentEntries.at(-1)
-      ?? (uniqueDates.length > 1 ? datedRecords.at(-1) : null);
+      ?? (!latestDatedStage && uniqueDates.length > 1 ? latestDatedEntry : null);
     const dueCompletedDate = latestRecurrentEntry?.date ?? null;
     const initialOnly = Boolean(lastDate && !dueCompletedDate);
     const dueRow = dueCompletedDate ? applyDueMetadata([{
@@ -738,21 +818,21 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
     }])[0] : null;
 
     // daysRemaining 기반 직접 상태 결정
-    let dueStatus, dueStatusLabel, daysRemaining, nextDueDate;
+    let dueStatus, dueStatusLabel, daysRemaining, nextDueDate, dueReason;
     if (!lastDate) {
-      dueStatus = "none"; dueStatusLabel = "미이수"; daysRemaining = null; nextDueDate = null;
+      dueStatus = "none"; dueStatusLabel = "미이수"; daysRemaining = null; nextDueDate = null; dueReason = "no_valid_date";
     } else if (initialOnly) {
-      dueStatus = "not_applicable"; dueStatusLabel = "-"; daysRemaining = null; nextDueDate = null;
+      dueStatus = "not_applicable"; dueStatusLabel = "-"; daysRemaining = null; nextDueDate = null; dueReason = "initial_only";
     } else if (!effectiveCycle) {
-      dueStatus = "unconfigured"; dueStatusLabel = "주기 미설정"; daysRemaining = null; nextDueDate = null;
+      dueStatus = "unconfigured"; dueStatusLabel = "주기 미설정"; daysRemaining = null; nextDueDate = null; dueReason = "cycle_missing";
     } else {
       daysRemaining = dueRow?.daysRemaining ?? null;
       nextDueDate   = dueRow?.nextDueDate   ?? null;
-      if (daysRemaining === null)       { dueStatus = "unconfigured"; dueStatusLabel = "주기 미설정"; }
-      else if (daysRemaining < 0)       { dueStatus = "overdue";      dueStatusLabel = "기한 초과"; }
-      else if (daysRemaining <= 7)      { dueStatus = "soon7";        dueStatusLabel = "7일 이내"; }
-      else if (daysRemaining <= 30)     { dueStatus = "soon30";       dueStatusLabel = "30일 이내"; }
-      else                              { dueStatus = "normal";        dueStatusLabel = "정상"; }
+      if (daysRemaining === null)       { dueStatus = "unconfigured"; dueStatusLabel = "주기 미설정"; dueReason = "calculation_failed"; }
+      else if (daysRemaining < 0)       { dueStatus = "overdue";      dueStatusLabel = "기한 초과"; dueReason = "calculated"; }
+      else if (daysRemaining <= 7)      { dueStatus = "soon7";        dueStatusLabel = "7일 이내"; dueReason = "calculated"; }
+      else if (daysRemaining <= 30)     { dueStatus = "soon30";       dueStatusLabel = "30일 이내"; dueReason = "calculated"; }
+      else                              { dueStatus = "normal";        dueStatusLabel = "정상"; dueReason = "calculated"; }
     }
 
     return {
@@ -763,6 +843,7 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
       dueStatus, dueStatusLabel, daysRemaining, nextDueDate,
       _latestHistory: latestRecurrentEntry?.record ?? lastRec,
       _dueCompletedDate: dueCompletedDate,
+      _dueReason: dueReason,
       // 수정 모달용 원본 필드
       _emp: emp,
     };
