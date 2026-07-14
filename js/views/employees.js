@@ -327,8 +327,22 @@ async function runLedgerQuery() {
       fetchAllSessionCompletions(),
     ]);
 
-    const relevant = filterByTraining([...manualAll, ...sessionAll], trainingMeta);
-    ledgerRows = aggregateLedger(branchEmployees, relevant, trainingMeta, cycleMonths);
+    const allHistories = [...manualAll, ...sessionAll];
+    const relevant = filterByTraining(allHistories, trainingMeta);
+    const selectedTrainingKey = canonicalLedgerMetaKey(trainingMeta);
+    const relevantEmployeeUids = new Set(relevant.map(historyEmployeeUid).filter(Boolean));
+    const instructorEmployeeUids = new Set(
+      allHistories
+        .filter((history) => canonicalLedgerRecordKey(history) === LEDGER_JOB_INSTRUCTOR_KEY)
+        .map(historyEmployeeUid)
+        .filter(Boolean)
+    );
+    const ledgerEmployees = selectedTrainingKey === LEDGER_JOB_INSTRUCTOR_KEY
+      ? branchEmployees.filter((employee) => relevantEmployeeUids.has(String(employee.id ?? employee.uid ?? "")))
+      : selectedTrainingKey === LEDGER_JOB_DUTY_KEY
+        ? branchEmployees.filter((employee) => !instructorEmployeeUids.has(String(employee.id ?? employee.uid ?? "")))
+        : branchEmployees;
+    ledgerRows = aggregateLedger(ledgerEmployees, relevant, trainingMeta, cycleMonths);
 
     document.getElementById("ledger-title").textContent = `${branchLabel} · ${trainingLabel}`;
     document.getElementById("ledger-subtitle").textContent = `기준연도: ${CY}년${cycleMonths ? ` · 재교육 주기: ${cycleMonths}개월` : " · 재교육 주기: 미설정"}`;
@@ -368,37 +382,65 @@ async function fetchAllSessionCompletions() {
   } catch { return []; }
 }
 
+const LEDGER_JOB_INSTRUCTOR_KEY = "job_instructor";
+const LEDGER_JOB_DUTY_KEY = "job_duty";
+
+function normalizeLedgerTrainingKey(value) {
+  return String(value ?? "").normalize("NFKC").toLowerCase().replace(/[^a-z0-9가-힣]+/g, "");
+}
+
+function historyEmployeeUid(record) {
+  return String(record?.uid ?? record?.employeeUid ?? record?.userId ?? "").trim();
+}
+
+function ledgerHistoryNote(record) {
+  return record?.note ?? record?.memo ?? record?.remark ?? record?.remarks ?? record?.["비고"] ?? "";
+}
+
+function canonicalLedgerRecordKey(record) {
+  const type = normalizeTrainingType(record?.trainingType);
+  const noteKey = normalizeLedgerTrainingKey(ledgerHistoryNote(record));
+  if (type === "job" && noteKey === "직무사내강사") return LEDGER_JOB_INSTRUCTOR_KEY;
+
+  const raw = normalizeLedgerTrainingKey(
+    record?.canonicalCourseKey || record?.subjectCode || record?.canonicalCourseName ||
+    record?.courseName || record?.title || record?.subjectName
+  );
+  if (["jobinstructor", "사내강사", "사내강사양성과정", "instructortraining"].includes(raw)) {
+    return LEDGER_JOB_INSTRUCTOR_KEY;
+  }
+  if (["jobduty", "직무", "직무교육"].includes(raw)) return LEDGER_JOB_DUTY_KEY;
+  return raw;
+}
+
+function canonicalLedgerMetaKey(meta) {
+  const raw = normalizeLedgerTrainingKey(meta?.subjectCode || meta?.normalizedKey || meta?.subjectName);
+  if (["jobinstructor", "사내강사", "사내강사양성과정", "instructortraining"].includes(raw)) {
+    return LEDGER_JOB_INSTRUCTOR_KEY;
+  }
+  if (["jobduty", "직무", "직무교육"].includes(raw)) return LEDGER_JOB_DUTY_KEY;
+  return raw;
+}
+
 function filterByTraining(histories, meta) {
   if (!meta) return [];
-  const normalizeKey = (value) => String(value ?? "").normalize("NFKC").toLowerCase().replace(/[^a-z0-9가-힣]+/g, "");
-  const instructorKey = "job_instructor";
-  const noteValue = (record) => record?.note ?? record?.memo ?? record?.remark ?? record?.remarks ?? record?.["비고"] ?? "";
-  const canonicalRecordKey = (record) => {
-    const type = normalizeTrainingType(record?.trainingType);
-    const noteKey = normalizeKey(noteValue(record));
-    if (type === "job" && noteKey === "직무사내강사") return instructorKey;
-    const raw = normalizeKey(record?.canonicalCourseKey || record?.subjectCode || record?.canonicalCourseName || record?.courseName || record?.title || record?.subjectName);
-    if (["jobinstructor", "사내강사", "사내강사양성과정", "instructortraining"].includes(raw)) return instructorKey;
-    return raw;
-  };
-  const canonicalMetaKey = () => {
-    const raw = normalizeKey(meta.subjectCode || meta.subjectName);
-    return ["jobinstructor", "사내강사", "사내강사양성과정", "instructortraining"].includes(raw)
-      ? instructorKey
-      : raw;
-  };
-  const selectedKey = canonicalMetaKey();
-  return histories.filter((h) => {
-    if (!h) return false;
-    const ht = normalizeTrainingType(h.trainingType);
-    if (ht !== meta.trainingType) return false;
-    const recordKey = canonicalRecordKey(h);
-    // 사내강사 선택은 canonical instructor만 허용하며, instructor는 다른 직무 항목에서 항상 제외한다.
-    if (selectedKey === instructorKey) return recordKey === instructorKey;
-    if (recordKey === instructorKey) return false;
-    if (meta.itemId && h.itemId) return h.itemId === meta.itemId;
-    if (meta.subjectCode && h.subjectCode === meta.subjectCode) return true;
-    if (meta.subjectName && (h.subjectName === meta.subjectName || h.title === meta.subjectName || h.courseName === meta.subjectName)) return true;
+  const selectedKey = canonicalLedgerMetaKey(meta);
+  return histories.filter((history) => {
+    if (!history) return false;
+    const historyType = normalizeTrainingType(history.trainingType);
+    if (historyType !== meta.trainingType) return false;
+
+    const recordKey = canonicalLedgerRecordKey(history);
+    if (selectedKey === LEDGER_JOB_INSTRUCTOR_KEY) return recordKey === LEDGER_JOB_INSTRUCTOR_KEY;
+    if (recordKey === LEDGER_JOB_INSTRUCTOR_KEY) return false;
+    if (selectedKey === LEDGER_JOB_DUTY_KEY) return recordKey === LEDGER_JOB_DUTY_KEY;
+    if (meta.itemId && history.itemId) return history.itemId === meta.itemId;
+    if (meta.subjectCode && history.subjectCode === meta.subjectCode) return true;
+    if (meta.subjectName && (
+      history.subjectName === meta.subjectName ||
+      history.title === meta.subjectName ||
+      history.courseName === meta.subjectName
+    )) return true;
     return false;
   });
 }
@@ -416,7 +458,7 @@ function isInitialRec(h) {
 function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths = 0) {
   const byUid = new Map();
   for (const h of histories) {
-    const uid = h.uid; if (!uid) continue;
+    const uid = historyEmployeeUid(h); if (!uid) continue;
     if (!byUid.has(uid)) byUid.set(uid, []);
     byUid.get(uid).push(h);
   }

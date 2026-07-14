@@ -51,6 +51,9 @@ const STANDARD_SUBJECT_ALIASES = {
   job: {
     직무: { code: "job_duty", name: "직무" },
     직무교육: { code: "job_duty", name: "직무" },
+    사내강사: { code: "job_instructor", name: "사내강사" },
+    사내강사양성과정: { code: "job_instructor", name: "사내강사" },
+    instructortraining: { code: "job_instructor", name: "사내강사" },
   },
   legal: {
     sms: { code: "legal_sms", name: "SMS" },
