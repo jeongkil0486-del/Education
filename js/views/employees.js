@@ -308,8 +308,10 @@ async function runLedgerQuery() {
     // 재교육 주기 설정 조회
     let cycleMonths = 0;
     let defaultDuration = 0;
+    let resolvedCycleConfig = null;
     try {
       const config = await loadEducationCycleConfig(effectiveCompanyId, trainingMeta);
+      resolvedCycleConfig = config;
       cycleMonths = Number(config?.cycleMonths ?? 0) || 0;
       defaultDuration = Number(config?.defaultDuration ?? 0) || 0;
       // trainingItem 자체 cycleMonths도 폴백
@@ -351,6 +353,8 @@ async function runLedgerQuery() {
       branchEmployees,
       ledgerEmployees,
       ledgerRows,
+      cycleConfigLookupKeys: educationCycleLookupKeys(trainingMeta),
+      resolvedCycleConfig,
     });
 
     document.getElementById("ledger-title").textContent = `${branchLabel} · ${trainingLabel}`;
@@ -451,7 +455,18 @@ function canonicalLedgerRecordKey(record) {
   if (type === "job" && noteKey === "직무사내강사") return LEDGER_JOB_INSTRUCTOR_KEY;
 
   const keys = ledgerRecordKeys(record);
-  if (keys.has(LEDGER_JOB_INSTRUCTOR_KEY)) return LEDGER_JOB_INSTRUCTOR_KEY;
+  const knownKeys = [
+    LEDGER_JOB_INSTRUCTOR_KEY,
+    LEDGER_JOB_DUTY_KEY,
+    "job_wb",
+    "job_operations",
+    "legal_sms",
+    "legal_security",
+    "legal_dangerous_goods",
+  ];
+  for (const key of knownKeys) {
+    if (keys.has(key)) return key;
+  }
   return keys.values().next().value ?? "";
 }
 
@@ -462,17 +477,18 @@ function canonicalLedgerMetaKey(meta) {
 function filterByTraining(histories, meta) {
   if (!meta) return [];
   const selectedKey = canonicalLedgerMetaKey(meta);
-  const selectedType = normalizeTrainingType(meta.trainingType);
   return histories.filter((history) => {
     if (!history) return false;
-    const historyType = normalizeTrainingType(history.trainingType);
-    if (historyType !== selectedType) return false;
-
     const recordKey = canonicalLedgerRecordKey(history);
     if (selectedKey === LEDGER_JOB_INSTRUCTOR_KEY) return recordKey === LEDGER_JOB_INSTRUCTOR_KEY;
     if (recordKey === LEDGER_JOB_INSTRUCTOR_KEY) return false;
-    if (meta.itemId && history.itemId && history.itemId === meta.itemId) return true;
-    return ledgerRecordKeys(history).has(selectedKey);
+    const recordKeys = ledgerRecordKeys(history);
+
+    // Canonical aliases are the primary identity. Historical rows may have a stale
+    // trainingType or a different itemId even though they represent the same item.
+    if (recordKey === selectedKey || recordKeys.has(selectedKey)) return true;
+    if (meta.itemId && history.itemId && String(history.itemId) === String(meta.itemId)) return true;
+    return false;
   });
 }
 
@@ -484,6 +500,8 @@ function logLedgerMatchDiagnostics({
   branchEmployees,
   ledgerEmployees,
   ledgerRows,
+  cycleConfigLookupKeys,
+  resolvedCycleConfig,
 }) {
   const matchedCounts = new Map();
   for (const history of relevant) {
@@ -538,10 +556,21 @@ function logLedgerMatchDiagnostics({
     })),
     perEmployeeMatchedCount,
     finalRenderedCount: ledgerEmployees.length,
+    cycleConfigLookupKeys,
+    resolvedCycleConfig: resolvedCycleConfig ? {
+      cycleMonths: resolvedCycleConfig.cycleMonths ?? 0,
+      defaultDuration: resolvedCycleConfig.defaultDuration ?? 0,
+    } : null,
     displayedYearValues: (ledgerRows ?? []).filter((row) => row.hasHistory).slice(0, 10).map((row) => ({
       employeeUid: row.uid,
       empNo: row.empNo,
       computedYearValues: { [PY]: row.prevDates, [CY]: row.currDates },
+      computedInitialDate: row.initialDate,
+      computedLatestDate: row.lastDate,
+      nextDueDate: row.nextDueDate,
+      remainingDays: row.daysRemaining,
+      status: row.dueStatusLabel,
+      note: row.note,
     })),
     keySamples,
   });
@@ -566,7 +595,7 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
   }
 
   return employees.map((emp) => {
-    const uid  = emp.id ?? emp.uid;
+    const uid  = String(emp.id ?? emp.uid ?? "").trim();
     const recs = byUid.get(uid) ?? [];
 
     const toYmd = (v) => {
@@ -585,11 +614,6 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
     // 입사일: 다중 필드 폴백
     const rawHire = emp.hireDate ?? emp.joinDate ?? emp.joinedAt ?? emp.employmentDate ?? emp.enteredAt ?? null;
     const joinDate = toYmd(rawHire) ?? "–";
-
-    // 초기교육: isInitialRec 판별 + 가장 이른 날짜
-    const initialRecs  = recs.filter(isInitialRec);
-    const initialDates = initialRecs.map((r) => toYmd(r.completedAt)).filter(Boolean).sort();
-    const initialDate  = initialDates[0] ?? null;
 
     const explicitRecordEducationYear = (record) => {
       const explicit = Number(record?.educationYear);
@@ -614,6 +638,20 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
       return ymd ? Number(ymd.slice(0, 4)) : null;
     };
 
+    const datedRecords = recs
+      .map((record, originalIndex) => ({ record, originalIndex, date: recordDate(record) }))
+      .filter((entry) => entry.date)
+      .sort((a, b) => a.date.localeCompare(b.date) || a.originalIndex - b.originalIndex);
+    const uniqueDates = [...new Set(datedRecords.map((entry) => entry.date))];
+
+    // Explicit initial rows take precedence. When legacy rows have no stage, the
+    // earliest dated occurrence of the selected canonical item is the initial one.
+    const explicitInitialDates = datedRecords
+      .filter((entry) => isInitialRec(entry.record))
+      .map((entry) => entry.date);
+    const initialDate = explicitInitialDates[0] ?? uniqueDates[0] ?? null;
+    const lastDate = uniqueDates.at(-1) ?? null;
+
     const datesForYear = (year) => [...new Set(recs.filter((record) => {
       const explicitYear = explicitRecordEducationYear(record);
       // 관리대장 연도 열에서 입력된 회차는 서버의 초기/보수 재분류보다 우선한다.
@@ -628,17 +666,18 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
     // 금년도
     const currDates = datesForYear(CY);
 
-    // 최종교육일은 실제 입력된 날짜 중 가장 최신값이다. 초기교육의 월/일로 보정하지 않는다.
-    const allDates    = recs.map((r) => toYmd(r.completedAt)).filter(Boolean).sort();
-    const rawLastDate = allDates.length ? allDates[allDates.length - 1] : null;
-    const lastDate    = rawLastDate;
-
     // 비고 및 cycleMonths
-    const lastRec = [...recs].sort((a, b) => Number(b.completedAt ?? 0) - Number(a.completedAt ?? 0))[0];
-    const note    = lastRec?.note ?? "";
+    const lastRec = datedRecords.at(-1)?.record ?? recs.at(-1) ?? null;
+    const noteRec = [...datedRecords].reverse().find((entry) => String(ledgerHistoryNote(entry.record)).trim())?.record
+      ?? [...recs].reverse().find((record) => String(ledgerHistoryNote(record)).trim())
+      ?? lastRec;
+    const note    = ledgerHistoryNote(noteRec);
     // 회사 공통 교육항목 설정을 최우선 적용하고 기존 값은 안전한 fallback으로 유지
     const itemCycle = (() => { if (!trainingMeta?.itemId) return 0; const it = viewState.items.find((i) => i.id === trainingMeta.itemId); return Number(it?.cycleMonths ?? 0) || 0; })();
-    const effectiveCycle = globalCycleMonths || itemCycle || Number(lastRec?.cycleMonths ?? 0) || 0;
+    const historyCycle = [...datedRecords].reverse()
+      .map((entry) => Number(entry.record?.cycleMonths ?? 0) || 0)
+      .find(Boolean) ?? 0;
+    const effectiveCycle = globalCycleMonths || itemCycle || historyCycle || Number(lastRec?.cycleMonths ?? 0) || 0;
 
     // applyDueMetadata 적용
     const initialOnly = Boolean(initialDate && lastDate && initialDate === lastDate);
@@ -1334,21 +1373,45 @@ function rawEducationCycleSubjectKey(value) {
 
 function normalizeEducationCycleSubjectKey(value) {
   const normalized = rawEducationCycleSubjectKey(value);
+  const canonical = canonicalLedgerKey(normalized);
+  if ([
+    LEDGER_JOB_DUTY_KEY,
+    LEDGER_JOB_INSTRUCTOR_KEY,
+    "job_wb",
+    "job_operations",
+    "legal_sms",
+    "legal_security",
+    "legal_dangerous_goods",
+  ].includes(canonical)) return canonical;
   if (["job_wb", "w_b", "wb", "weight_balance", "탑재관리"].includes(normalized)) return "job_wb";
   if (["job_operations", "flight_operations", "운항관리", "운항담당"].includes(normalized)) return "job_operations";
   return normalized;
 }
 
+function educationCycleLookupKeys(meta) {
+  const typeKey = String(meta?.trainingType ?? "other").trim().toLowerCase() || "other";
+  const canonicalSubjectKey = normalizeEducationCycleSubjectKey(meta?.subjectCode || meta?.normalizedKey || meta?.subjectName);
+  const keys = [`${typeKey}__${canonicalSubjectKey || "default"}`];
+  const legacySubjects = {
+    job_duty: ["직무", "직무교육", "job_initial", "job_recurrent"],
+    job_instructor: ["사내강사", "직무사내강사"],
+    job_wb: ["w_b", "wb", "weight_balance", "탑재관리"],
+    job_operations: ["flight_operations", "운항관리", "운항담당"],
+    legal_sms: ["sms", "sms_교육", "safety_management_system"],
+    legal_security: ["항공보안", "aviation_security"],
+    legal_dangerous_goods: ["위험물", "위험물_규정", "dg", "dgr"],
+  };
+  for (const subject of (legacySubjects[canonicalSubjectKey] ?? [])) {
+    keys.push(`${typeKey}__${rawEducationCycleSubjectKey(subject)}`);
+  }
+  const rawSubject = rawEducationCycleSubjectKey(meta?.subjectCode || meta?.normalizedKey || meta?.subjectName);
+  if (rawSubject) keys.push(`${typeKey}__${rawSubject}`);
+  return [...new Set(keys)];
+}
+
 async function loadEducationCycleConfig(companyId, meta) {
   if (!companyId) return null;
-  const primaryKey = buildEducationKey(meta);
-  const keys = [primaryKey];
-  if (primaryKey === "job__job_duty") keys.push("job__직무교육");
-  if (primaryKey === "job__job_wb") keys.push("job__w_b", "job__wb", "job__탑재관리");
-  if (primaryKey === "job__job_operations") keys.push("job__flight_operations", "job__운항관리", "job__운항담당");
-  const rawKey = `${String(meta?.trainingType ?? "other").trim().toLowerCase() || "other"}__${rawEducationCycleSubjectKey(meta?.subjectCode || meta?.subjectName) || "default"}`;
-  if (!keys.includes(rawKey)) keys.push(rawKey);
-  for (const key of keys) {
+  for (const key of educationCycleLookupKeys(meta)) {
     const config = await educationCycleConfigsDB.get(companyId, key);
     if (config) return config;
   }
