@@ -423,6 +423,36 @@ function detectParser(sheet) {
 // § 4.  MAPPER
 // ═══════════════════════════════════════════════════════════════════
 
+export function normalizeEntryTypeValue(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return { value: "", reason: "값 없음" };
+  const normalized = raw.normalize("NFKC");
+  if (/^신입$/i.test(normalized)) return { value: "신입", reason: "단일 텍스트 신입 감지" };
+  if (/^경력$/i.test(normalized)) return { value: "경력", reason: "단일 텍스트 경력 감지" };
+  const markerPattern = /(?:O|○|●|✓|✔|V|Y|YES|■)/i;
+  const checked = (label) => {
+    const start = normalized.search(new RegExp(label, "i"));
+    if (start < 0) return false;
+    const other = label === "신입" ? "경력" : "신입";
+    const tail = normalized.slice(start + label.length);
+    const otherIndex = tail.search(new RegExp(other, "i"));
+    const segment = (otherIndex >= 0 ? tail.slice(0, otherIndex) : tail).trim();
+    const bracket = segment.match(/^[\s/:·,]*(?:\(|\[|【)\s*([^\)\]】]*)\s*(?:\)|\]|】)/);
+    if (bracket) {
+      const mark = bracket[1].trim();
+      return markerPattern.test(mark) || mark === "0";
+    }
+    return /^[\s/:·,]*(?:□\s*)?(?:O|○|●|✓|✔|V|Y|YES|■)(?=\s|\/|·|,|$)/i.test(segment);
+  };
+  const newcomer = checked("신입");
+  const experienced = checked("경력");
+  if (newcomer !== experienced) {
+    const result = newcomer ? "신입" : "경력";
+    return { value: result, reason: `${result} 항목의 인접 체크 표시 감지` };
+  }
+  return { value: "", reason: newcomer && experienced ? "양쪽 모두 체크되어 미탐지" : "체크 표시가 없거나 모호하여 미탐지" };
+}
+
 /** 직원 정보 탐지 */
 function detectEmpInfo(sheet, headerRow) {
   const info = {
@@ -490,6 +520,12 @@ function detectEmpInfo(sheet, headerRow) {
         if (field === "name") normalized = normName(raw);
         else if (field === "empNo") normalized = normEmpNo(raw);
         else if (field === "birthDate" || field === "hireDate") normalized = normDate(cand);
+        const entryTypeResult = field === "entryType" ? normalizeEntryTypeValue(raw) : null;
+        if (entryTypeResult) normalized = entryTypeResult.value;
+        if (entryTypeResult && !normalized) {
+          info.diagnostics.push({ field, label: String(v).trim(), labelCell: cellRef(r, c), valueCell: cellRef(location.row, location.col), rawValue: raw, normalizedValue: "미탐지", reason: entryTypeResult.reason });
+          break;
+        }
         if (!normalized) continue;
         info.diagnostics.push({
           field,
@@ -498,6 +534,7 @@ function detectEmpInfo(sheet, headerRow) {
           valueCell: cellRef(location.row, location.col),
           rawValue: raw,
           normalizedValue: normalized,
+          reason: entryTypeResult?.reason ?? "",
         });
         if (field === "internalLicense" || field === "externalLicense") {
           if (!qualifications[field].includes(String(normalized))) qualifications[field].push(String(normalized));

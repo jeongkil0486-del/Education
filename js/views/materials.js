@@ -25,6 +25,7 @@ import {
   formatFileSize,
   validateFile,
   listMaterials,
+  requestMaterialDownloadUrl,
   deleteMaterial,
   uploadMaterial,
 } from "../services/material-service.js";
@@ -207,13 +208,8 @@ function renderTable(container) {
             <td style="white-space:nowrap">${fmtDate(m.createdAt)}</td>
             <td class="cell--actions">
               <div style="display:flex;gap:4px;justify-content:flex-end;align-items:center">
-                ${m.url
-                  ? `<a class="btn btn--ghost btn--sm"
-                        href="${esc(m.url)}"
-                        download="${esc(m.fileName || "download.pdf")}"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        title="다운로드">
+                ${m.url || m.r2Key
+                  ? `<button class="btn btn--ghost btn--sm btn-mat-download" data-id="${esc(m.id)}" title="다운로드">
                        <svg width="14" height="14" viewBox="0 0 14 14" fill="none"
                             style="margin-right:3px;vertical-align:middle">
                          <path d="M7 2v7M4 6l3 3 3-3"
@@ -224,7 +220,7 @@ function renderTable(container) {
                                stroke-linecap="round"/>
                        </svg>
                        다운로드
-                     </a>`
+                     </button>`
                   : `<span style="font-size:var(--text-xs);color:var(--gray-300)">
                        파일 미등록
                      </span>`
@@ -246,6 +242,26 @@ function renderTable(container) {
     btn.addEventListener("click", () =>
       confirmDelete(btn.dataset.id, btn.dataset.title, container)
     );
+  });
+  wrap.querySelectorAll(".btn-mat-download").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        const url = await requestMaterialDownloadUrl(btn.dataset.id);
+        const link = document.createElement("a");
+        link.href = url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      } catch (err) {
+        console.error("[materials] download failed", err);
+        toast.error(err?.message || "교육자료를 다운로드하지 못했습니다.");
+      } finally {
+        btn.disabled = false;
+      }
+    });
   });
 }
 

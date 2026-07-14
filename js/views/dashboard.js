@@ -18,6 +18,7 @@ import { listAnnouncements } from "../core/admin-api.js";
 
 export async function render(container) {
   const role = authStore.role;
+  container.innerHTML = skeletonAdminDashboard();
 
   if (role === ROLES.SUPER_ADMIN) {
     await renderSuperAdminDashboard(container);  // DB 카운트 포함
@@ -200,7 +201,7 @@ function announcementReadBy(item, uid) {
 function announcementDashboardItem(item) {
   return `<button type="button" data-dashboard-action="announcements" class="announcement-item ${isImportantAnnouncement(item) ? "announcement-item--important" : ""}" style="border:0;text-align:left;cursor:pointer;width:100%">
     <div class="announcement-item__title">${esc(item.title ?? "공지사항")}</div>
-    <div class="announcement-item__meta">${isImportantAnnouncement(item) ? "중요 · " : ""}${formatDate(item.publishedAt ?? item.createdAt)}</div>
+    <div class="announcement-item__meta">${isImportantAnnouncement(item) ? "중요 · " : ""}${esc(item.authorName ?? item.createdByName ?? "-")} · ${formatDate(item.publishedAt ?? item.createdAt)}</div>
   </button>`;
 }
 
@@ -266,7 +267,16 @@ function openDeadlineDashboardModal(initialKind) {
    — 먼저 "–"로 즉시 렌더링, 이후 DB 카운트 비동기 반영
 ═══════════════════════════════════════════════════════════ */
 async function renderSuperAdminDashboard(container) {
-  // 즉시 구조 렌더링 (카드는 "–" 상태)
+  const [companies, branches, users] = await Promise.all([
+    safeLoad(() => companiesDB.list(), []),
+    safeLoad(() => branchesDB.listAll(), []),
+    safeLoad(() => usersDB.listAll(), []),
+  ]);
+  const managedUsers = users.filter((user) => user?.active !== false && user?.role !== "super_admin");
+  const employeeUsers = managedUsers.filter((user) => user?.role === "employee");
+  const hqAdmins = managedUsers.filter((user) => user?.role === "hq_admin");
+  const instructors = managedUsers.filter((user) => user?.role === "instructor");
+
   container.innerHTML = `
     <div class="section-header">
       <div>
@@ -342,21 +352,7 @@ async function renderSuperAdminDashboard(container) {
 
   configureSuperAdminDashboard(container);
 
-  // DB 카운트 비동기 반영 — Permission denied여도 화면 안 죽음
-  const [companies, branches, users] = await Promise.all([
-    safeLoad(() => companiesDB.list(),   []),
-    safeLoad(() => branchesDB.listAll(), []),
-    safeLoad(() => usersDB.listAll(),    []),
-  ]);
-
   void companies;
-  const managedUsers = users.filter(
-    (user) => user?.active !== false && user?.role !== "super_admin"
-  );
-  const employeeUsers = managedUsers.filter(user => user?.role === "employee");
-  const hqAdmins = managedUsers.filter(user => user?.role === "hq_admin");
-  const instructors = managedUsers.filter(user => user?.role === "instructor");
-
   setStatValue("sc-users", managedUsers.length);
   setStatValue("sc-employees", employeeUsers.length);
   setStatValue("sc-hq-admins", hqAdmins.length);
@@ -691,7 +687,7 @@ function announcementItem(a) {
     <div class="announcement-item ${a.important ? "announcement-item--important" : ""}">
       <div class="announcement-item__title">${esc(a.title ?? "")}</div>
       <div class="announcement-item__body">${esc(a.content ?? "")}</div>
-      <div class="announcement-item__meta">${formatDate(a.createdAt)}</div>
+      <div class="announcement-item__meta">${esc(a.authorName ?? a.createdByName ?? "-")} · ${formatDate(a.createdAt)}</div>
     </div>
   `;
 }
@@ -723,24 +719,9 @@ function employeeTrainingCard(t, completed) {
 /* ── Skeleton ────────────────────────────────────────────── */
 function skeletonAdminDashboard() {
   return `
-    <div style="display:flex;flex-direction:column;gap:var(--space-6)">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <div style="display:flex;flex-direction:column;gap:8px">
-          <div class="skeleton" style="height:24px;width:180px;border-radius:4px"></div>
-          <div class="skeleton" style="height:16px;width:240px;border-radius:4px"></div>
-        </div>
-        <div class="skeleton" style="width:100px;height:36px;border-radius:8px"></div>
-      </div>
-      <div class="dashboard-grid">
-        ${Array(4).fill(`<div class="skeleton" style="height:110px;border-radius:12px"></div>`).join("")}
-      </div>
-      <div class="dashboard-main">
-        <div class="skeleton" style="height:260px;border-radius:12px"></div>
-        <div style="display:flex;flex-direction:column;gap:var(--space-4)">
-          <div class="skeleton" style="height:120px;border-radius:12px"></div>
-          <div class="skeleton" style="height:120px;border-radius:12px"></div>
-        </div>
-      </div>
+    <div role="status" aria-live="polite" style="min-height:360px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--space-3);background:var(--white);border-radius:var(--radius-lg)">
+      <div class="splash__spinner" style="border-color:var(--gray-200);border-top-color:var(--brand-400)"></div>
+      <div style="font-size:var(--text-sm);color:var(--gray-500)">데이터를 불러오는 중입니다.</div>
     </div>
   `;
 }

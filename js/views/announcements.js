@@ -55,7 +55,7 @@ function announcementCard(item) {
   return `<article style="border:1px solid var(--gray-200);border-radius:var(--radius-lg);padding:var(--space-4)">
     <div style="display:flex;justify-content:space-between;gap:var(--space-3);align-items:flex-start">
       <div><div style="font-weight:var(--weight-semibold);color:var(--gray-900)">${item.important ? '<span style="color:var(--red-600)">중요 · </span>' : ""}${esc(item.title)}</div>
-      <div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:4px">${esc(item.status ?? "published")} · ${esc(period)}</div></div>
+      <div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:4px">작성자 ${esc(item.authorName ?? item.createdByName ?? "-")} · ${esc(period)}</div></div>
       ${canWrite() ? `<div style="display:flex;gap:var(--space-2)"><button class="btn btn--ghost btn--sm" data-announcement-edit="${esc(item.id)}">수정</button><button class="btn btn--danger btn--sm" data-announcement-delete="${esc(item.id)}">삭제</button></div>` : ""}
     </div>
     <div style="white-space:pre-wrap;margin-top:var(--space-3);font-size:var(--text-sm);line-height:1.6">${esc(item.content)}</div>

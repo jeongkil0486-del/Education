@@ -80,10 +80,10 @@ export async function render(container, params = {}) {
         </div>
         <div style="display:flex;gap:var(--space-2);flex-wrap:wrap">
           ${canImportEmployeeHistory() ? `
-            <button class="btn btn--secondary" id="btn-import-excel" ${authStore.role === ROLES.INSTRUCTOR ? "hidden disabled" : ""}>교육 이력 업로드</button>
+            <button class="btn btn--secondary" id="btn-import-excel">교육 이력 업로드</button>
           ` : ''}
           ${canManageEmployeeHistory() ? '<button class="btn btn--secondary" id="btn-add-manual-history" disabled>개인 이력 추가</button>' : ''}
-          ${authStore.role === ROLES.HQ_ADMIN ? '<button class="btn btn--danger" id="btn-reset-all-history" disabled>개인이력 초기화</button>' : ''}
+          ${canManageEmployeeHistory() ? '<button class="btn btn--danger" id="btn-reset-all-history" disabled>개인이력 초기화</button>' : ''}
           <button class="btn btn--primary" id="btn-download-card" disabled>다운로드</button>
         </div>
       </div>
@@ -137,9 +137,6 @@ export async function render(container, params = {}) {
           <span id="hc-selected-label" style="font-weight:var(--weight-semibold);color:var(--brand-700,#1d4ed8)"></span>
           <button class="btn btn--ghost btn--sm" id="btn-deselect" style="color:var(--gray-500)">✕ 선택 해제</button>
         </div>
-
-        <!-- 요약 카드 (웹 전용) -->
-        <div class="hc-summary-grid" id="hc-summary"></div>
 
         <!-- 인적사항 -->
         <div class="card" style="margin-bottom:var(--space-4)">
@@ -339,7 +336,6 @@ async function loadCard(uid) {
       bannerLabel.textContent = `${employee?.name ?? "–"} (${employee?.empNo ?? "–"}) · ${employee?.branchName ?? "–"} · ${employee?.position ?? "–"}`;
     }
 
-    renderSummary(employee, filteredRows());
     renderProfile(employee);
     renderSections(filteredRows());
 
@@ -382,38 +378,6 @@ function filteredRows() {
 /* ──────────────────────────────────────────────────────────
    요약 카드 렌더링 (웹 전용)
 ────────────────────────────────────────────────────────── */
-function renderSummary(emp, rows) {
-  const el  = document.getElementById("hc-summary");
-  if (!el) return;
-
-  const now           = Date.now();
-  const totalCount    = rows.length;
-  const completedCnt  = rows.filter((r) => r.completionStatus === "completed").length;
-  const inProgressCnt = rows.filter((r) => r.completionStatus !== "completed" && (!r.deadline || r.deadline >= now)).length;
-  const failCnt       = rows.filter((r) => r.completionStatus !== "completed" && r.deadline && r.deadline < now).length;
-  const lastDate      = rows.filter((r) => r.completedAt).sort((a, b) => b.completedAt - a.completedAt)[0]?.completedAt ?? null;
-  const activeDueRows = rows.filter((r) => r.dueStatus && r.dueStatus !== "history");
-  const nextDate = activeDueRows.filter((r) => r.nextDueDate).sort((a, b) => a.nextDueDate - b.nextDueDate)[0]?.nextDueDate ?? null;
-  const dueSoonCnt = activeDueRows.filter((r) => r.dueStatus === "soon").length;
-  const overdueCnt = activeDueRows.filter((r) => r.dueStatus === "overdue").length;
-
-  el.innerHTML = [
-    { label: "총 교육 과정 수",  value: new Set(rows.map((r) => groupKey(r))).size, isDate: false },
-    { label: "총 이력 건수",     value: totalCount,                                  isDate: false },
-    { label: "수료 건수",        value: completedCnt,                               isDate: false },
-    { label: "진행중",           value: inProgressCnt,                              isDate: false },
-    { label: "미수료",          value: failCnt,                             isDate: false },
-    { label: "최근 교육일",     value: lastDate ? formatDate(lastDate) : "–", isDate: true },
-    { label: "다음 교육 예정일", value: nextDate ? formatDate(nextDate) : "–", isDate: true },
-    { label: "30일 이내",       value: dueSoonCnt,                         isDate: false },
-    { label: "기한 초과",       value: overdueCnt,                         isDate: false },
-  ].map(({ label, value, isDate }) => `
-    <div class="stat-card">
-      <div class="stat-card__label">${esc(label)}</div>
-      <div class="stat-card__value" style="${isDate ? "font-size:var(--text-base);font-weight:var(--weight-semibold)" : ""}">${esc(String(value))}</div>
-    </div>`).join("");
-}
-
 /* ──────────────────────────────────────────────────────────
    인적사항 렌더링
 ────────────────────────────────────────────────────────── */
@@ -1470,7 +1434,7 @@ function renderProfileImportPreview(profile = {}, employee = null) {
     });
   const diagnostics = Array.isArray(profile.diagnostics) ? profile.diagnostics : [];
   const diagnosticHtml = diagnostics.length ? `<details style="margin-top:var(--space-2)"><summary style="cursor:pointer">탐지 진단 ${diagnostics.length}건</summary><div style="display:grid;gap:3px;margin-top:6px">${diagnostics.map((row) =>
-    `<div>${esc(row.label)} (${esc(row.labelCell)} → ${esc(row.valueCell)}): ${esc(row.rawValue)} → ${esc(String(row.normalizedValue))} [${esc(row.field)}]</div>`
+    `<div>${esc(row.label)} (${esc(row.labelCell)} → ${esc(row.valueCell)}): 원본값 ${esc(row.rawValue)} → 판정 ${esc(String(row.normalizedValue))}${row.reason ? ` (${esc(row.reason)})` : ""} [${esc(row.field)}]</div>`
   ).join("")}</div></details>` : "";
   return `<div style="margin-bottom:var(--space-3);padding:var(--space-3);background:var(--gray-50);border-radius:var(--radius-md);font-size:var(--text-xs);display:grid;gap:4px">
     <strong>인적사항 탐지 및 변경 미리보기</strong>${changes.join("")}${diagnosticHtml}

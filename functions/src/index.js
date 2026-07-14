@@ -88,6 +88,29 @@ function hasPdfExtension(fileName) {
   return String(fileName || "").trim().toLowerCase().endsWith(ALLOWED_MATERIAL_EXT);
 }
 
+function materialVisibleToActor(material, actor) {
+  if (actor.role === "super_admin") return true;
+  if (actor.companyId && material.companyId && normalizeText(actor.companyId) !== normalizeText(material.companyId)) return false;
+  if (actor.role === "hq_admin") return true;
+  if (actor.role !== "instructor") return false;
+  const uid = normalizeText(actor.uid);
+  if ([material.uploadedBy, material.ownerUid, material.instructorUid, material.assignedInstructorUid].map(normalizeText).includes(uid)) return true;
+  const assigned = [material.assignedInstructorUids, material.instructorUids]
+    .flatMap((value) => Array.isArray(value) ? value : value && typeof value === "object" ? Object.keys(value).filter((key) => value[key]) : [])
+    .map(normalizeText);
+  if (assigned.includes(uid)) return true;
+  const allowedRoles = Array.isArray(material.allowedRoles)
+    ? material.allowedRoles.map(normalizeText)
+    : material.allowedRoles && typeof material.allowedRoles === "object"
+      ? Object.keys(material.allowedRoles).filter((key) => material.allowedRoles[key]).map(normalizeText)
+      : [];
+  if (allowedRoles.includes("instructor")) return true;
+  const visibility = normalizeText(material.visibility).toLowerCase();
+  if (["private", "owner", "assigned"].includes(visibility)) return false;
+  // 기존 자료에는 visibility가 없으므로 같은 회사 자료는 기존 공용 정책으로 허용한다.
+  return !visibility || ["public", "company", "common", "instructor", "instructors"].includes(visibility);
+}
+
 exports.createMaterialUploadUrl = onCall(R2_OPTS, async (request) => {
   ensureAuthenticated(request);
 
@@ -172,7 +195,7 @@ exports.getMaterialDownloadUrl = onCall(R2_OPTS, async (request) => {
     throw new HttpsError("permission-denied", "사용자 프로필을 찾을 수 없습니다.");
   }
 
-  const profile = profileSnap.val();
+  const profile = { uid: request.auth.uid, ...profileSnap.val() };
   if (!["super_admin", "hq_admin", "instructor"].includes(profile.role)) {
     throw new HttpsError("permission-denied", "교육자료 다운로드 권한이 없습니다.");
   }
@@ -183,13 +206,12 @@ exports.getMaterialDownloadUrl = onCall(R2_OPTS, async (request) => {
   }
 
   const material = materialSnap.val();
-  if (
-    profile.role !== "super_admin" &&
-    profile.companyId &&
-    material.companyId &&
-    profile.companyId !== material.companyId
-  ) {
-    throw new HttpsError("permission-denied", "다른 회사의 교육자료에는 접근할 수 없습니다.");
+  if (profile.role !== "super_admin" && !profile.companyId) profile.companyId = await resolveActorCompanyId(profile);
+  if (profile.role !== "super_admin" && !profile.companyId) {
+    throw new HttpsError("failed-precondition", "교육자료의 회사 범위를 결정할 수 없습니다.");
+  }
+  if (!materialVisibleToActor(material, profile)) {
+    throw new HttpsError("permission-denied", "조회 권한이 없는 교육자료입니다.");
   }
 
   if (!material.r2Key) {
@@ -224,6 +246,26 @@ exports.getMaterialDownloadUrl = onCall(R2_OPTS, async (request) => {
     });
     throw new HttpsError("internal", `download presigned URL 생성 실패: ${err?.message || "알 수 없는 오류"}`);
   }
+});
+
+exports.listMaterials = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await getUserProfile(request.auth.uid);
+  if (!actor || !["super_admin", "hq_admin", "instructor"].includes(actor.role)) {
+    throw new HttpsError("permission-denied", "교육자료를 조회할 권한이 없습니다.");
+  }
+  if (actor.role !== "super_admin" && !actor.companyId) actor.companyId = await resolveActorCompanyId(actor);
+  if (actor.role !== "super_admin" && !actor.companyId) {
+    throw new HttpsError("failed-precondition", "교육자료의 회사 범위를 결정할 수 없습니다.");
+  }
+  const snap = await db.ref("materials").get();
+  const materials = [];
+  snap.forEach((child) => {
+    const material = child.val() ?? {};
+    if (materialVisibleToActor(material, actor)) materials.push({ id: child.key, ...material });
+  });
+  materials.sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0));
+  return { materials };
 });
 
 exports.createEmployeeAccounts = onCall(OPTS, async (request) => {
@@ -711,7 +753,7 @@ exports.upsertManualTrainingHistory = onCall(OPTS, async (request) => {
 
 exports.bulkImportManualTrainingHistories = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
-  const actor = await ensureHQAdminProfile(request.auth.uid);
+  const actor = await ensureEmployeeHistoryManagerProfile(request.auth.uid);
   const rows = Array.isArray(request.data?.rows) ? request.data.rows : [];
   if (!rows.length) throw new HttpsError("invalid-argument", "업로드할 교육이력이 없습니다.");
   if (rows.length > 2000) throw new HttpsError("invalid-argument", "한 번에 최대 2000건까지 업로드할 수 있습니다.");
@@ -723,7 +765,10 @@ exports.bulkImportManualTrainingHistories = onCall(OPTS, async (request) => {
   const users = usersSnap.val() ?? {};
   const employeeByEmpNo = new Map();
   Object.entries(users).forEach(([uid, user]) => {
-    if (user?.role === "employee") employeeByEmpNo.set(normalizeEmpNo(user.empNo).toLowerCase(), { uid, ...user });
+    if (user?.role !== "employee") return;
+    const key = normalizeEmpNo(user.empNo).toLowerCase();
+    if (!employeeByEmpNo.has(key)) employeeByEmpNo.set(key, []);
+    employeeByEmpNo.get(key).push({ uid, ...user });
   });
   const existingByKey = new Map();
   for (const [id, item] of Object.entries(existingSnap.val() ?? {})) {
@@ -744,10 +789,14 @@ exports.bulkImportManualTrainingHistories = onCall(OPTS, async (request) => {
   for (let index = 0; index < rows.length; index += 1) {
     const sourceRow = rows[index] ?? {};
     const empNo = normalizeEmpNo(sourceRow.empNo).toLowerCase();
-    const employee = employeeByEmpNo.get(empNo);
     try {
-      if (!empNo || !employee) throw new Error("등록된 사번을 찾을 수 없습니다.");
-      assertSameCompany(actor, employee);
+      const candidates = employeeByEmpNo.get(empNo) ?? [];
+      const employee = candidates.find((candidate) => {
+        try { assertEmployeeHistoryScope(actor, candidate); return true; } catch { return false; }
+      });
+      if (!empNo || !employee) {
+        throw new Error(actor.role === "instructor" ? "담당 지점에 등록된 사번을 찾을 수 없습니다." : "등록된 사번을 찾을 수 없습니다.");
+      }
       affectedUids.add(employee.uid);
       const inputName = normalizeText(sourceRow.employeeName || sourceRow.name);
       if (inputName && inputName !== normalizeText(employee.name)) throw new Error("사번과 이름이 일치하지 않습니다.");
@@ -831,7 +880,15 @@ exports.bulkImportManualTrainingHistories = onCall(OPTS, async (request) => {
 
   if (Object.keys(updates).length) await db.ref().update(updates);
   await reconcileManualHistoryClassifications(affectedUids);
-  logger.info("[bulkImportManualTrainingHistories] savedYearValues", { yearValueTrace });
+  logger.info("[bulkImportManualTrainingHistories] completed", {
+    actorUid: request.auth.uid,
+    actorRole: actor.role,
+    actorBranchIds: actor.role === "instructor" ? resolveInstructorBranchIds(actor) : [],
+    succeededCount: succeeded.length,
+    skippedCount: skipped.length,
+    failedCount: failed.length,
+    yearValueTrace,
+  });
   return {
     succeededCount: succeeded.length,
     skippedCount: skipped.length,
@@ -840,6 +897,8 @@ exports.bulkImportManualTrainingHistories = onCall(OPTS, async (request) => {
     skipped,
     failed,
     savedYearValues: yearValueTrace,
+    actorRole: actor.role,
+    actorBranchIds: actor.role === "instructor" ? resolveInstructorBranchIds(actor) : [],
   };
 });
 
@@ -1203,7 +1262,7 @@ exports.updateEmployeeManagementProfile = onCall(OPTS, async (request) => {
 
 exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
-  const actor = await ensureHQAdminProfile(request.auth.uid);
+  const actor = await ensureEmployeeHistoryManagerProfile(request.auth.uid);
 
   const historyIds = normalizeStringArray(request.data?.historyIds ?? request.data?.selectedHistoryIds);
   const singleHistoryId = normalizeText(request.data?.historyId);
@@ -1278,7 +1337,9 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
       const record = snap.val();
       const employeeSnap = await db.ref(`users/${record.uid}`).get();
       if (employeeSnap.exists()) {
-        assertSameCompany(actor, { uid: record.uid, ...employeeSnap.val() });
+        assertEmployeeHistoryScope(actor, { uid: record.uid, ...employeeSnap.val() });
+      } else if (actor.role === "instructor") {
+        throw new HttpsError("permission-denied", "담당 지점을 확인할 수 없는 이력은 초기화할 수 없습니다.");
       } else if (actor.companyId && record.companyId && actor.companyId !== record.companyId) {
         throw new HttpsError("permission-denied", "다른 회사 이력은 초기화할 수 없습니다.");
       }
@@ -1305,7 +1366,7 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
       if (!employeeSnap.exists()) continue;
 
       const employee = { uid: targetUid, ...employeeSnap.val() };
-      assertSameCompany(actor, employee);
+      assertEmployeeHistoryScope(actor, employee);
 
       const records = { ...(userHistorySnaps[index].val() ?? {}) };
       // user 미러에 없는 루트 레코드도 uid 기준으로 함께 검사한다.
@@ -1336,6 +1397,15 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
   if (Object.keys(updates).length) {
     await db.ref().update(updates);
   }
+  logger.info("[resetSelectedManualTrainingHistories] completed", {
+    actorUid: request.auth.uid,
+    actorName: actor.name ?? "",
+    actorRole: actor.role,
+    actorBranchIds: actor.role === "instructor" ? resolveInstructorBranchIds(actor) : [],
+    targetUids,
+    deletedCount: uniqueDeletedHistoryIds.length,
+    deletedPathsCount: Object.keys(updates).length,
+  });
 
   const deletedSourceCounts = { manual: 0, manual_excel: 0, history_excel: 0 };
   for (const historyId of uniqueDeletedHistoryIds) {
@@ -1397,6 +1467,9 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
     deletedPaths: Object.keys(updates),
     deletedHistoryIds: uniqueDeletedHistoryIds,
     deletedByUid,
+    actorUid: request.auth.uid,
+    actorRole: actor.role,
+    actorBranchIds: actor.role === "instructor" ? resolveInstructorBranchIds(actor) : [],
     message: uniqueDeletedHistoryIds.length
       ? `${uniqueDeletedHistoryIds.length}건의 개인 교육이력을 초기화했습니다.`
       : "초기화할 개인 교육이력이 없습니다.",
@@ -1626,7 +1699,8 @@ exports.listAnnouncements = onCall(OPTS, async (request) => {
     throw new HttpsError("failed-precondition", "공지사항의 회사 범위를 결정할 수 없습니다.");
   }
   const actorBranches = new Set(resolveInstructorBranchIds(actor).concat(normalizeText(actor.branchId)).filter(Boolean));
-  const snap = await db.ref("announcements").get();
+  const [snap, usersSnap] = await Promise.all([db.ref("announcements").get(), db.ref("users").get()]);
+  const users = usersSnap.val() ?? {};
   const announcements = [];
   snap.forEach((child) => {
     const record = child.val() ?? {};
@@ -1636,7 +1710,9 @@ exports.listAnnouncements = onCall(OPTS, async (request) => {
       const targets = announcementBranchIds(record);
       if (targets.length && !targets.some((branchId) => actorBranches.has(branchId))) return;
     }
-    announcements.push({ id: child.key, ...record });
+    const authorUid = normalizeText(record.authorUid || record.createdByUid || record.createdBy);
+    const authorName = normalizeText(record.authorName || record.createdByName || users[authorUid]?.name || record.publisherName);
+    announcements.push({ id: child.key, ...record, authorUid, authorName: authorName || "-" });
   });
   announcements.sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0));
   return { announcements };
@@ -1689,6 +1765,8 @@ exports.saveAnnouncement = onCall(OPTS, async (request) => {
     createdAt: existing.createdAt ?? now,
     createdBy: existing.createdBy ?? request.auth.uid,
     createdByName: existing.createdByName ?? actor.name ?? "",
+    authorUid: existing.authorUid ?? existing.createdByUid ?? existing.createdBy ?? request.auth.uid,
+    authorName: existing.authorName ?? existing.createdByName ?? actor.name ?? "",
     updatedAt: now,
     updatedBy: request.auth.uid,
     updatedByName: actor.name ?? "",

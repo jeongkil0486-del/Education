@@ -586,13 +586,6 @@
 }
 
 /* ─── 교육이력카드 전용 CSS (scope: .hc-wrap) ─── */
-.hc-wrap .hc-summary-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: var(--space-4);
-  margin-bottom: var(--space-5);
-}
-
 .hc-wrap .hc-employee-table {
   width: 100%;
   border-collapse: collapse;

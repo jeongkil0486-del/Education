@@ -1,5 +1,5 @@
 import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-functions.js";
-import { authStore, ROLES } from "../core/auth.js";
+import { authStore } from "../core/auth.js";
 import { materialsDB } from "../core/db.js";
 
 const { functions } = window.__firebase;
@@ -186,10 +186,9 @@ export async function uploadMaterial(values, file, opts = {}) {
 }
 
 export async function listMaterials() {
-  const companyId = authStore.companyId;
-  const items = (authStore.role === ROLES.SUPER_ADMIN || !companyId)
-    ? await materialsDB.listAll()
-    : await materialsDB.list(companyId);
+  const fn = httpsCallable(functions, "listMaterials");
+  const result = await fn({});
+  const items = result.data?.materials ?? [];
 
   return items
     .map((item) => {

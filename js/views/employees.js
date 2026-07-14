@@ -99,6 +99,7 @@ function getEffectiveCompanyId(trainingMeta = getSelectedTrainingMeta(), branch 
 export async function render(container) {
   const isHQAdmin = authStore.role === ROLES.HQ_ADMIN;
   const isInstructor = authStore.role === ROLES.INSTRUCTOR;
+  const canManageLedger = isHQAdmin || isInstructor;
 
   container.innerHTML = `<div style="padding:var(--space-2);text-align:center;color:var(--gray-400);font-size:var(--text-sm)">로딩 중...</div>`;
 
@@ -120,14 +121,14 @@ export async function render(container) {
         <div class="section-subtitle">${isInstructor ? "담당 지점 직원의 교육 현황을 조회하고 관리합니다." : "지점과 교육 항목을 선택하여 직원별 교육 현황을 관리합니다."}</div>
       </div>
       <div style="display:flex;gap:var(--space-2);flex-wrap:wrap;align-items:center">
-        ${isHQAdmin ? `
+        ${canManageLedger ? `
           <button class="btn btn--secondary btn--sm" id="btn-history-template">양식 다운로드</button>
-          <button class="btn btn--secondary btn--sm" id="btn-cycle-config">재교육 주기 설정</button>
+          ${isHQAdmin ? '<button class="btn btn--secondary btn--sm" id="btn-cycle-config">재교육 주기 설정</button>' : ""}
         ` : ""}
       </div>
     </div>
 
-    ${isHQAdmin ? `
+    ${canManageLedger ? `
     <!-- Excel 업로드 카드 -->
     <div class="card" id="upload-card" style="margin-bottom:var(--space-4);border-left:4px solid var(--brand-400)">
       <div class="card__header" style="cursor:pointer;user-select:none;display:flex;align-items:center;justify-content:space-between" id="upload-card-toggle">
@@ -207,7 +208,7 @@ export async function render(container) {
             <div class="card__subtitle" id="ledger-subtitle"></div>
           </div>
           <div style="display:flex;gap:var(--space-2);flex-wrap:wrap;align-items:center">
-            ${isHQAdmin ? `<button class="btn btn--danger btn--sm" id="btn-reset-history" disabled>초기화</button>` : ""}
+            ${canManageLedger ? `<button class="btn btn--danger btn--sm" id="btn-reset-history" disabled>초기화</button>` : ""}
             <div class="input-group" style="width:200px">
               <svg class="input-group__icon" width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.25"/><path d="M11 11l3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>
               <input class="form-control" id="ledger-search" type="search" placeholder="이름·사번 검색"/>
@@ -231,7 +232,7 @@ export async function render(container) {
   `;
 
   /* 이벤트 바인딩 */
-  if (isHQAdmin) {
+  if (canManageLedger) {
     document.getElementById("upload-card-toggle")?.addEventListener("click", () => {
       const body    = document.getElementById("upload-card-body");
       const chevron = document.getElementById("upload-chevron");
@@ -247,7 +248,7 @@ export async function render(container) {
     document.getElementById("history-upload-file-inline")?.addEventListener("change", parseHistoryUploadFileInline);
     document.getElementById("btn-history-upload-submit")?.addEventListener("click", submitHistoryUploadInline);
     document.getElementById("btn-reset-history")?.addEventListener("click", openResetConfirmModal);
-    document.getElementById("btn-cycle-config")?.addEventListener("click", openCycleConfigModal);
+    if (isHQAdmin) document.getElementById("btn-cycle-config")?.addEventListener("click", openCycleConfigModal);
   }
 
   const branchSel   = document.getElementById("ledger-branch");
@@ -1031,7 +1032,7 @@ function renderLedgerTable() {
     <table class="data-table" style="min-width:1100px">
       <thead>
         <tr>
-          ${isHQAdmin ? `<th style="width:36px"><input type="checkbox" id="chk-all" ${allSelected ? "checked" : ""} title="전체 선택"/></th>` : ""}
+          ${canManageEmployee ? `<th style="width:36px"><input type="checkbox" id="chk-all" ${allSelected ? "checked" : ""} title="전체 선택"/></th>` : ""}
           ${sortableLedgerHeader("name", "성명")}${sortableLedgerHeader("empNo", "사번")}${sortableLedgerHeader("joinDate", "입사일")}${sortableLedgerHeader("position", "직급/직책")}
           ${sortableLedgerHeader("initialDate", "초기교육")}${sortableLedgerHeader("lastDate", "최종교육일")}
           ${sortableLedgerHeader("prevDates", `${PY}년`)}${sortableLedgerHeader("currDates", `${CY}년`)}
@@ -1051,7 +1052,7 @@ function renderLedgerTable() {
             ? "-"
             : `<span class="chip chip--${tone}" style="font-size:var(--text-xs)">${esc(r.dueStatusLabel)}</span>`;
           return `<tr data-uid="${esc(r.uid)}" class="${isChecked ? "row--selected" : ""}" title="더블클릭: 이력카드" style="${isChecked ? "background:var(--brand-50,#eff6ff)" : ""}">
-            ${isHQAdmin ? `<td style="text-align:center"><input type="checkbox" class="chk-row" data-uid="${esc(r.uid)}" ${isChecked ? "checked" : ""}></td>` : ""}
+            ${canManageEmployee ? `<td style="text-align:center"><input type="checkbox" class="chk-row" data-uid="${esc(r.uid)}" ${isChecked ? "checked" : ""}></td>` : ""}
             <td style="font-weight:var(--weight-medium)">${esc(r.name)}</td>
             <td style="font-family:monospace;font-size:var(--text-xs)">${esc(r.empNo)}</td>
             <td style="font-size:var(--text-xs)">${esc(r.joinDate)}</td>
@@ -1084,7 +1085,7 @@ function renderLedgerTable() {
   });
 
   // 전체 선택 체크박스
-  if (isHQAdmin) {
+  if (canManageEmployee) {
     document.getElementById("chk-all")?.addEventListener("change", (e) => {
       e.stopPropagation();
       if (e.target.checked) { visibleUids.forEach((uid) => selectedUids.add(uid)); }
@@ -1262,10 +1263,12 @@ async function openResetConfirmModal() {
   // 삭제 예정 이력 수 계산 (선택 직원의 manual/manual_excel 전체)
   let deleteCnt = 0;
   try {
-    const allManual = await manualTrainingHistoriesDB.listAll();
+    const allManual = authStore.role === ROLES.INSTRUCTOR
+      ? instructorScopedManualHistories
+      : await manualTrainingHistoriesDB.listAll();
     deleteCnt = allManual.filter((h) =>
       uids.includes(h.uid) &&
-      ["manual", "manual_excel"].includes(String(h.source ?? "").toLowerCase())
+      ["manual", "manual_excel", "history_excel"].includes(String(h.source ?? "").toLowerCase())
     ).length;
   } catch (e) { /* 조회 실패 무시 */ }
 
@@ -1281,6 +1284,7 @@ async function openResetConfirmModal() {
         </div>
         <div style="background:#fff1f2;border:1px solid #fecaca;border-radius:var(--radius-md);padding:var(--space-3);font-size:var(--text-sm);color:#dc2626">
           ⚠️ 선택한 직원의 수동 입력 / Excel 업로드 개인이력이 모두 삭제됩니다.<br/>
+          ${authStore.role === ROLES.INSTRUCTOR ? `${esc(branchLabel)} 담당 지점 직원만 처리되며 다른 지점에는 영향을 주지 않습니다.<br/>` : ""}
           회차 완료 이력과 기존 완료 이력은 삭제되지 않습니다.<br/>
           삭제 후 복구할 수 없습니다.
         </div>
