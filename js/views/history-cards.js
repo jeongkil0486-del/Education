@@ -577,7 +577,7 @@ function renderSections(rows) {
           ${groups.length === 0
             ? `<div style="padding:var(--space-6);text-align:center;color:var(--gray-400);font-size:var(--text-sm)">이력 없음</div>`
             : `<div class="table-wrap">
-                <table class="hc-section-table" style="min-width:900px">
+                <table class="hc-section-table" style="min-width:${isAdmin ? "940px" : "900px"}">
                   <thead>
                     <tr>
                       <th style="width:28px"></th>
@@ -591,6 +591,7 @@ function renderSections(rows) {
                       ${sortableHistoryCardHeader(secKey, "daysRemaining", "남은 일수")}
                       ${sortableHistoryCardHeader(secKey, "status", "상태")}
                       ${sortableHistoryCardHeader(secKey, "note", "비고")}
+                      ${isAdmin ? '<th style="width:42px;text-align:center;white-space:nowrap">이동</th>' : ""}
                     </tr>
                   </thead>
                   <tbody>
@@ -901,7 +902,6 @@ function courseGroupRows(group, gi, secKey, isAdmin) {
   const repRow = `
     <tr style="cursor:pointer" class="hc-group-toggle" data-gid="${gid}">
       <td style="text-align:center;padding:0 4px">
-        ${isAdmin ? `<button type="button" class="hc-course-move-handle" draggable="true" data-move-id="${esc(moveId)}" aria-label="과정 이동" title="끌어서 섹션 이동 · 클릭하면 이동 메뉴" style="border:0;background:transparent;color:var(--gray-400);cursor:grab;padding:4px 2px;font-size:13px;line-height:1">⋮⋮</button>` : ""}
         <span class="hc-toggle-icon" style="font-size:10px;color:var(--gray-400)">▶</span>
       </td>
       <td><strong>${esc(rep.courseName ?? rep.title)}</strong>${subjCount}</td>
@@ -914,6 +914,7 @@ function courseGroupRows(group, gi, secKey, isAdmin) {
       <td style="white-space:nowrap">${days}</td>
       <td><span class="chip chip--${tone}">${esc(rep.dueStatusLabel ?? DUE_STATUS_LABELS[rep.dueStatus] ?? "–")}</span></td>
       <td>${esc(rep.note || "–")}</td>
+      ${isAdmin ? `<td style="text-align:center;padding:0 4px"><button type="button" class="hc-course-move-handle" draggable="true" data-move-id="${esc(moveId)}" aria-label="과정 이동" title="끌어서 섹션 이동 · 클릭하면 이동 메뉴" style="border:0;background:transparent;color:var(--gray-400);cursor:grab;padding:6px 4px;font-size:13px;line-height:1">⋮⋮</button></td>` : ""}
     </tr>`;
 
   // ── 2단계: 날짜 그룹 + 세부 이력
@@ -931,7 +932,7 @@ function courseGroupRows(group, gi, secKey, isAdmin) {
         <td style="border-left:3px solid var(--blue-400,#60a5fa);text-align:center;padding:0 4px">
           <span class="hc-date-icon" style="font-size:9px;color:var(--blue-500,#3b82f6)">▶</span>
         </td>
-        <td colspan="10" style="padding:6px var(--space-3);font-size:var(--text-sm)">
+        <td colspan="${isAdmin ? 11 : 10}" style="padding:6px var(--space-3);font-size:var(--text-sm)">
           <span style="font-weight:var(--weight-semibold);color:var(--blue-700,#1d4ed8)">${esc(dg.dateLabel)}</span>
           <span style="color:var(--gray-500);font-size:11px;margin-left:6px">(${dg.items.length}건)${summary}</span>
         </td>
@@ -958,7 +959,7 @@ function courseGroupRows(group, gi, secKey, isAdmin) {
         <tr data-group-detail="${gid}" data-date-detail="${dgid}"
             style="display:none;background:var(--gray-50)">
           <td style="border-left:5px solid var(--blue-300,#93c5fd)"></td>
-          <td colspan="10" style="padding:var(--space-2) var(--space-3)">
+          <td colspan="${isAdmin ? 11 : 10}" style="padding:var(--space-2) var(--space-3)">
             <div style="display:flex;flex-wrap:wrap;gap:var(--space-4);font-size:var(--text-sm)">
               <div>
                 <span style="color:var(--gray-500);font-size:11px">수료일</span><br/>

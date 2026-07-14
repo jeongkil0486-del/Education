@@ -460,7 +460,7 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
     if (!lastDate) {
       dueStatus = "none"; dueStatusLabel = "미이수"; daysRemaining = null; nextDueDate = null;
     } else if (initialOnly) {
-      dueStatus = "not_applicable"; dueStatusLabel = "주기 미적용"; daysRemaining = null; nextDueDate = null;
+      dueStatus = "not_applicable"; dueStatusLabel = "-"; daysRemaining = null; nextDueDate = null;
     } else if (!effectiveCycle) {
       dueStatus = "unconfigured"; dueStatusLabel = "주기 미설정"; daysRemaining = null; nextDueDate = null;
     } else {
@@ -1097,12 +1097,23 @@ async function openCycleConfigModal() {
 
 function buildEducationKey(meta) {
   const typeKey = String(meta?.trainingType ?? "other").trim().toLowerCase() || "other";
-  const subjectKey = String(meta?.subjectCode || meta?.subjectName || "")
+  const subjectKey = normalizeEducationCycleSubjectKey(meta?.subjectCode || meta?.subjectName);
+  return `${typeKey}__${subjectKey || "default"}`;
+}
+
+function rawEducationCycleSubjectKey(value) {
+  return String(value ?? "")
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9가-힣]+/g, "_")
     .replace(/^_+|_+$/g, "");
-  return `${typeKey}__${subjectKey || "default"}`;
+}
+
+function normalizeEducationCycleSubjectKey(value) {
+  const normalized = rawEducationCycleSubjectKey(value);
+  if (["job_wb", "w_b", "wb", "weight_balance", "탑재관리"].includes(normalized)) return "job_wb";
+  if (["job_operations", "flight_operations", "운항관리", "운항담당"].includes(normalized)) return "job_operations";
+  return normalized;
 }
 
 async function loadEducationCycleConfig(companyId, meta) {
@@ -1110,6 +1121,10 @@ async function loadEducationCycleConfig(companyId, meta) {
   const primaryKey = buildEducationKey(meta);
   const keys = [primaryKey];
   if (primaryKey === "job__job_duty") keys.push("job__직무교육");
+  if (primaryKey === "job__job_wb") keys.push("job__w_b", "job__wb", "job__탑재관리");
+  if (primaryKey === "job__job_operations") keys.push("job__flight_operations", "job__운항관리", "job__운항담당");
+  const rawKey = `${String(meta?.trainingType ?? "other").trim().toLowerCase() || "other"}__${rawEducationCycleSubjectKey(meta?.subjectCode || meta?.subjectName) || "default"}`;
+  if (!keys.includes(rawKey)) keys.push(rawKey);
   for (const key of keys) {
     const config = await educationCycleConfigsDB.get(companyId, key);
     if (config) return config;

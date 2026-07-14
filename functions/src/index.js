@@ -1769,10 +1769,15 @@ function buildEmployeeManagementUpdates(source) {
 
 function buildEducationCycleConfigKey(trainingType, subjectCode, subjectName) {
   const typeKey = normalizeText(trainingType || "other").toLowerCase();
-  const subjectKey = normalizeText(subjectCode || subjectName)
+  const normalizedSubjectKey = normalizeText(subjectCode || subjectName)
     .toLowerCase()
     .replace(/[^a-z0-9가-힣]+/g, "_")
     .replace(/^_+|_+$/g, "");
+  const subjectKey = ["job_wb", "w_b", "wb", "weight_balance", "탑재관리"].includes(normalizedSubjectKey)
+    ? "job_wb"
+    : ["job_operations", "flight_operations", "운항관리", "운항담당"].includes(normalizedSubjectKey)
+      ? "job_operations"
+      : normalizedSubjectKey;
   return `${typeKey}__${subjectKey || "default"}`;
 }
 

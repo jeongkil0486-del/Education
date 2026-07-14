@@ -127,7 +127,7 @@ export const DUE_STATUS_LABELS = {
   normal: "정상",
   soon: "재교육 임박",
   overdue: "기한 초과",
-  not_applicable: "주기 미적용",
+  not_applicable: "-",
   unconfigured: "주기 미설정",
   history: "과거 이력",
 };
@@ -1140,7 +1140,10 @@ function normalizeCycleMatchValue(value) {
     .toLowerCase()
     .replace(/[^a-z0-9가-힣]+/g, "_")
     .replace(/^_+|_+$/g, "");
-  return normalized === "직무" || normalized === "직무교육" ? "job_duty" : normalized;
+  if (["직무", "직무교육"].includes(normalized)) return "job_duty";
+  if (["job_wb", "w_b", "wb", "weight_balance", "탑재관리"].includes(normalized)) return "job_wb";
+  if (["job_operations", "flight_operations", "운항관리", "운항담당"].includes(normalized)) return "job_operations";
+  return normalized;
 }
 
 function historyCanonicalCourse(row) {
