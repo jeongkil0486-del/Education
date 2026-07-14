@@ -225,7 +225,7 @@ function normDate(v) {
   // "2024-02-26 00:00:00" 패턴 (datetime string)
   s = s.replace(/ 00:00:00$/, "").trim();
   // 범위면 첫 번째만
-  s = s.split(/[~–\n/]/)[0].trim();
+  s = s.split(/[~–\n]/)[0].trim();
   // 구분자 통일
   s = s.replace(/[.]/g, "-");
   const d = new Date(s);
@@ -423,34 +423,48 @@ function detectParser(sheet) {
 
 /** 직원 정보 탐지 */
 function detectEmpInfo(sheet, headerRow) {
-  let name = "", empNo = "";
+  const info = {
+    name: "",
+    empNo: "",
+    birthDate: null,
+    hireDate: null,
+    entryType: "",
+    internalLicense: "",
+    externalLicense: "",
+    branchName: "",
+    position: "",
+  };
+  const aliases = new Map([
+    ["성명", "name"], ["이름", "name"], ["성명name", "name"],
+    ["사번", "empNo"], ["사번idnbr", "empNo"], ["직원번호", "empNo"],
+    ["생년월일", "birthDate"], ["생일", "birthDate"],
+    ["입사일", "hireDate"], ["입사일자", "hireDate"],
+    ["신입경력", "entryType"], ["신입/경력", "entryType"], ["경력구분", "entryType"],
+    ["사내자격", "internalLicense"], ["사내자격증", "internalLicense"],
+    ["사외자격", "externalLicense"], ["사외자격증", "externalLicense"],
+    ["지점", "branchName"], ["소속지점", "branchName"], ["근무지", "branchName"],
+    ["직책", "position"], ["직급직책", "position"], ["직급/직책", "position"], ["직급", "position"],
+  ]);
   const limit = Math.min(headerRow + 1, 15);
   for (let r = 0; r <= limit; r++) {
     for (let c = 0; c <= sheet.maxCol; c++) {
       const v = rawCell(sheet, r, c);
       if (!v) continue;
       const key = norm(v);
-      if (key === "성명" || key === "이름" || key === "성명name") {
-        for (let dc = 1; dc <= 5; dc++) {
-          const cand = rawCell(sheet, r, c + dc);
-          if (cand) {
-            const s = normName(String(cand));
-            if (s && norm(s) !== "사번" && norm(s) !== "생년월일") { name = s; break; }
-          }
-        }
-      }
-      if (key === "사번" || key === "사번idnbr" || key === "직원번호") {
-        for (let dc = 1; dc <= 5; dc++) {
-          const cand = rawCell(sheet, r, c + dc);
-          if (cand) {
-            const s = normEmpNo(String(cand));
-            if (s && !["성명", "이름", "생년월일"].includes(norm(s))) { empNo = s; break; }
-          }
-        }
+      const field = aliases.get(key);
+      if (!field || info[field]) continue;
+      for (let dc = 1; dc <= 5; dc++) {
+        const cand = rawCell(sheet, r, c + dc);
+        if (!hasCellValue(cand) || aliases.has(norm(cand))) continue;
+        if (field === "name") info.name = normName(String(cand));
+        else if (field === "empNo") info.empNo = normEmpNo(String(cand));
+        else if (field === "birthDate" || field === "hireDate") info[field] = normDate(cand);
+        else info[field] = String(cand).trim();
+        if (info[field]) break;
       }
     }
   }
-  return { name, empNo };
+  return info;
 }
 
 /** 컬럼맵 구축 */
@@ -1126,11 +1140,16 @@ export async function analyzeExcel(file) {
   }
 
   // 직원 정보 추출 (첫 번째 유효 시트)
-  let empInfo = { name: "", empNo: "" };
+  let empInfo = {
+    name: "", empNo: "", birthDate: null, hireDate: null, entryType: "",
+    internalLicense: "", externalLicense: "", branchName: "", position: "",
+  };
   for (const sheetRaw of sheetRaws) {
     const hr = findHeaderRow(sheetRaw);
     const info = detectEmpInfo(sheetRaw, hr >= 0 ? hr : 12);
-    if (info.name || info.empNo) { empInfo = info; break; }
+    for (const [key, value] of Object.entries(info)) {
+      if (!empInfo[key] && value) empInfo[key] = value;
+    }
   }
 
   console.info("[excel-import-engine] parser diagnostics", parserDiagnostics);

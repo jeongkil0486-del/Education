@@ -1542,6 +1542,144 @@ function assertSameCompany(actor, employee) {
   }
 }
 
+async function resolveActorCompanyId(actor) {
+  const direct = normalizeText(actor?.companyId);
+  if (direct) return direct;
+  const branchId = normalizeText(actor?.branchId);
+  if (branchId) {
+    const snap = await db.ref(`branches/${branchId}/companyId`).get();
+    if (snap.exists() && normalizeText(snap.val())) return normalizeText(snap.val());
+  }
+  const branchesSnap = await db.ref("branches").get();
+  const companyIds = new Set();
+  branchesSnap.forEach((child) => {
+    const companyId = normalizeText(child.val()?.companyId);
+    if (companyId) companyIds.add(companyId);
+  });
+  return companyIds.size === 1 ? Array.from(companyIds)[0] : "";
+}
+
+function announcementBranchIds(record) {
+  return Array.from(new Set([
+    normalizeText(record?.branchId),
+    normalizeText(record?.targetBranchId),
+    ...(Array.isArray(record?.branchIds) ? record.branchIds.map(normalizeText) : []),
+    ...(Array.isArray(record?.targetBranchIds) ? record.targetBranchIds.map(normalizeText) : []),
+  ].filter(Boolean)));
+}
+
+function announcementIsPublished(record, now = Date.now()) {
+  const status = normalizeText(record?.status || "published").toLowerCase();
+  const startsAt = Number(record?.startsAt ?? record?.startAt ?? 0) || 0;
+  const endsAt = Number(record?.endsAt ?? record?.endAt ?? 0) || 0;
+  return !["draft", "hidden", "inactive"].includes(status) && (!startsAt || startsAt <= now) && (!endsAt || endsAt >= now);
+}
+
+function normalizeAnnouncementDate(value, endOfDay = false) {
+  const parsed = normalizeProfileDate(value);
+  if (!parsed) return null;
+  return endOfDay && /^\d{4}-\d{2}-\d{2}$/.test(normalizeText(value)) ? parsed + 86400000 - 1 : parsed;
+}
+
+exports.listAnnouncements = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await getUserProfile(request.auth.uid);
+  if (!actor) throw new HttpsError("permission-denied", "사용자 프로필을 찾을 수 없습니다.");
+  const companyId = await resolveActorCompanyId(actor);
+  if (actor.role !== "super_admin" && !companyId) {
+    throw new HttpsError("failed-precondition", "공지사항의 회사 범위를 결정할 수 없습니다.");
+  }
+  const actorBranches = new Set(resolveInstructorBranchIds(actor).concat(normalizeText(actor.branchId)).filter(Boolean));
+  const snap = await db.ref("announcements").get();
+  const announcements = [];
+  snap.forEach((child) => {
+    const record = child.val() ?? {};
+    if (actor.role !== "super_admin" && companyId && record.companyId && normalizeText(record.companyId) !== companyId) return;
+    if (!["super_admin", "hq_admin"].includes(actor.role)) {
+      if (!announcementIsPublished(record)) return;
+      const targets = announcementBranchIds(record);
+      if (targets.length && !targets.some((branchId) => actorBranches.has(branchId))) return;
+    }
+    announcements.push({ id: child.key, ...record });
+  });
+  announcements.sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0));
+  return { announcements };
+});
+
+exports.saveAnnouncement = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await getUserProfile(request.auth.uid);
+  if (!actor || !["super_admin", "hq_admin"].includes(actor.role)) {
+    throw new HttpsError("permission-denied", "공지사항을 작성하거나 수정할 권한이 없습니다.");
+  }
+  const announcementId = normalizeText(request.data?.announcementId ?? request.data?.id);
+  const title = normalizeText(request.data?.title);
+  const content = normalizeText(request.data?.content);
+  if (!title || !content) throw new HttpsError("invalid-argument", "제목과 내용을 입력해야 합니다.");
+  const companyId = await resolveActorCompanyId(actor);
+  if (actor.role === "hq_admin" && !companyId) {
+    throw new HttpsError("failed-precondition", "공지사항의 회사 범위를 결정할 수 없습니다.");
+  }
+  const targetBranchId = normalizeText(request.data?.targetBranchId ?? request.data?.branchId);
+  if (targetBranchId) {
+    const branchSnap = await db.ref(`branches/${targetBranchId}`).get();
+    if (!branchSnap.exists()) throw new HttpsError("invalid-argument", "공지 대상 지점을 찾을 수 없습니다.");
+    if (companyId && branchSnap.val()?.companyId && normalizeText(branchSnap.val().companyId) !== companyId) {
+      throw new HttpsError("permission-denied", "다른 회사 지점을 공지 대상으로 지정할 수 없습니다.");
+    }
+  }
+  const ref = announcementId ? db.ref(`announcements/${announcementId}`) : db.ref("announcements").push();
+  const existingSnap = announcementId ? await ref.get() : null;
+  if (announcementId && !existingSnap?.exists()) throw new HttpsError("not-found", "수정할 공지사항을 찾을 수 없습니다.");
+  const existing = existingSnap?.val() ?? {};
+  if (actor.role !== "super_admin" && existing.companyId && normalizeText(existing.companyId) !== companyId) {
+    throw new HttpsError("permission-denied", "다른 회사 공지사항을 수정할 수 없습니다.");
+  }
+  const now = Date.now();
+  const startsAt = request.data?.startsAt ? normalizeAnnouncementDate(request.data.startsAt) : null;
+  const endsAt = request.data?.endsAt ? normalizeAnnouncementDate(request.data.endsAt, true) : null;
+  const record = {
+    ...existing,
+    title,
+    content,
+    companyId: companyId || normalizeText(request.data?.companyId) || existing.companyId || "",
+    targetBranchId,
+    important: Boolean(request.data?.important),
+    status: normalizeText(request.data?.status || "published").toLowerCase(),
+    startsAt,
+    startAt: startsAt,
+    endsAt,
+    endAt: endsAt,
+    createdAt: existing.createdAt ?? now,
+    createdBy: existing.createdBy ?? request.auth.uid,
+    createdByName: existing.createdByName ?? actor.name ?? "",
+    updatedAt: now,
+    updatedBy: request.auth.uid,
+    updatedByName: actor.name ?? "",
+  };
+  await ref.set(record);
+  return { announcement: { id: ref.key, ...record }, message: announcementId ? "공지사항이 수정되었습니다." : "공지사항이 등록되었습니다." };
+});
+
+exports.deleteAnnouncement = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await getUserProfile(request.auth.uid);
+  if (!actor || !["super_admin", "hq_admin"].includes(actor.role)) {
+    throw new HttpsError("permission-denied", "공지사항을 삭제할 권한이 없습니다.");
+  }
+  const announcementId = normalizeText(request.data?.announcementId ?? request.data?.id);
+  if (!announcementId) throw new HttpsError("invalid-argument", "공지사항 ID가 필요합니다.");
+  const ref = db.ref(`announcements/${announcementId}`);
+  const snap = await ref.get();
+  if (!snap.exists()) throw new HttpsError("not-found", "공지사항을 찾을 수 없습니다.");
+  const companyId = await resolveActorCompanyId(actor);
+  if (actor.role !== "super_admin" && snap.val()?.companyId && normalizeText(snap.val().companyId) !== companyId) {
+    throw new HttpsError("permission-denied", "다른 회사 공지사항을 삭제할 수 없습니다.");
+  }
+  await ref.remove();
+  return { announcementId, message: "공지사항이 삭제되었습니다." };
+});
+
 function normalizeTrainingTypeValue(value) {
   const raw = normalizeText(value).toLowerCase();
   if (!raw) return "";   // 빈 값은 "" 반환 — 필터 없음으로 처리
@@ -2125,12 +2263,24 @@ function simplifyError(err) {
 ══════════════════════════════════════════════════════════ */
 exports.importHistoryExcelData = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
-  const actor = await ensureHQAdminProfile(request.auth.uid).catch(async () => {
-    // SUPER_ADMIN도 허용
-    await ensureSuperAdmin(request.auth.uid);
-    const snap = await db.ref(`users/${request.auth.uid}`).get();
-    return snap.val() ?? { uid: request.auth.uid };
-  });
+  const actor = await ensureEmployeeHistoryActor(request.auth.uid);
+  const targetEmployeeUid = normalizeText(request.data?.targetEmployeeUid ?? request.data?.employeeUid);
+  const importedProfile = request.data?.profile && typeof request.data.profile === "object"
+    ? request.data.profile
+    : {};
+  if (actor.role === "instructor" && !targetEmployeeUid) {
+    throw new HttpsError("invalid-argument", "강사는 업로드 대상 직원을 먼저 선택해야 합니다.");
+  }
+
+  let targetEmployee = null;
+  if (targetEmployeeUid) {
+    const targetSnap = await db.ref(`users/${targetEmployeeUid}`).get();
+    if (!targetSnap.exists() || targetSnap.val()?.role !== "employee") {
+      throw new HttpsError("not-found", "업로드 대상 직원 정보를 찾을 수 없습니다.");
+    }
+    targetEmployee = { uid: targetEmployeeUid, ...targetSnap.val() };
+    assertEmployeeHistoryScope(actor, targetEmployee);
+  }
 
   const rows = Array.isArray(request.data?.rows) ? request.data.rows : [];
   const mode = normalizeText(request.data?.mode) === "overwrite" ? "overwrite" : "fill";
@@ -2162,6 +2312,14 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
     if (!empByName.has(k)) empByName.set(k, []);
     empByName.get(k).push(u);
   }
+  if (!targetEmployee) {
+    const profileEmpNo = normalizeImportEmpNo(importedProfile.empNo);
+    const candidates = normalizeText(importedProfile.name) ? (empByName.get(normalizeText(importedProfile.name)) ?? []) : [];
+    targetEmployee = profileEmpNo
+      ? (empByNo.get(profileEmpNo.toLowerCase()) ?? null)
+      : candidates.length === 1 ? candidates[0] : null;
+    if (targetEmployee) assertEmployeeHistoryScope(actor, targetEmployee);
+  }
 
   // 기존 manualTrainingHistories 전체 조회
   const manualSnap = await db.ref("manualTrainingHistories").get();
@@ -2181,6 +2339,8 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
   const traceSamples = [];
   const parsedCount = rows.length;
   const affectedUids = new Set();
+  const profileUpdatedFields = [];
+  const profileIgnoredFields = [];
 
   // dedupeKey 세트 (중복 방지)
   const processedKeys = new Set(manualAll.map((r) => r.dedupeKey).filter(Boolean));
@@ -2227,8 +2387,14 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
     }
 
     // 직원 탐색
-    let employee = null;
-    if (empNoRaw) {
+    let employee = targetEmployee;
+    if (targetEmployee) {
+      const targetEmpNo = normalizeImportEmpNo(targetEmployee.empNo);
+      const targetName = String(targetEmployee.name ?? "").replace(/\s+/g, " ").trim();
+      if ((empNoRaw && empNoRaw !== targetEmpNo) || (!empNoRaw && empNameRaw && empNameRaw !== targetName)) {
+        throw new HttpsError("failed-precondition", "엑셀의 직원 정보와 선택한 직원이 일치하지 않습니다.");
+      }
+    } else if (empNoRaw) {
       employee = empByNo.get(empNoRaw.toLowerCase()) ?? null;
     }
     if (!employee && empNameRaw) {
@@ -2244,6 +2410,7 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
       unmatchedEmpCount++;
       continue;
     }
+    assertEmployeeHistoryScope(actor, employee);
 
     matchedEmpUids.add(employee.uid);
     affectedUids.add(employee.uid);
@@ -2434,6 +2601,62 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
     }
   }
 
+  if (targetEmployee && Object.keys(importedProfile).length) {
+    const targetEmpNo = normalizeImportEmpNo(targetEmployee.empNo);
+    const profileEmpNo = normalizeImportEmpNo(importedProfile.empNo);
+    const profileName = normalizeText(importedProfile.name);
+    if ((profileEmpNo && profileEmpNo !== targetEmpNo) ||
+        (!profileEmpNo && profileName && profileName !== normalizeText(targetEmployee.name))) {
+      throw new HttpsError("failed-precondition", "엑셀 인적사항과 선택한 직원이 일치하지 않습니다.");
+    }
+
+    const profilePatch = {};
+    const copyText = (sourceKey, targetKey = sourceKey) => {
+      const value = normalizeText(importedProfile[sourceKey]);
+      if (value) profilePatch[targetKey] = value;
+    };
+    copyText("entryType");
+    copyText("internalLicense");
+    copyText("externalLicense");
+    copyText("position");
+    if (importedProfile.birthDate) profilePatch.birthDate = normalizeProfileDate(importedProfile.birthDate);
+    if (importedProfile.hireDate) profilePatch.hireDate = normalizeProfileDate(importedProfile.hireDate);
+
+    const requestedBranchName = normalizeText(importedProfile.branchName);
+    if (requestedBranchName) {
+      if (actor.role === "instructor") {
+        if (requestedBranchName !== normalizeText(targetEmployee.branchName)) profileIgnoredFields.push("branchName");
+      } else {
+        const branchesSnap = await db.ref("branches").get();
+        let matchedBranch = null;
+        branchesSnap.forEach((child) => {
+          if (matchedBranch) return;
+          const branch = child.val() ?? {};
+          const sameCompany = !targetEmployee.companyId || !branch.companyId || targetEmployee.companyId === branch.companyId;
+          const names = [child.key, branch.name, branch.code, branch.branchName].map(normalizeText);
+          if (sameCompany && names.includes(requestedBranchName)) matchedBranch = { id: child.key, ...branch };
+        });
+        if (matchedBranch) {
+          profilePatch.branchId = matchedBranch.id;
+          profilePatch.branchName = matchedBranch.name ?? requestedBranchName;
+        } else {
+          profileIgnoredFields.push("branchName");
+        }
+      }
+    }
+
+    for (const [field, value] of Object.entries(profilePatch)) {
+      if (value === "" || value === null || value === undefined) continue;
+      updates[`users/${targetEmployee.uid}/${field}`] = value;
+      profileUpdatedFields.push(field);
+    }
+    if (profileUpdatedFields.length) {
+      updates[`users/${targetEmployee.uid}/updatedAt`] = admin.database.ServerValue.TIMESTAMP;
+      updates[`users/${targetEmployee.uid}/updatedBy`] = request.auth.uid;
+      updates[`users/${targetEmployee.uid}/updatedByName`] = actor.name ?? "";
+    }
+  }
+
   if (Object.keys(updates).length) {
     await db.ref().update(updates);
   }
@@ -2461,6 +2684,8 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
     skippedCount,
     errors: errors.slice(0, 30),
     traceSamples,
+    profileUpdatedFields,
+    profileIgnoredFields,
   };
   logger.info("[importHistoryExcelData] result", resultSummary);
   return resultSummary;

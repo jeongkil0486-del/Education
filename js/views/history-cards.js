@@ -56,7 +56,6 @@ let S = {
   rows:               [],
   templates:          [],
   items:              [],
-  dueStatusFilter:    "",
 };
 const MOVABLE_SECTION_KEYS = new Set(["job_initial", "job_recurring", "legal", "online", "other"]);
 const historyCardSortBySection = Object.fromEntries(
@@ -65,6 +64,7 @@ const historyCardSortBySection = Object.fromEntries(
 const historyMoveGroups = new Map();
 let activeHistoryMoveId = "";
 const canManageEmployeeHistory = () => [ROLES.HQ_ADMIN, ROLES.INSTRUCTOR].includes(authStore.role);
+const canImportEmployeeHistory = () => [ROLES.SUPER_ADMIN, ROLES.HQ_ADMIN, ROLES.INSTRUCTOR].includes(authStore.role);
 
 /* ──────────────────────────────────────────────────────────
    render
@@ -79,8 +79,8 @@ export async function render(container, params = {}) {
           <div class="section-subtitle">지점별 직원을 선택하여 교육 이력을 조회하고 다운로드합니다.</div>
         </div>
         <div style="display:flex;gap:var(--space-2);flex-wrap:wrap">
-          ${authStore.role === ROLES.HQ_ADMIN || authStore.role === ROLES.SUPER_ADMIN ? `
-            <button class="btn btn--secondary" id="btn-import-excel">교육 이력 업로드</button>
+          ${canImportEmployeeHistory() ? `
+            <button class="btn btn--secondary" id="btn-import-excel" ${authStore.role === ROLES.INSTRUCTOR ? "hidden disabled" : ""}>교육 이력 업로드</button>
           ` : ''}
           ${canManageEmployeeHistory() ? '<button class="btn btn--secondary" id="btn-add-manual-history" disabled>개인 이력 추가</button>' : ''}
           ${authStore.role === ROLES.HQ_ADMIN ? '<button class="btn btn--danger" id="btn-reset-all-history" disabled>개인이력 초기화</button>' : ''}
@@ -106,16 +106,6 @@ export async function render(container, params = {}) {
               <label class="form-label">지점 선택</label>
               <select class="form-control" id="hc-branch">
                 <option value="">전체 지점</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label class="form-label">재교육 상태</label>
-              <select class="form-control" id="hc-due-status">
-                <option value="">전체 상태</option>
-                <option value="normal">정상</option>
-                <option value="soon">재교육 임박</option>
-                <option value="overdue">기한 초과</option>
-                <option value="unconfigured">주기 미설정</option>
               </select>
             </div>
           </div>
@@ -176,10 +166,6 @@ export async function render(container, params = {}) {
   document.getElementById("btn-deselect")?.addEventListener("click", deselectEmployee);
   document.getElementById("hc-search")?.addEventListener("input", onFilter);
   document.getElementById("hc-branch")?.addEventListener("change", onFilter);
-  document.getElementById("hc-due-status")?.addEventListener("change", () => {
-    S.dueStatusFilter = document.getElementById("hc-due-status")?.value ?? "";
-    if (S.selectedEmployee) { renderSummary(S.selectedEmployee, filteredRows()); renderSections(filteredRows()); }
-  });
   const sectionsEl = document.getElementById("hc-sections");
   const handleSortHeader = (event) => {
     const header = event.target.closest("th[data-hc-sort-key]");
@@ -339,6 +325,11 @@ async function loadCard(uid) {
     if (addManualBtn) addManualBtn.disabled = false;
     const resetBtn = document.getElementById("btn-reset-all-history");
     if (resetBtn) resetBtn.disabled = false;
+    const importBtn = document.getElementById("btn-import-excel");
+    if (importBtn && authStore.role === ROLES.INSTRUCTOR) {
+      importBtn.hidden = false;
+      importBtn.disabled = false;
+    }
 
     // 선택 배너
     const bannerLabel = document.getElementById("hc-selected-label");
@@ -373,13 +364,17 @@ function deselectEmployee() {
   if (dlBtn) dlBtn.disabled = true;
   const resetBtn = document.getElementById("btn-reset-all-history");
   if (resetBtn) resetBtn.disabled = true;
+  const importBtn = document.getElementById("btn-import-excel");
+  if (importBtn && authStore.role === ROLES.INSTRUCTOR) {
+    importBtn.hidden = true;
+    importBtn.disabled = true;
+  }
 
   renderEmployeeList();
 }
 
 function filteredRows() {
-  if (!S.dueStatusFilter) return S.rows;
-  return S.rows.filter((row) => row.dueStatus === S.dueStatusFilter);
+  return S.rows;
 }
 
 /* ──────────────────────────────────────────────────────────
@@ -428,7 +423,7 @@ function renderProfile(emp) {
     { label: "성명",      value: emp?.name ?? "–" },
     { label: "사번",      value: emp?.empNo ?? "–" },
     { label: "생년월일",  value: emp?.birthDate ? formatDate(emp.birthDate) : "–" },
-    { label: "입사일",    value: emp?.joinDate  ? formatDate(emp.joinDate)  : "–" },
+    { label: "입사일",    value: emp?.hireDate || emp?.joinDate ? formatDate(emp.hireDate ?? emp.joinDate) : "–" },
     { label: "신입/경력", value: emp?.entryType ?? "–" },
     { label: "사내 자격", value: emp?.internalLicense ?? "–" },
     { label: "사외 자격", value: emp?.externalLicense ?? "–" },
@@ -1210,8 +1205,12 @@ function openManualHistoryModal(row = null) {
    기존 교육이력 가져오기  (Excel Import Engine v2.0)
 ────────────────────────────────────────────────────────── */
 function openImportExcelModal() {
+  if (authStore.role === ROLES.INSTRUCTOR && (!S.selectedEmployeeId || !S.selectedEmployee)) {
+    toast.warning("담당 지점 직원을 먼저 선택해 주세요.");
+    return;
+  }
   modal.open({
-    title: "기존 교육이력 가져오기",
+    title: "교육 이력 업로드",
     size: "lg",
     body: `
       <div style="display:flex;flex-direction:column;gap:var(--space-4)">
@@ -1275,7 +1274,10 @@ function openImportExcelModal() {
             const previewEl = document.getElementById("import-preview");
             const contentEl = document.getElementById("import-preview-content");
             if (previewEl) previewEl.style.display = "block";
-            if (contentEl) renderDetailedPreview(contentEl, preview);
+            if (contentEl) {
+              renderDetailedPreview(contentEl, preview);
+              contentEl.insertAdjacentHTML("afterbegin", renderProfileImportPreview(analyzed.empInfo, S.selectedEmployee));
+            }
 
             const parserInfo = analyzed.parsersUsed?.join(", ") ?? "";
             const validCount = analyzed.rows.filter((r) => r.completedAt && (r.courseName || r.subjectName)).length;
@@ -1338,7 +1340,12 @@ function openImportExcelModal() {
               selectedEmployeeUid: S.selectedEmployeeId,
               records: payload,
             });
-            const result = await importHistoryExcelData({ rows: payload, mode });
+            const result = await importHistoryExcelData({
+              rows: payload,
+              mode,
+              targetEmployeeUid: S.selectedEmployeeId || "",
+              profile: analyzed.empInfo ?? {},
+            });
             console.info("[history-cards] import result", result);
 
             // 상세 결과 구성
@@ -1351,6 +1358,8 @@ function openImportExcelModal() {
               result.skippedDuplicateCount ? `중복: ${result.skippedDuplicateCount}건` : null,
               result.skippedInvalidCount   ? `오류: ${result.skippedInvalidCount}건` : null,
               result.unmatchedEmployeeCount ? `직원미매칭: ${result.unmatchedEmployeeCount}건` : null,
+              result.profileUpdatedFields?.length ? `인적사항: ${result.profileUpdatedFields.length}개 반영` : null,
+              result.profileIgnoredFields?.includes("branchName") ? "지점: 기존 소속 유지" : null,
             ].filter(Boolean).join(" · ");
 
             if (totalSaved === 0) {
@@ -1377,6 +1386,32 @@ function openImportExcelModal() {
       },
     ],
   });
+}
+
+function renderProfileImportPreview(profile = {}, employee = null) {
+  const definitions = [
+    ["birthDate", "생년월일", employee?.birthDate],
+    ["hireDate", "입사일", employee?.hireDate ?? employee?.joinDate],
+    ["entryType", "신입/경력", employee?.entryType],
+    ["internalLicense", "사내 자격", employee?.internalLicense],
+    ["externalLicense", "사외 자격", employee?.externalLicense],
+    ["branchName", "지점", employee?.branchName],
+    ["position", "직책", employee?.position],
+  ];
+  const changes = definitions.flatMap(([key, label, current]) => {
+      if (profile[key] === null || profile[key] === undefined || String(profile[key]).trim() === "") return [];
+      const next = key === "birthDate" || key === "hireDate" ? formatDate(profile[key]) : String(profile[key]);
+      const before = current ? (key === "birthDate" || key === "hireDate" ? formatDate(current) : String(current)) : "-";
+      if (next === before) return [];
+      const scopeNote = key === "branchName" && authStore.role === ROLES.INSTRUCTOR ? " (강사는 기존 지점 유지)" : "";
+      return [`<div><strong>${esc(label)}</strong>: ${esc(before)} → ${esc(next)}${scopeNote}</div>`];
+    });
+  if (!changes.length) {
+    return '<div style="margin-bottom:var(--space-3);font-size:var(--text-xs);color:var(--gray-500)">엑셀에서 변경할 인적사항이 감지되지 않았습니다.</div>';
+  }
+  return `<div style="margin-bottom:var(--space-3);padding:var(--space-3);background:var(--gray-50);border-radius:var(--radius-md);font-size:var(--text-xs);display:grid;gap:4px">
+    <strong>인적사항 변경 미리보기</strong>${changes.join("")}
+  </div>`;
 }
 
 /* ──────────────────────────────────────────────────────────

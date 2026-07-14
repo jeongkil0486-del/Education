@@ -19,6 +19,9 @@ const moveEmployeeHistoryCourseCallable = httpsCallable(functions, "moveEmployee
 const listInstructorBranchEmployeesCallable = httpsCallable(functions, "listInstructorBranchEmployees");
 const getManagedEmployeeProfileCallable = httpsCallable(functions, "getManagedEmployeeProfile");
 const listInstructorBranchHistoriesCallable = httpsCallable(functions, "listInstructorBranchHistories");
+const listAnnouncementsCallable = httpsCallable(functions, "listAnnouncements");
+const saveAnnouncementCallable = httpsCallable(functions, "saveAnnouncement");
+const deleteAnnouncementCallable = httpsCallable(functions, "deleteAnnouncement");
 
 export async function createEmployeeAccounts(payload) {
   const result = await createEmployeesCallable(payload);
@@ -174,6 +177,21 @@ export async function getManagedEmployeeProfile(payload) {
 
 export async function listInstructorBranchHistories() {
   const result = await listInstructorBranchHistoriesCallable({});
+  return result.data;
+}
+
+export async function listAnnouncements() {
+  const result = await listAnnouncementsCallable({});
+  return result.data;
+}
+
+export async function saveAnnouncement(payload) {
+  const result = await saveAnnouncementCallable(payload);
+  return result.data;
+}
+
+export async function deleteAnnouncement(payload) {
+  const result = await deleteAnnouncementCallable(payload);
   return result.data;
 }
 

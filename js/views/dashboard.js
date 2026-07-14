@@ -184,8 +184,8 @@ function isPublishedAnnouncement(item) {
   const status = String(item?.status ?? "published").toLowerCase();
   if (["draft", "archived", "hidden", "closed"].includes(status)) return false;
   const now = Date.now();
-  const start = Number(item?.publishedAt ?? item?.startAt ?? 0) || 0;
-  const end = Number(item?.expiresAt ?? item?.endAt ?? 0) || 0;
+  const start = Number(item?.publishedAt ?? item?.startsAt ?? item?.startAt ?? 0) || 0;
+  const end = Number(item?.expiresAt ?? item?.endsAt ?? item?.endAt ?? 0) || 0;
   return (!start || start <= now) && (!end || end >= now);
 }
 
