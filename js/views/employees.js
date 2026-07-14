@@ -343,6 +343,14 @@ async function runLedgerQuery() {
         ? branchEmployees.filter((employee) => !instructorEmployeeUids.has(String(employee.id ?? employee.uid ?? "")))
         : branchEmployees;
     ledgerRows = aggregateLedger(ledgerEmployees, relevant, trainingMeta, cycleMonths);
+    logLedgerMatchDiagnostics({
+      trainingMeta,
+      selectedTrainingKey,
+      allHistories,
+      relevant,
+      branchEmployees,
+      ledgerEmployees,
+    });
 
     document.getElementById("ledger-title").textContent = `${branchLabel} · ${trainingLabel}`;
     document.getElementById("ledger-subtitle").textContent = `기준연도: ${CY}년${cycleMonths ? ` · 재교육 주기: ${cycleMonths}개월` : " · 재교육 주기: 미설정"}`;
@@ -397,51 +405,126 @@ function ledgerHistoryNote(record) {
   return record?.note ?? record?.memo ?? record?.remark ?? record?.remarks ?? record?.["비고"] ?? "";
 }
 
+function canonicalLedgerKey(value) {
+  const raw = normalizeLedgerTrainingKey(value);
+  if (["jobinstructor", "사내강사", "사내강사양성과정", "instructortraining"].includes(raw)) {
+    return LEDGER_JOB_INSTRUCTOR_KEY;
+  }
+  if ([
+    "jobduty", "jobinitial", "jobrecurrent", "jobrecurring",
+    "직무", "직무교육", "직무초기교육", "직무보수교육",
+  ].includes(raw)) return LEDGER_JOB_DUTY_KEY;
+  if (["jobwb", "wb", "weightbalance", "탑재관리"].includes(raw)) return "job_wb";
+  if ([
+    "joboperations", "flightoperations", "운항관리", "운항담당",
+    "운항관리사", "운항통제", "flightdispatch",
+  ].includes(raw)) return "job_operations";
+  if (["legalsms", "sms", "sms교육", "safetymanagementsystem", "안전관리시스템", "안전관리시스템교육"].includes(raw)) {
+    return "legal_sms";
+  }
+  if (["legalsecurity", "항공보안", "항공보안교육", "aviationsecurity", "보안교육"].includes(raw)) {
+    return "legal_security";
+  }
+  if ([
+    "legaldangerousgoods", "위험물", "위험물규정", "위험물교육",
+    "dangerousgoods", "dangerousgoodsregulation", "dangerousgoodsregulations", "dg", "dgr",
+  ].includes(raw)) return "legal_dangerous_goods";
+  return raw;
+}
+
+function ledgerRecordKeys(record) {
+  const keys = [
+    record?.canonicalCourseKey,
+    record?.subjectCode,
+    record?.canonicalCourseName,
+    record?.courseName,
+    record?.title,
+    record?.subjectName,
+  ].map(canonicalLedgerKey).filter(Boolean);
+  return new Set(keys);
+}
+
 function canonicalLedgerRecordKey(record) {
   const type = normalizeTrainingType(record?.trainingType);
   const noteKey = normalizeLedgerTrainingKey(ledgerHistoryNote(record));
   if (type === "job" && noteKey === "직무사내강사") return LEDGER_JOB_INSTRUCTOR_KEY;
 
-  const raw = normalizeLedgerTrainingKey(
-    record?.canonicalCourseKey || record?.subjectCode || record?.canonicalCourseName ||
-    record?.courseName || record?.title || record?.subjectName
-  );
-  if (["jobinstructor", "사내강사", "사내강사양성과정", "instructortraining"].includes(raw)) {
-    return LEDGER_JOB_INSTRUCTOR_KEY;
-  }
-  if (["jobduty", "직무", "직무교육"].includes(raw)) return LEDGER_JOB_DUTY_KEY;
-  return raw;
+  const keys = ledgerRecordKeys(record);
+  if (keys.has(LEDGER_JOB_INSTRUCTOR_KEY)) return LEDGER_JOB_INSTRUCTOR_KEY;
+  return keys.values().next().value ?? "";
 }
 
 function canonicalLedgerMetaKey(meta) {
-  const raw = normalizeLedgerTrainingKey(meta?.subjectCode || meta?.normalizedKey || meta?.subjectName);
-  if (["jobinstructor", "사내강사", "사내강사양성과정", "instructortraining"].includes(raw)) {
-    return LEDGER_JOB_INSTRUCTOR_KEY;
-  }
-  if (["jobduty", "직무", "직무교육"].includes(raw)) return LEDGER_JOB_DUTY_KEY;
-  return raw;
+  return canonicalLedgerKey(meta?.subjectCode || meta?.normalizedKey || meta?.subjectName);
 }
 
 function filterByTraining(histories, meta) {
   if (!meta) return [];
   const selectedKey = canonicalLedgerMetaKey(meta);
+  const selectedType = normalizeTrainingType(meta.trainingType);
   return histories.filter((history) => {
     if (!history) return false;
     const historyType = normalizeTrainingType(history.trainingType);
-    if (historyType !== meta.trainingType) return false;
+    if (historyType !== selectedType) return false;
 
     const recordKey = canonicalLedgerRecordKey(history);
     if (selectedKey === LEDGER_JOB_INSTRUCTOR_KEY) return recordKey === LEDGER_JOB_INSTRUCTOR_KEY;
     if (recordKey === LEDGER_JOB_INSTRUCTOR_KEY) return false;
-    if (selectedKey === LEDGER_JOB_DUTY_KEY) return recordKey === LEDGER_JOB_DUTY_KEY;
-    if (meta.itemId && history.itemId) return history.itemId === meta.itemId;
-    if (meta.subjectCode && history.subjectCode === meta.subjectCode) return true;
-    if (meta.subjectName && (
-      history.subjectName === meta.subjectName ||
-      history.title === meta.subjectName ||
-      history.courseName === meta.subjectName
-    )) return true;
-    return false;
+    if (meta.itemId && history.itemId && history.itemId === meta.itemId) return true;
+    return ledgerRecordKeys(history).has(selectedKey);
+  });
+}
+
+function logLedgerMatchDiagnostics({
+  trainingMeta,
+  selectedTrainingKey,
+  allHistories,
+  relevant,
+  branchEmployees,
+  ledgerEmployees,
+}) {
+  const matchedCounts = new Map();
+  for (const history of relevant) {
+    const uid = historyEmployeeUid(history);
+    if (uid) matchedCounts.set(uid, (matchedCounts.get(uid) ?? 0) + 1);
+  }
+  const perEmployeeMatchedCount = branchEmployees
+    .map((employee) => {
+      const uid = String(employee.id ?? employee.uid ?? "");
+      return { uid, name: employee.name ?? "", matchedCount: matchedCounts.get(uid) ?? 0 };
+    })
+    .sort((a, b) => b.matchedCount - a.matchedCount)
+    .slice(0, 10);
+
+  const diagnosticKeys = [
+    LEDGER_JOB_DUTY_KEY,
+    "job_wb",
+    "job_operations",
+    "legal_sms",
+    "legal_security",
+  ];
+  const options = buildTrainingOptions(viewState.items);
+  const keySamples = Object.fromEntries(diagnosticKeys.map((key) => {
+    const meta = options.find((option) => canonicalLedgerMetaKey(option) === key);
+    const matches = meta ? filterByTraining(allHistories, meta) : [];
+    return [key, {
+      selectedValue: meta?.value ?? "",
+      matchedCount: matches.length,
+      matchedKeys: [...new Set(matches.slice(0, 5).flatMap((history) => [...ledgerRecordKeys(history)]))],
+    }];
+  }));
+
+  console.info("[employees] ledger match diagnostics", {
+    selectedTrainingItem: trainingMeta,
+    selectedCanonicalKey: selectedTrainingKey,
+    selectedSubjectCode: trainingMeta?.subjectCode ?? "",
+    selectedSubjectName: trainingMeta?.subjectName ?? "",
+    allEmployeesCount: branchEmployees.length,
+    allHistoryRowsCount: allHistories.length,
+    matchedHistoryRowsCount: relevant.length,
+    perEmployeeMatchedCount,
+    finalRenderedCount: ledgerEmployees.length,
+    keySamples,
   });
 }
 
