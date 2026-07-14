@@ -8,10 +8,12 @@ import { authStore, ROLES }   from "../core/auth.js";
 import { TEXT } from "../constants/text.js";
 import {
   trainingsDB, completionsDB, assignmentsDB, announcementsDB,
-  companiesDB, branchesDB, usersDB,
+  companiesDB, branchesDB, usersDB, settingsDB,
 } from "../core/db.js";
 import { formatDate, isOverdue, isExpiringSoon, daysFromNow } from "../utils/date.js";
 import { router } from "../core/router.js";
+import { modal } from "../utils/modal.js";
+import { loadEmployeeDeadlineDashboardRows } from "./employees.js";
 
 export async function render(container) {
   const role = authStore.role;
@@ -19,12 +21,236 @@ export async function render(container) {
   if (role === ROLES.SUPER_ADMIN) {
     await renderSuperAdminDashboard(container);  // DB 카운트 포함
   } else if (role === ROLES.HQ_ADMIN) {
-    await renderHQAdminDashboard(container);
+    await renderManagementDashboard(container, ROLES.HQ_ADMIN);
   } else if (role === ROLES.INSTRUCTOR) {
-    await renderInstructorDashboard(container);
+    await renderManagementDashboard(container, ROLES.INSTRUCTOR);
   } else {
     await renderEmployeeDashboard(container);
   }
+}
+
+let managementDashboardState = {
+  deadlineRows: [],
+  branches: [],
+  buckets: [],
+  role: "",
+};
+
+async function renderManagementDashboard(container, role) {
+  container.innerHTML = skeletonAdminDashboard();
+  const isInstructor = role === ROLES.INSTRUCTOR;
+  const [deadlineData, notificationSettings] = await Promise.all([
+    safeLoad(() => loadEmployeeDeadlineDashboardRows(), { rows: [], branches: [], employees: [] }),
+    safeLoad(() => settingsDB.getNotifications(), {}),
+  ]);
+  const dashboardCompanyId = authStore.companyId ?? deadlineData.company?.id ?? null;
+  const announcements = dashboardCompanyId
+    ? await safeLoad(() => announcementsDB.list(dashboardCompanyId), [])
+    : [];
+
+  const roleScopedAnnouncements = announcements.filter((item) => announcementVisibleToRole(item, role));
+  const visibleAnnouncements = isInstructor
+    ? roleScopedAnnouncements.filter(isPublishedAnnouncement)
+    : roleScopedAnnouncements;
+  const publishedAnnouncements = visibleAnnouncements.filter(isPublishedAnnouncement);
+  const importantAnnouncements = visibleAnnouncements.filter(isImportantAnnouncement);
+  const unreadAnnouncements = visibleAnnouncements.filter((item) => !announcementReadBy(item, authStore.uid));
+  const buckets = resolveDashboardDeadlineBuckets(notificationSettings);
+  const maxSoonDays = Math.max(0, ...buckets.map((bucket) => bucket.days));
+  const uniqueDeadlineRows = dedupeDeadlineRows(deadlineData.rows ?? []);
+  const soonRows = uniqueDeadlineRows.filter((row) => row.daysRemaining !== null && row.daysRemaining >= 0 && row.daysRemaining <= maxSoonDays);
+  const overdueRows = uniqueDeadlineRows.filter((row) => row.daysRemaining !== null && row.daysRemaining < 0);
+
+  managementDashboardState = {
+    deadlineRows: [...overdueRows, ...soonRows],
+    branches: deadlineData.branches ?? [],
+    buckets,
+    role,
+  };
+
+  const announcementCards = isInstructor
+    ? [
+      { label: "확인 가능 공지", value: visibleAnnouncements.length, action: "announcements", variant: "primary" },
+      { label: "미확인 공지", value: unreadAnnouncements.length, action: "announcements", variant: unreadAnnouncements.length ? "warning" : "success" },
+      { label: "중요 공지", value: importantAnnouncements.length, action: "announcements", variant: importantAnnouncements.length ? "danger" : "neutral" },
+    ]
+    : [
+      { label: "전체 공지", value: visibleAnnouncements.length, action: "announcements", variant: "primary" },
+      { label: "중요 공지", value: importantAnnouncements.length, action: "announcements", variant: importantAnnouncements.length ? "danger" : "neutral" },
+      { label: "게시 중 공지", value: publishedAnnouncements.length, action: "announcements", variant: "success" },
+    ];
+  const deadlineCards = [
+    { label: "교육기한 임박", rows: soonRows, action: "soon", variant: soonRows.length ? "warning" : "success" },
+    { label: "교육기한 초과", rows: overdueRows, action: "overdue", variant: overdueRows.length ? "danger" : "success" },
+  ];
+
+  container.innerHTML = `
+    <div class="section-header">
+      <div>
+        <div class="section-title">${isInstructor ? `안녕하세요, ${esc(authStore.name)}님` : "교육관리 업무 대시보드"}</div>
+        <div class="section-subtitle">${isInstructor ? "소속 지점의 공지와 직원 교육기한 현황입니다." : "전체 지점의 공지와 직원 교육기한 현황입니다."} · ${todayLabel()}</div>
+      </div>
+    </div>
+    <div class="dashboard-grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
+      ${announcementCards.map(dashboardAnnouncementCard).join("")}
+      ${deadlineCards.map(dashboardDeadlineCard).join("")}
+    </div>
+    <div class="dashboard-main" style="grid-template-columns:1fr 1fr">
+      <div class="card">
+        <div class="card__header"><div><div class="card__title">공지 현황</div><div class="card__subtitle">기존 공지사항 데이터를 기준으로 집계합니다.</div></div></div>
+        <div class="card__body" style="display:flex;flex-direction:column;gap:var(--space-3)">
+          ${publishedAnnouncements.length
+            ? publishedAnnouncements.slice(0, 5).map(announcementItem).join("")
+            : '<div class="empty-state">게시 중인 공지사항이 없습니다.</div>'}
+        </div>
+      </div>
+      <div class="card">
+        <div class="card__header"><div><div class="card__title">교육기한 현황</div><div class="card__subtitle">직원관리대장과 동일한 주기 계산 결과입니다.</div></div></div>
+        <div class="card__body" style="display:flex;flex-direction:column;gap:var(--space-3)">
+          ${deadlineSummaryRow("교육기한 임박", soonRows, "warning")}
+          ${deadlineSummaryRow("교육기한 초과", overdueRows, "danger")}
+          ${isInstructor && !(deadlineData.branches ?? []).length
+            ? '<div class="empty-state">소속 지점 정보가 없어 현황을 조회할 수 없습니다.</div>'
+            : ""}
+        </div>
+      </div>
+    </div>`;
+
+  container.querySelectorAll('[data-dashboard-action="announcements"]').forEach((card) => {
+    card.addEventListener("click", () => router.push("announcements"));
+  });
+  container.querySelectorAll('[data-dashboard-action="soon"], [data-dashboard-action="overdue"]').forEach((card) => {
+    card.addEventListener("click", () => openDeadlineDashboardModal(card.dataset.dashboardAction));
+  });
+}
+
+function dashboardAnnouncementCard(card) {
+  return `<button type="button" class="stat-card" data-dashboard-action="${card.action}" style="text-align:left;cursor:pointer;border:0;width:100%">
+    <div class="stat-card__icon stat-card__icon--${card.variant}">${iconBell()}</div>
+    <div class="stat-card__label">${esc(card.label)}</div>
+    <div class="stat-card__value">${card.value}</div>
+  </button>`;
+}
+
+function dashboardDeadlineCard(card) {
+  const employeeCount = new Set(card.rows.map((row) => row.employeeUid)).size;
+  return `<button type="button" class="stat-card" data-dashboard-action="${card.action}" style="text-align:left;cursor:pointer;border:0;width:100%">
+    <div class="stat-card__icon stat-card__icon--${card.variant}">${alertIcon()}</div>
+    <div class="stat-card__label">${esc(card.label)}</div>
+    <div class="stat-card__value">${card.rows.length}건</div>
+    <div style="font-size:var(--text-xs);color:var(--gray-500);margin-top:2px">대상 직원 ${employeeCount}명</div>
+  </button>`;
+}
+
+function deadlineSummaryRow(label, rows, tone) {
+  const employees = new Set(rows.map((row) => row.employeeUid)).size;
+  return `<button type="button" data-dashboard-action="${tone === "danger" ? "overdue" : "soon"}" class="btn btn--ghost" style="display:flex;justify-content:space-between;width:100%">
+    <span>${esc(label)}</span><strong>${rows.length}건 · ${employees}명</strong>
+  </button>`;
+}
+
+function resolveDashboardDeadlineBuckets(settings = {}) {
+  const configured = (Array.isArray(settings?.deadlineBuckets) ? settings.deadlineBuckets : [])
+    .filter((bucket) => bucket?.enabled !== false && Number(bucket?.days) > 0 && !/초과|완료/.test(String(bucket?.label ?? "")))
+    .map((bucket) => ({ key: String(bucket.key ?? ""), label: String(bucket.label ?? `D-${bucket.days}`), days: Number(bucket.days) }))
+    .sort((a, b) => b.days - a.days);
+  return configured.length ? configured : [30, 14, 7].map((days) => ({ key: `d${days}`, label: `D-${days}`, days }));
+}
+
+function dedupeDeadlineRows(rows) {
+  const unique = new Map();
+  for (const row of rows) {
+    const key = `${row.employeeUid}::${row.trainingKey}`;
+    const existing = unique.get(key);
+    if (!existing || Number(row.daysRemaining) < Number(existing.daysRemaining)) unique.set(key, row);
+  }
+  return [...unique.values()];
+}
+
+function announcementVisibleToRole(item, role) {
+  if (item?.companyId && authStore.companyId && item.companyId !== authStore.companyId) return false;
+  if (role !== ROLES.INSTRUCTOR) return true;
+  const instructorBranch = String(authStore.branchId ?? authStore.profile?.branchId ?? "").trim();
+  if (!instructorBranch) return false;
+  const branchValues = [item?.branchId, item?.targetBranchId, item?.branchIds, item?.targetBranchIds, item?.targetBranches]
+    .flatMap((value) => Array.isArray(value) ? value : value && typeof value === "object" ? Object.keys(value).filter((key) => value[key]) : [value])
+    .map((value) => String(value ?? "").trim()).filter(Boolean);
+  return !branchValues.length || branchValues.includes("all") || branchValues.includes(instructorBranch);
+}
+
+function isPublishedAnnouncement(item) {
+  const status = String(item?.status ?? "published").toLowerCase();
+  if (["draft", "archived", "hidden", "closed"].includes(status)) return false;
+  const now = Date.now();
+  const start = Number(item?.publishedAt ?? item?.startAt ?? 0) || 0;
+  const end = Number(item?.expiresAt ?? item?.endAt ?? 0) || 0;
+  return (!start || start <= now) && (!end || end >= now);
+}
+
+function isImportantAnnouncement(item) {
+  return item?.important === true || item?.pinned === true || ["important", "urgent", "high"].includes(String(item?.priority ?? "").toLowerCase());
+}
+
+function announcementReadBy(item, uid) {
+  const candidates = [item?.readBy, item?.viewedBy, item?.acknowledgedBy, item?.readUids];
+  return candidates.some((value) => Array.isArray(value) ? value.includes(uid) : value && typeof value === "object" ? !!value[uid] : false);
+}
+
+function deadlineBucketForRow(row, buckets) {
+  if (row.daysRemaining < 0) return "overdue";
+  const ascending = [...buckets].sort((a, b) => a.days - b.days);
+  return ascending.find((bucket) => row.daysRemaining <= bucket.days)?.key ?? "";
+}
+
+function openDeadlineDashboardModal(initialKind) {
+  const state = managementDashboardState;
+  const initialFilter = initialKind === "overdue" ? "overdue" : "all-soon";
+  modal.open({
+    title: initialKind === "overdue" ? "교육기한 초과 상세" : "교육기한 임박 상세",
+    size: "xl",
+    body: `<div style="display:flex;flex-direction:column;gap:var(--space-4)">
+      <div style="display:grid;grid-template-columns:1fr 1fr ${state.role === ROLES.HQ_ADMIN ? "1fr" : ""};gap:var(--space-3)">
+        <input class="form-control" id="dashboard-deadline-search" type="search" placeholder="직원명·사번·교육항목 검색" />
+        <select class="form-control" id="dashboard-deadline-filter">
+          <option value="all">전체</option>
+          <option value="all-soon" ${initialFilter === "all-soon" ? "selected" : ""}>교육기한 임박</option>
+          ${state.buckets.map((bucket) => `<option value="${esc(bucket.key)}">${esc(bucket.label)}</option>`).join("")}
+          <option value="overdue" ${initialFilter === "overdue" ? "selected" : ""}>기한 초과</option>
+        </select>
+        ${state.role === ROLES.HQ_ADMIN ? `<select class="form-control" id="dashboard-deadline-branch"><option value="">전체 지점</option>${state.branches.map((branch) => `<option value="${esc(branch.id ?? branch.branchId)}">${esc(branch.name ?? branch.branchName ?? branch.id)}</option>`).join("")}</select>` : ""}
+      </div>
+      <div id="dashboard-deadline-results"></div>
+    </div>`,
+    actions: [{ label: "닫기", variant: "secondary", onClick: () => modal.close() }],
+  });
+
+  const renderRows = () => {
+    const query = String(document.getElementById("dashboard-deadline-search")?.value ?? "").trim().toLowerCase();
+    const filter = document.getElementById("dashboard-deadline-filter")?.value ?? "all";
+    const branchId = document.getElementById("dashboard-deadline-branch")?.value ?? "";
+    const rows = state.deadlineRows.filter((row) => {
+      const bucket = deadlineBucketForRow(row, state.buckets);
+      const matchFilter = filter === "all" || (filter === "all-soon" ? row.daysRemaining >= 0 : bucket === filter);
+      const matchBranch = !branchId || row.branchId === branchId;
+      const matchQuery = !query || [row.employeeName, row.empNo, row.trainingItemName].some((value) => String(value ?? "").toLowerCase().includes(query));
+      return matchFilter && matchBranch && matchQuery;
+    }).sort((a, b) => Number(a.daysRemaining) - Number(b.daysRemaining));
+    const target = document.getElementById("dashboard-deadline-results");
+    if (!target) return;
+    if (!rows.length) {
+      target.innerHTML = `<div class="empty-state" style="padding:var(--space-10)">현재 조건에 맞는 교육기한 대상자가 없습니다.</div>`;
+      return;
+    }
+    target.innerHTML = `<div style="overflow-x:auto"><table class="data-table" style="min-width:900px"><thead><tr><th>직원명</th><th>사번</th><th>지점</th><th>교육항목</th><th>기준 교육일</th><th>다음 예정일</th><th>남은 일수</th><th>상태</th></tr></thead><tbody>${rows.map((row) => `<tr data-employee-uid="${esc(row.employeeUid)}" style="cursor:pointer"><td>${esc(row.employeeName)}</td><td>${esc(row.empNo)}</td><td>${esc(row.branchName || "-")}</td><td>${esc(row.trainingItemName)}</td><td>${esc(row.baseTrainingDate || "-")}</td><td>${row.nextDueDate ? esc(formatDate(row.nextDueDate)) : "-"}</td><td>${row.daysRemaining < 0 ? `${Math.abs(row.daysRemaining)}일 초과` : `${row.daysRemaining}일`}</td><td>${esc(row.dueStatusLabel || "-")}</td></tr>`).join("")}</tbody></table></div>`;
+    target.querySelectorAll("tr[data-employee-uid]").forEach((row) => row.addEventListener("click", () => {
+      modal.close();
+      router.push("history-cards", { uid: row.dataset.employeeUid });
+    }));
+  };
+  document.getElementById("dashboard-deadline-search")?.addEventListener("input", renderRows);
+  document.getElementById("dashboard-deadline-filter")?.addEventListener("change", renderRows);
+  document.getElementById("dashboard-deadline-branch")?.addEventListener("change", renderRows);
+  renderRows();
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -563,3 +789,4 @@ const iconMapPin   = () => ic("M10 10a3 3 0 100-6 3 3 0 000 6zm0 0c0 5-6 8-6 8h1
 const iconShield   = () => ic("M10 2l7 3v5c0 4-3 7-7 9-4-2-7-5-7-9V5l7-3z");
 const iconUsers    = () => ic("M14 17v-1a4 4 0 00-4-4H6a4 4 0 00-4 4v1m8-9a3 3 0 11-6 0 3 3 0 016 0zm5 3a2 2 0 100-4 2 2 0 000 4zm2 6v-1a3 3 0 00-2-2.83");
 const iconSettings = () => ic("M10 12.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5zm6.5-2.5a6.5 6.5 0 01-.1.9l1.7 1.4-1.5 2.6-2-.8a6 6 0 01-1.6.9l-.3 2h-3l-.3-2a6 6 0 01-1.6-.9l-2 .8L4.4 14l1.7-1.4A6.5 6.5 0 016 12a6.5 6.5 0 01.1-.9L4.4 9.7l1.5-2.6 2 .8A6 6 0 019.5 7l.3-2h3l.3 2a6 6 0 011.6.9l2-.8 1.5 2.6-1.7 1.3A6.5 6.5 0 0116.5 12z");
+const iconBell     = () => ic("M10 2a4 4 0 00-4 4v3.5L4 13h12l-2-3.5V6a4 4 0 00-4-4zm-2 13a2 2 0 004 0");

@@ -406,6 +406,75 @@ async function fetchAllSessionCompletions() {
   } catch { return []; }
 }
 
+export async function loadEmployeeDeadlineDashboardRows() {
+  const [references, items] = await Promise.all([
+    loadTrainingReferences(),
+    listManagedItems().catch(() => []),
+  ]);
+  viewState = {
+    company: references.company ?? null,
+    branches: references.branches ?? [],
+    employees: references.employees ?? [],
+    items,
+  };
+
+  const scopedHistories = authStore.role === ROLES.INSTRUCTOR
+    ? await listInstructorBranchHistories()
+    : null;
+  const [manualAll, sessionAll] = scopedHistories
+    ? [scopedHistories.manualHistories ?? [], scopedHistories.sessionHistories ?? []]
+    : await Promise.all([
+      manualTrainingHistoriesDB.listAll().catch(() => []),
+      fetchAllSessionCompletions(),
+    ]);
+  const allHistories = [...manualAll, ...sessionAll];
+  const standardKeys = new Set([
+    LEDGER_JOB_DUTY_KEY,
+    LEDGER_JOB_INSTRUCTOR_KEY,
+    "job_wb",
+    "job_operations",
+    "legal_sms",
+    "legal_security",
+    "legal_dangerous_goods",
+  ]);
+  const metaByKey = new Map();
+  for (const meta of buildTrainingOptions(items)) {
+    const canonicalKey = canonicalLedgerMetaKey(meta);
+    if (standardKeys.has(canonicalKey) && !metaByKey.has(canonicalKey)) metaByKey.set(canonicalKey, meta);
+  }
+
+  const rows = [];
+  for (const [canonicalKey, meta] of metaByKey) {
+    const companyId = getEffectiveCompanyId(meta, references.branches?.[0]);
+    const config = await loadEducationCycleConfig(companyId, meta).catch(() => null);
+    const cycleMonths = Number(config?.cycleMonths ?? 0) || 0;
+    const relevant = filterByTraining(allHistories, meta);
+    for (const summary of aggregateLedger(references.employees ?? [], relevant, meta, cycleMonths)) {
+      if (!summary.hasHistory) continue;
+      rows.push({
+        ...summary,
+        employeeUid: summary.uid,
+        employeeName: summary.name,
+        branchId: summary._emp?.branchId ?? "",
+        branchName: summary._emp?.branchName ?? "",
+        trainingKey: canonicalKey,
+        trainingItemName: meta.displayName ?? meta.subjectName ?? canonicalKey,
+        baseTrainingDate: summary._cycleBaseDate ?? summary.lastDate ?? null,
+      });
+    }
+  }
+
+  const branchCompanyIds = [...new Set((references.branches ?? []).map((branch) => branch?.companyId).filter(Boolean))];
+  return {
+    company: references.company?.id
+      ? references.company
+      : { id: branchCompanyIds.length === 1 ? branchCompanyIds[0] : null, name: references.company?.name ?? "" },
+    branches: references.branches ?? [],
+    employees: references.employees ?? [],
+    rows,
+  };
+}
+
 const LEDGER_JOB_INSTRUCTOR_KEY = "job_instructor";
 const LEDGER_JOB_DUTY_KEY = "job_duty";
 

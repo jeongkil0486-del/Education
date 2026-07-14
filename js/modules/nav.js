@@ -38,7 +38,6 @@ const NAV_CONFIG = {
       items: [
         { path: "employees", label: TEXT.routes.employees, icon: iconUsers() },
         { path: "history-cards", label: TEXT.routes.historyCards, icon: iconHistory() },
-        { path: "statistics", label: TEXT.routes.statistics, icon: iconChart() },
       ],
     },
     {
@@ -54,8 +53,6 @@ const NAV_CONFIG = {
       group: TEXT.nav.groups.teaching,
       items: [
         { path: "dashboard",             label: TEXT.routes.dashboard,             icon: iconGrid() },
-        { path: "instructor-trainings",  label: TEXT.routes.instructorTrainings,   icon: iconBook() },
-        { path: "my-trainings",          label: TEXT.nav.assignedTrainings,        icon: iconLayers() },
         { path: "materials",             label: TEXT.routes.materials,             icon: iconFile() },
         { path: "lesson-plan",           label: TEXT.routes.lessonPlan,            icon: iconPencil() },
         { path: "slideshow",             label: TEXT.routes.slideshow,             icon: iconPlay() },

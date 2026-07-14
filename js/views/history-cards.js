@@ -80,11 +80,11 @@ export async function render(container, params = {}) {
         </div>
         <div style="display:flex;gap:var(--space-2);flex-wrap:wrap">
           ${authStore.role === ROLES.HQ_ADMIN || authStore.role === ROLES.SUPER_ADMIN ? `
-            <button class="btn btn--secondary" id="btn-import-excel">기존 교육이력 가져오기</button>
+            <button class="btn btn--secondary" id="btn-import-excel">교육 이력 업로드</button>
           ` : ''}
           ${canManageEmployeeHistory() ? '<button class="btn btn--secondary" id="btn-add-manual-history" disabled>개인 이력 추가</button>' : ''}
-          ${authStore.role === ROLES.HQ_ADMIN ? '<button class="btn btn--danger btn--sm" id="btn-reset-all-history" disabled style="margin-left:auto">개인이력 전체 초기화</button>' : ''}
-          <button class="btn btn--primary" id="btn-download-card" disabled>이력카드 다운로드</button>
+          ${authStore.role === ROLES.HQ_ADMIN ? '<button class="btn btn--danger" id="btn-reset-all-history" disabled>개인이력 초기화</button>' : ''}
+          <button class="btn btn--primary" id="btn-download-card" disabled>다운로드</button>
         </div>
       </div>
 
