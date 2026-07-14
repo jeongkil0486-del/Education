@@ -112,6 +112,16 @@ function materialVisibleToActor(material, actor) {
   return !visibility || ["public", "company", "common", "instructor", "instructors"].includes(visibility);
 }
 
+async function resolveLegacyMaterialCompany(material) {
+  if (normalizeText(material?.companyId)) return material;
+  const ownerUid = normalizeText(material?.ownerUid || material?.uploadedByUid || material?.uploadedBy || material?.createdByUid || material?.createdBy);
+  if (!ownerUid) return material;
+  const owner = await getUserProfile(ownerUid);
+  if (!owner) return material;
+  const companyId = await resolveActorCompanyId(owner);
+  return companyId ? { ...material, companyId, legacyCompanyResolved: true } : material;
+}
+
 exports.createMaterialUploadUrl = onCall(R2_OPTS, async (request) => {
   ensureAuthenticated(request);
 
@@ -206,7 +216,7 @@ exports.getMaterialDownloadUrl = onCall(R2_OPTS, async (request) => {
     throw new HttpsError("not-found", "교육자료를 찾을 수 없습니다.");
   }
 
-  const material = materialSnap.val();
+  const material = await resolveLegacyMaterialCompany(materialSnap.val());
   if (profile.role !== "super_admin" && !profile.companyId) profile.companyId = await resolveActorCompanyId(profile);
   if (profile.role !== "super_admin" && !profile.companyId) {
     throw new HttpsError("failed-precondition", "교육자료의 회사 범위를 결정할 수 없습니다.");
@@ -260,12 +270,19 @@ exports.listMaterials = onCall(OPTS, async (request) => {
     throw new HttpsError("failed-precondition", "교육자료의 회사 범위를 결정할 수 없습니다.");
   }
   const snap = await db.ref("materials").get();
-  const materials = [];
-  snap.forEach((child) => {
-    const material = child.val() ?? {};
-    if (materialVisibleToActor(material, actor)) materials.push({ id: child.key, ...material });
-  });
+  const rawMaterials = Object.entries(snap.val() ?? {}).map(([id, material]) => ({ id, ...(material ?? {}) }));
+  const resolvedMaterials = await Promise.all(rawMaterials.map(resolveLegacyMaterialCompany));
+  const materials = resolvedMaterials.filter((material) => materialVisibleToActor(material, actor));
   materials.sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0));
+  logger.info("[listMaterials] result", {
+    requesterUid: request.auth.uid,
+    requesterRole: actor.role,
+    requesterCompanyId: actor.companyId,
+    totalCount: rawMaterials.length,
+    legacyCompanyResolvedCount: resolvedMaterials.filter((item) => item.legacyCompanyResolved).length,
+    companyMatchCount: resolvedMaterials.filter((item) => !item.companyId || actor.role === "super_admin" || normalizeText(item.companyId) === normalizeText(actor.companyId)).length,
+    finalCount: materials.length,
+  });
   return { materials };
 });
 

@@ -425,7 +425,7 @@ function openEmployeeProfileModal() {
     title: "인적사항 수정",
     size: "lg",
     body: `<div style="display:grid;gap:var(--space-4)">
-      <div class="form-row"><div class="form-group"><label class="form-label form-label--required">성명</label><input class="form-control" id="profile-name" value="${esc(employee.name ?? "")}"></div><div class="form-group"><label class="form-label">사번</label><input class="form-control" id="profile-emp-no" value="${esc(employee.empNo ?? "")}" ${instructor ? "readonly" : ""}></div></div>
+      <div class="form-row"><div class="form-group"><label class="form-label form-label--required">성명</label><input class="form-control" id="profile-name" name="name" value="${esc(employee.name ?? employee.nmae ?? employee.displayName ?? "")}"></div><div class="form-group"><label class="form-label">사번</label><input class="form-control" id="profile-emp-no" name="empNo" value="${esc(employee.empNo ?? "")}" ${instructor ? "readonly" : ""}></div></div>
       <div class="form-row"><div class="form-group"><label class="form-label">생년월일</label><input class="form-control" type="date" id="profile-birth-date" value="${dateValue(employee.birthDate ?? employee.birth ?? employee.birthday)}"></div><div class="form-group"><label class="form-label">입사일</label><input class="form-control" type="date" id="profile-hire-date" value="${dateValue(employee.hireDate ?? employee.joinDate ?? employee.employmentDate)}"></div></div>
       <div class="form-row"><div class="form-group"><label class="form-label">신입/경력</label><input class="form-control" id="profile-entry-type" value="${esc(employee.entryType ?? employee.employmentType ?? employee.careerType ?? "")}"></div><div class="form-group"><label class="form-label">직책</label><input class="form-control" id="profile-position" value="${esc(employee.position ?? employee.jobTitle ?? employee.title ?? "")}"></div></div>
       <div class="form-row"><div class="form-group"><label class="form-label">사내 자격</label><input class="form-control" id="profile-internal-license" value="${esc(employee.internalLicense ?? employee.internalQualification ?? "")}"></div><div class="form-group"><label class="form-label">사외 자격</label><input class="form-control" id="profile-external-license" value="${esc(employee.externalLicense ?? employee.externalQualification ?? "")}"></div></div>
@@ -434,20 +434,24 @@ function openEmployeeProfileModal() {
     actions: [
       { label: "취소", variant: "secondary", onClick: () => modal.close() },
       { label: "저장", variant: "primary", onClick: async () => {
-        const name = String(document.getElementById("profile-name")?.value ?? "").trim();
+        const modalRoot = document.querySelector("#modal-container .modal");
+        const field = (id) => modalRoot?.querySelector(`#${id}`);
+        const nameInput = field("profile-name");
+        const name = String(nameInput?.value ?? "").trim();
+        console.info("[history-cards] profile save", { uid: employee.uid ?? employee.id, inputId: nameInput?.id ?? "", rawName: nameInput?.value ?? "", name });
         if (!name) { toast.warning("성명을 입력해 주세요."); return; }
         modal.setLoading("저장", true);
         try {
           const profile = {
             name,
-            empNo: document.getElementById("profile-emp-no")?.value ?? employee.empNo ?? "",
-            birthDate: document.getElementById("profile-birth-date")?.value || null,
-            hireDate: document.getElementById("profile-hire-date")?.value || null,
-            entryType: document.getElementById("profile-entry-type")?.value ?? "",
-            internalLicense: document.getElementById("profile-internal-license")?.value ?? "",
-            externalLicense: document.getElementById("profile-external-license")?.value ?? "",
-            position: document.getElementById("profile-position")?.value ?? "",
-            branchId: instructor ? employee.branchId : document.getElementById("profile-branch")?.value,
+            empNo: field("profile-emp-no")?.value ?? employee.empNo ?? "",
+            birthDate: field("profile-birth-date")?.value || null,
+            hireDate: field("profile-hire-date")?.value || null,
+            entryType: field("profile-entry-type")?.value ?? "",
+            internalLicense: field("profile-internal-license")?.value ?? "",
+            externalLicense: field("profile-external-license")?.value ?? "",
+            position: field("profile-position")?.value ?? "",
+            branchId: instructor ? employee.branchId : field("profile-branch")?.value,
           };
           const result = await updateEmployeeManagementProfile({ uid: employee.uid ?? employee.id, profile });
           modal.close();

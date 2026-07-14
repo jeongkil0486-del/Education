@@ -187,14 +187,23 @@ export async function uploadMaterial(values, file, opts = {}) {
 
 export async function listMaterials() {
   const fn = httpsCallable(functions, "listMaterials");
+  console.info("[material-service] listMaterials request", { uid: authStore.uid, role: authStore.role, companyId: authStore.companyId, branchId: authStore.branchId });
   const result = await fn({});
-  const items = result.data?.materials ?? [];
+  const items = Array.isArray(result.data?.materials)
+    ? result.data.materials
+    : Array.isArray(result.data?.items)
+      ? result.data.items
+      : Array.isArray(result.data?.rows)
+        ? result.data.rows
+        : Array.isArray(result.data) ? result.data : [];
+  console.info("[material-service] listMaterials response", { count: items.length, sample: items[0] ?? null });
 
   return items
     .map((item) => {
       const trainingType = normalizeMaterialType(item.trainingType);
       return {
         ...item,
+        title: item.title ?? item.materialName ?? item.name ?? "교육자료",
         trainingType,
         typeLabel: MATERIAL_TYPE_LABELS[trainingType] ?? "기타",
       };

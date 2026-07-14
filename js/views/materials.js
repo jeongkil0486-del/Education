@@ -31,7 +31,7 @@ import {
 } from "../services/material-service.js";
 
 /* ── 상태 ─────────────────────────────────────────────────── */
-let state = { materials: [] };
+let state = { materials: [], loadError: null };
 
 /* ── 권한 헬퍼 ────────────────────────────────────────────── */
 const canUpload = () => authStore.role === ROLES.HQ_ADMIN;
@@ -123,10 +123,12 @@ function bindStaticEvents(container) {
 async function loadData(container) {
   try {
     state.materials = await listMaterials();
+    state.loadError = null;
   } catch (err) {
     console.error("[materials] loadData failed", err?.code, err?.message, err);
     toast.error("교육자료를 불러오지 못했습니다.");
     state.materials = [];
+    state.loadError = err;
   }
   renderTable(container);
 }
@@ -148,6 +150,11 @@ function renderTable(container) {
     (container.querySelector("#mat-filter-type")
       ?? document.getElementById("mat-filter-type"))?.value ?? ""
   );
+
+  if (state.loadError) {
+    wrap.innerHTML = `<div class="empty-state" style="padding:var(--space-12)"><div class="empty-state__title">교육자료를 불러오지 못했습니다.</div><div class="empty-state__desc">${esc(state.loadError?.message || "잠시 후 다시 시도해 주세요.")}</div></div>`;
+    return;
+  }
 
   const filtered = state.materials.filter(m => {
     const matchSearch = !search     || String(m.title ?? "").toLowerCase().includes(search);
