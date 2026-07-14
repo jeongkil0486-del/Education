@@ -189,7 +189,7 @@ function createAuditLogger({ db, logger, resolveCompanyId }) {
       if (Number.isFinite(fromTimestamp) && fromTimestamp > 0 && row.createdAt < fromTimestamp) return;
       if (action && text(row.action) !== text(action)) return;
       if (status && text(row.status) !== text(status)) return;
-      if (branchId && ![row.actorBranchId, row.targetBranchId].map(text).includes(text(branchId))) return;
+      if (branchId && ![row.actorBranchId, row.targetBranchId].map((value) => text(value)).includes(text(branchId))) return;
       if (actorNeedle && !text(row.actorName).toLowerCase().includes(actorNeedle)) return;
       if (targetNeedle && ![row.targetName, row.targetEmpNo, row.summary].some((value) => text(value).toLowerCase().includes(targetNeedle))) return;
       rows.push(row);
