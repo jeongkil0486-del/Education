@@ -776,14 +776,30 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
     const initialDate = explicitInitialDates[0] ?? uniqueDates[0] ?? null;
     const lastDate = uniqueDates.at(-1) ?? null;
 
-    const datesForYear = (year) => [...new Set(recs.filter((record) => {
-      // 초기교육 기준일과 동일한 초기 레코드만 연도 열에서 제외한다. 이후 연도에
-      // 입력된 별도 회차가 legacy 데이터에서 initial로 남아 있어도 숨기지 않는다.
-      if (isInitialRec(record) && recordDate(record) === initialDate) return false;
-      const explicitYear = explicitRecordEducationYear(record);
-      if (explicitYear !== null) return explicitYear === year;
-      return recordEducationYear(record) === year;
-    }).map(recordDate).filter(Boolean))].sort();
+    const selectedCanonicalKey = canonicalLedgerMetaKey(trainingMeta);
+    const datesForYear = (year) => {
+      const explicitField = `year_${year}`;
+      const dates = recs.flatMap((record) => {
+        // 직무 외 표준 항목의 연도 열은 초기/보수와 무관하게 해당 연도의 모든
+        // 교육 회차를 표시한다. 직무는 현재 정상 동작을 유지한다.
+        if (selectedCanonicalKey === LEDGER_JOB_DUTY_KEY
+          && isInitialRec(record)
+          && recordDate(record) === initialDate) return [];
+
+        const explicitDates = [record?.[explicitField]].flat()
+          .flatMap((value) => typeof value === "string" ? value.split(/[,\n]/) : [value])
+          .map(toYmd)
+          .filter(Boolean);
+        if (explicitDates.length) return explicitDates;
+
+        const explicitYear = explicitRecordEducationYear(record);
+        if (explicitYear !== null && explicitYear !== year) return [];
+        if (explicitYear === null && recordEducationYear(record) !== year) return [];
+        const date = recordDate(record);
+        return date ? [date] : [];
+      });
+      return [...new Set(dates)].sort();
+    };
 
     // 전년도
     const prevDates = datesForYear(PY);
