@@ -134,7 +134,10 @@ async function resolveLegacyMaterialCompany(material) {
 }
 
 async function resolveMaterialAccess(uid, materialId) {
-  const profileSnap = await db.ref(`users/${uid}`).get();
+  const [profileSnap, materialSnap] = await Promise.all([
+    db.ref(`users/${uid}`).get(),
+    db.ref(`materials/${materialId}`).get(),
+  ]);
   if (!profileSnap.exists()) {
     throw new HttpsError("permission-denied", "사용자 프로필을 찾을 수 없습니다.");
   }
@@ -142,7 +145,6 @@ async function resolveMaterialAccess(uid, materialId) {
   if (!["super_admin", "hq_admin", "instructor"].includes(profile.role)) {
     throw new HttpsError("permission-denied", "교육자료 조회 권한이 없습니다.");
   }
-  const materialSnap = await db.ref(`materials/${materialId}`).get();
   if (!materialSnap.exists()) {
     throw new HttpsError("not-found", "교육자료를 찾을 수 없습니다.");
   }
@@ -272,12 +274,16 @@ exports.getMaterialDownloadUrl = onCall(R2_OPTS, async (request) => {
   }
 });
 
+let materialStreamR2Client = null;
+
 exports.streamMaterialPdf = onRequest(R2_OPTS, async (request, response) => {
+  const requestStartedAt = Date.now();
   const origin = normalizeText(request.get("origin"));
   response.set("Access-Control-Allow-Origin", origin || "*");
   response.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
   response.set("Access-Control-Allow-Headers", "Authorization, Content-Type, Range");
-  response.set("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range");
+  response.set("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range, Server-Timing");
+  response.set("Timing-Allow-Origin", origin || "*");
   response.set("Vary", "Origin");
   if (request.method === "OPTIONS") {
     response.status(204).send("");
@@ -295,13 +301,17 @@ exports.streamMaterialPdf = onRequest(R2_OPTS, async (request, response) => {
       response.status(401).json({ error: "unauthenticated" });
       return;
     }
+    const authStartedAt = Date.now();
     const decoded = await auth.verifyIdToken(match[1]);
+    const authMs = Date.now() - authStartedAt;
     const materialId = normalizeText(request.query?.materialId);
     if (!materialId) {
       response.status(400).json({ error: "materialId-required" });
       return;
     }
+    const accessStartedAt = Date.now();
     const { material } = await resolveMaterialAccess(decoded.uid, materialId);
+    const accessMs = Date.now() - accessStartedAt;
     const fileType = normalizeText(material.fileType).toLowerCase();
     if ((fileType && fileType !== "application/pdf") || !hasPdfExtension(material.fileName || "file.pdf")) {
       response.status(415).json({ error: "pdf-only" });
@@ -318,18 +328,31 @@ exports.streamMaterialPdf = onRequest(R2_OPTS, async (request, response) => {
       response.status(416).json({ error: "invalid-range" });
       return;
     }
-    const object = await buildR2Client().send(new GetObjectCommand({
+    const r2StartedAt = Date.now();
+    materialStreamR2Client ??= buildR2Client();
+    const object = await materialStreamR2Client.send(new GetObjectCommand({
       Bucket: bucket,
       Key: material.r2Key,
       ...(range ? { Range: range } : {}),
     }));
+    const r2Ms = Date.now() - r2StartedAt;
+    const totalMs = Date.now() - requestStartedAt;
     response.status(object.ContentRange ? 206 : 200);
+    response.set("Server-Timing", `auth;dur=${authMs}, access;dur=${accessMs}, r2;dur=${r2Ms}, total;dur=${totalMs}`);
     response.set("Content-Type", "application/pdf");
     response.set("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(material.fileName || "material.pdf")}`);
     response.set("Accept-Ranges", "bytes");
     response.set("Cache-Control", "private, no-store, max-age=0");
     if (object.ContentLength != null) response.set("Content-Length", String(object.ContentLength));
     if (object.ContentRange) response.set("Content-Range", object.ContentRange);
+    logger.info("[materials] PDF stream ready", {
+      materialId,
+      hasRange: !!range,
+      authMs,
+      accessMs,
+      r2Ms,
+      totalMs,
+    });
     if (request.method === "HEAD") {
       object.Body?.destroy?.();
       response.end();

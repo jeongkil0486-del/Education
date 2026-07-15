@@ -6,12 +6,59 @@ const PDFJS_VERSION = "6.1.200";
 const PDFJS_BASE = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}`;
 const PDFJS_MODULE = `${PDFJS_BASE}/build/pdf.mjs`;
 const PDFJS_WORKER = `${PDFJS_BASE}/build/pdf.worker.mjs`;
+const RANGE_CHUNK_SIZE = 1024 * 1024;
+const MAX_PIXEL_RATIO = 1.5;
 const COLORS = ["#facc15", "#ef4444", "#2563eb"];
 const PEN_WIDTHS = [2, 4, 7];
 const HIGHLIGHT_WIDTHS = [14, 24, 36];
 const TEXT_SIZES = [18, 28, 40];
 
 let closeActiveSlideshow = null;
+let pdfJsModulePromise = null;
+let pdfWorkerWarmPromise = null;
+
+function preparePdfRuntime() {
+  pdfJsModulePromise ??= import(PDFJS_MODULE).then((pdfjs) => {
+    pdfjs.GlobalWorkerOptions.workerSrc = PDFJS_WORKER;
+    return pdfjs;
+  });
+  pdfWorkerWarmPromise ??= fetch(PDFJS_WORKER, { cache: "force-cache", mode: "cors" })
+    .then((response) => {
+      if (!response.ok) throw new Error(`PDF Worker preload failed (${response.status})`);
+      return response.arrayBuffer();
+    })
+    .then(() => undefined)
+    .catch((error) => {
+      console.warn("[slideshow] PDF Worker preload skipped", error?.message);
+    });
+  return Promise.all([pdfJsModulePromise, pdfWorkerWarmPromise]).then(([pdfjs]) => pdfjs);
+}
+
+function createPerformanceTracker(params) {
+  const launchAt = Number(window.__slideshowLaunchAt) || performance.now();
+  delete window.__slideshowLaunchAt;
+  const enabled = params.perf === "1" || /(^localhost$|^127\.|\.vercel\.app$)/.test(window.location.hostname);
+  const marks = { launch: launchAt };
+  return {
+    mark(name) { marks[name] = performance.now(); },
+    report(sourceUrl) {
+      if (!enabled) return;
+      const resource = performance.getEntriesByName(sourceUrl)[0];
+      const duration = (from, to) => marks[to] != null && marks[from] != null
+        ? Math.round((marks[to] - marks[from]) * 10) / 10
+        : null;
+      console.info("[slideshow:perf] first-page", {
+        pdfRuntimeMs: duration("runtimeStart", "pdfJsReady"),
+        authTokenMs: duration("authStart", "authReady"),
+        documentParseMs: duration("documentStart", "documentReady"),
+        firstPageGetMs: duration("pageGetStart", "pageGetReady"),
+        firstPageRenderMs: duration("pageRenderStart", "firstPageVisible"),
+        streamFirstResponseMs: resource?.responseStart ? Math.round((resource.responseStart - resource.startTime) * 10) / 10 : null,
+        totalVisibleMs: duration("launch", "firstPageVisible"),
+      });
+    },
+  };
+}
 
 export async function render(container, params = {}) {
   closeActiveSlideshow?.(false);
@@ -22,6 +69,23 @@ export async function render(container, params = {}) {
   }
 
   const materialId = String(params.materialId ?? "").trim();
+  const perf = createPerformanceTracker(params);
+  perf.mark("runtimeStart");
+  const pdfRuntimeReady = materialId
+    ? preparePdfRuntime().then((pdfjs) => {
+      perf.mark("pdfJsReady");
+      return pdfjs;
+    })
+    : null;
+  const slideshowSourceReady = materialId
+    ? (perf.mark("authStart"), requestMaterialSlideshowSource(materialId).then((source) => {
+      perf.mark("authReady");
+      return source;
+    }))
+    : null;
+  const slideshowStartupReady = materialId
+    ? Promise.all([pdfRuntimeReady, slideshowSourceReady])
+    : null;
   container.innerHTML = '<div class="empty-state" style="padding:var(--space-16)">교육자료를 확인하는 중입니다.</div>';
   try {
     const materials = await listMaterials();
@@ -35,7 +99,7 @@ export async function render(container, params = {}) {
       renderError(container, "조회 권한이 없거나 슬라이드쇼로 실행할 수 없는 PDF 자료입니다.");
       return;
     }
-    await startSlideshow(container, material);
+    await startSlideshow(container, material, { slideshowStartupReady, perf });
   } catch (error) {
     console.error("[slideshow] initialization failed", error?.code, error?.message);
     renderError(container, slideshowErrorMessage(error));
@@ -55,11 +119,14 @@ function renderMaterialPicker(container, materials) {
       ${materials.length ? materials.map((item) => `<div style="display:flex;align-items:center;justify-content:space-between;gap:var(--space-4);padding:var(--space-4);border:1px solid var(--gray-200);border-radius:var(--radius-lg)"><div><div style="font-weight:var(--weight-semibold);color:var(--gray-900)">${esc(item.title)}</div><div style="font-size:var(--text-xs);color:var(--gray-500);margin-top:4px">${esc(item.fileName)}</div></div><button class="btn btn--primary" data-slideshow-material="${esc(item.id)}">슬라이드쇼</button></div>`).join("") : '<div class="empty-state">슬라이드쇼로 실행할 수 있는 PDF 자료가 없습니다.</div>'}
     </div></div>`;
   container.querySelectorAll("[data-slideshow-material]").forEach((button) => {
-    button.addEventListener("click", () => router.push("slideshow", { materialId: button.dataset.slideshowMaterial }));
+    button.addEventListener("click", () => {
+      window.__slideshowLaunchAt = performance.now();
+      router.push("slideshow", { materialId: button.dataset.slideshowMaterial });
+    });
   });
 }
 
-async function startSlideshow(container, material) {
+async function startSlideshow(container, material, runtime) {
   container.innerHTML = '<div class="empty-state" style="padding:var(--space-16)">슬라이드쇼를 준비하는 중입니다.</div>';
   const overlay = document.createElement("div");
   overlay.className = "pdf-slideshow";
@@ -92,16 +159,24 @@ async function startSlideshow(container, material) {
     eraseChanged: false,
     activeStroke: null,
     textEditor: null,
+    pageCache: new Map(),
+    firstPageVisible: false,
     destroyed: false,
   };
 
   let resizeTimer = null;
+  let lastStageWidth = 0;
+  let lastStageHeight = 0;
   const onResize = () => {
+    const width = Math.round(stage.clientWidth);
+    const height = Math.round(stage.clientHeight);
+    if (!state.firstPageVisible || (width === lastStageWidth && height === lastStageHeight)) return;
+    lastStageWidth = width;
+    lastStageHeight = height;
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => state.pdf && renderPage(), 120);
   };
   const resizeObserver = new ResizeObserver(onResize);
-  resizeObserver.observe(stage);
 
   const close = (navigate = true) => {
     if (state.destroyed) return;
@@ -190,22 +265,45 @@ async function startSlideshow(container, material) {
     overlay.querySelector('[data-action="redo"]').disabled = !pageState.redo.length;
   }
 
+  function getPdfPage(pageNumber) {
+    if (!state.pageCache.has(pageNumber)) {
+      state.pageCache.set(pageNumber, state.pdf.getPage(pageNumber).catch((error) => {
+        state.pageCache.delete(pageNumber);
+        throw error;
+      }));
+    }
+    return state.pageCache.get(pageNumber);
+  }
+
+  function prepareNextPage() {
+    const nextPage = state.page + 1;
+    if (nextPage > state.pageCount || state.pageCache.has(nextPage) || state.destroyed) return;
+    const prepare = () => {
+      if (!state.destroyed) getPdfPage(nextPage).catch(() => {});
+    };
+    if ("requestIdleCallback" in window) window.requestIdleCallback(prepare, { timeout: 1200 });
+    else setTimeout(prepare, 180);
+  }
+
   async function renderPage() {
     if (!state.pdf || state.destroyed) return;
     const nonce = ++state.renderNonce;
     state.renderTask?.cancel?.();
     closeTextEditor();
     loading.classList.remove("hidden");
-    loading.innerHTML = '<div class="splash__spinner"></div><span>페이지를 렌더링하는 중입니다.</span>';
+    const isFirstRender = !state.firstPageVisible;
+    loading.innerHTML = `<div class="splash__spinner"></div><span>${isFirstRender ? "첫 페이지를 불러오는 중입니다." : "페이지를 불러오는 중입니다."}</span>`;
     try {
-      const page = await state.pdf.getPage(state.page);
+      if (isFirstRender) runtime.perf.mark("pageGetStart");
+      const page = await getPdfPage(state.page);
       if (nonce !== state.renderNonce || state.destroyed) return;
+      if (isFirstRender) runtime.perf.mark("pageGetReady");
       const baseViewport = page.getViewport({ scale: 1 });
       const availableWidth = Math.max(240, stage.clientWidth - 28);
       const availableHeight = Math.max(180, stage.clientHeight - 28);
       const fitScale = Math.min(availableWidth / baseViewport.width, availableHeight / baseViewport.height);
       const viewport = page.getViewport({ scale: fitScale * state.zoom });
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const dpr = Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
       for (const canvas of [pdfCanvas, annotationCanvas]) {
         canvas.width = Math.max(1, Math.floor(viewport.width * dpr));
         canvas.height = Math.max(1, Math.floor(viewport.height * dpr));
@@ -215,12 +313,23 @@ async function startSlideshow(container, material) {
       canvasStack.style.width = `${viewport.width}px`;
       canvasStack.style.height = `${viewport.height}px`;
       const context = pdfCanvas.getContext("2d", { alpha: false });
+      loading.innerHTML = `<div class="splash__spinner"></div><span>${isFirstRender ? "첫 페이지를 렌더링하는 중입니다." : "페이지를 렌더링하는 중입니다."}</span>`;
+      if (isFirstRender) runtime.perf.mark("pageRenderStart");
       state.renderTask = page.render({ canvasContext: context, viewport, transform: dpr === 1 ? null : [dpr, 0, 0, dpr, 0, 0] });
       await state.renderTask.promise;
       if (nonce !== state.renderNonce || state.destroyed) return;
       renderAnnotations();
       updateControls();
       loading.classList.add("hidden");
+      if (isFirstRender) {
+        state.firstPageVisible = true;
+        lastStageWidth = Math.round(stage.clientWidth);
+        lastStageHeight = Math.round(stage.clientHeight);
+        resizeObserver.observe(stage);
+        runtime.perf.mark("firstPageVisible");
+        runtime.perf.report(runtime.sourceUrl);
+      }
+      prepareNextPage();
     } catch (error) {
       if (error?.name === "RenderingCancelledException") return;
       console.error("[slideshow] page render failed", error?.name, error?.message);
@@ -232,7 +341,7 @@ async function startSlideshow(container, material) {
 
   function renderAnnotations() {
     const context = annotationCanvas.getContext("2d");
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
     const width = annotationCanvas.clientWidth;
     const height = annotationCanvas.clientHeight;
     context.setTransform(1, 0, 0, 1, 0, 0);
@@ -479,16 +588,15 @@ async function startSlideshow(container, material) {
   overlay.querySelector("#slideshow-page-input").addEventListener("change", (event) => goPage(event.target.value));
 
   try {
-    const [pdfjs, source] = await Promise.all([
-      import(PDFJS_MODULE),
-      requestMaterialSlideshowSource(material.id),
-    ]);
+    const [pdfjs, source] = await runtime.slideshowStartupReady;
     if (state.destroyed) return;
-    pdfjs.GlobalWorkerOptions.workerSrc = PDFJS_WORKER;
+    runtime.sourceUrl = source.url;
+    loading.innerHTML = '<div class="splash__spinner"></div><span>PDF 문서를 분석하는 중입니다.</span>';
+    runtime.perf.mark("documentStart");
     state.loadingTask = pdfjs.getDocument({
       url: source.url,
       httpHeaders: source.httpHeaders,
-      rangeChunkSize: 65536,
+      rangeChunkSize: RANGE_CHUNK_SIZE,
       disableStream: true,
       disableAutoFetch: true,
       cMapUrl: `${PDFJS_BASE}/cmaps/`,
@@ -496,6 +604,7 @@ async function startSlideshow(container, material) {
       standardFontDataUrl: `${PDFJS_BASE}/standard_fonts/`,
     });
     state.pdf = await state.loadingTask.promise;
+    runtime.perf.mark("documentReady");
     state.pageCount = state.pdf.numPages;
     setTool("pointer");
     await renderPage();

@@ -256,7 +256,10 @@ function renderTable(container) {
     );
   });
   wrap.querySelectorAll(".btn-mat-slideshow").forEach((btn) => {
-    btn.addEventListener("click", () => router.push("slideshow", { materialId: btn.dataset.id }));
+    btn.addEventListener("click", () => {
+      window.__slideshowLaunchAt = performance.now();
+      router.push("slideshow", { materialId: btn.dataset.id });
+    });
   });
   wrap.querySelectorAll(".btn-mat-download").forEach((btn) => {
     btn.addEventListener("click", async () => {

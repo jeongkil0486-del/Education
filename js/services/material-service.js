@@ -116,7 +116,7 @@ export async function requestMaterialSlideshowSource(materialId) {
   const user = authStore.firebaseUser;
   const projectId = window.__firebase?.app?.options?.projectId;
   if (!user || !projectId) throw new Error("로그인 정보를 확인할 수 없습니다. 다시 로그인해 주세요.");
-  const idToken = await user.getIdToken(true);
+  const idToken = await user.getIdToken();
   return {
     url: `https://us-central1-${projectId}.cloudfunctions.net/streamMaterialPdf?materialId=${encodeURIComponent(materialId)}`,
     httpHeaders: { Authorization: `Bearer ${idToken}` },
