@@ -1,12 +1,19 @@
 import { authStore, ROLES } from "../core/auth.js";
 import { branchesDB } from "../core/db.js";
-import { listAnnouncements, saveAnnouncement, deleteAnnouncement } from "../core/admin-api.js";
+import {
+  deleteAnnouncement,
+  getAnnouncementReadStatus,
+  listAnnouncements,
+  markAnnouncementRead,
+  saveAnnouncement,
+} from "../core/admin-api.js";
 import { modal } from "../utils/modal.js";
 import { toast } from "../utils/toast.js";
 import { formatDate } from "../utils/date.js";
 
 let pageState = { announcements: [], branches: [], container: null };
 const canWrite = () => [ROLES.SUPER_ADMIN, ROLES.HQ_ADMIN].includes(authStore.role);
+const canViewReadStatus = () => authStore.role === ROLES.HQ_ADMIN;
 
 export async function render(container) {
   container.innerHTML = '<div class="empty-state" style="padding:var(--space-16)">공지사항을 불러오는 중입니다.</div>';
@@ -35,8 +42,16 @@ function renderPage(container) {
       </div>
     </div>`;
   document.getElementById("btn-create-announcement")?.addEventListener("click", () => openEditor());
+  container.querySelectorAll("[data-announcement-open]").forEach((button) => button.addEventListener("click", () => {
+    const item = pageState.announcements.find((row) => row.id === button.dataset.announcementOpen);
+    if (item) openAnnouncementDetail(item);
+  }));
   container.querySelectorAll("[data-announcement-edit]").forEach((button) => button.addEventListener("click", () => {
     openEditor(pageState.announcements.find((item) => item.id === button.dataset.announcementEdit));
+  }));
+  container.querySelectorAll("[data-announcement-read-status]").forEach((button) => button.addEventListener("click", () => {
+    const item = pageState.announcements.find((row) => row.id === button.dataset.announcementReadStatus);
+    if (item) openAnnouncementReadStatus(item);
   }));
   container.querySelectorAll("[data-announcement-delete]").forEach((button) => button.addEventListener("click", async () => {
     const item = pageState.announcements.find((row) => row.id === button.dataset.announcementDelete);
@@ -52,14 +67,116 @@ function renderPage(container) {
 
 function announcementCard(item) {
   const period = [item.startsAt ? formatDate(item.startsAt) : "즉시", item.endsAt ? formatDate(item.endsAt) : "종료일 없음"].join(" ~ ");
+  const summary = item.readSummary;
+  const readSummary = canViewReadStatus() && summary
+    ? `<span class="chip ${summary.unreadUserCount ? "chip--warning" : "chip--success"}">확인 ${summary.readUserCount} / ${summary.targetUserCount}명</span>`
+    : authStore.role === ROLES.INSTRUCTOR
+      ? `<span class="chip ${item.currentUserRead ? "chip--success" : "chip--warning"}">${item.currentUserRead ? "확인됨" : "미확인"}</span>`
+      : "";
   return `<article style="border:1px solid var(--gray-200);border-radius:var(--radius-lg);padding:var(--space-4)">
     <div style="display:flex;justify-content:space-between;gap:var(--space-3);align-items:flex-start">
-      <div><div style="font-weight:var(--weight-semibold);color:var(--gray-900)">${item.important ? '<span style="color:var(--red-600)">중요 · </span>' : ""}${esc(item.title)}</div>
-      <div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:4px">작성자 ${esc(item.authorName ?? item.createdByName ?? "-")} · ${esc(period)}</div></div>
-      ${canWrite() ? `<div style="display:flex;gap:var(--space-2)"><button class="btn btn--ghost btn--sm" data-announcement-edit="${esc(item.id)}">수정</button><button class="btn btn--danger btn--sm" data-announcement-delete="${esc(item.id)}">삭제</button></div>` : ""}
+      <button type="button" data-announcement-open="${esc(item.id)}" style="flex:1;border:0;background:none;padding:0;text-align:left;cursor:pointer">
+        <div style="display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap">
+          <div style="font-weight:var(--weight-semibold);color:var(--gray-900)">${item.important ? '<span style="color:var(--red-600)">중요 · </span>' : ""}${esc(item.title)}</div>
+          ${readSummary}
+        </div>
+        <div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:4px">작성자 ${esc(item.authorName ?? item.createdByName ?? "-")} · ${esc(period)}</div>
+        <div style="font-size:var(--text-sm);color:var(--primary-600);margin-top:var(--space-3)">내용 보기</div>
+      </button>
+      <div style="display:flex;gap:var(--space-2);flex-wrap:wrap;justify-content:flex-end">
+        ${canViewReadStatus() ? `<button class="btn btn--ghost btn--sm" data-announcement-read-status="${esc(item.id)}">읽음 현황</button>` : ""}
+        ${canWrite() ? `<button class="btn btn--ghost btn--sm" data-announcement-edit="${esc(item.id)}">수정</button><button class="btn btn--danger btn--sm" data-announcement-delete="${esc(item.id)}">삭제</button>` : ""}
+      </div>
     </div>
-    <div style="white-space:pre-wrap;margin-top:var(--space-3);font-size:var(--text-sm);line-height:1.6">${esc(item.content)}</div>
   </article>`;
+}
+
+function openAnnouncementDetail(item) {
+  modal.open({
+    title: item.title || "공지사항",
+    size: "lg",
+    body: `<div style="display:flex;flex-direction:column;gap:var(--space-4)">
+      <div style="font-size:var(--text-xs);color:var(--gray-500)">작성자 ${esc(item.authorName ?? item.createdByName ?? "-")} · ${formatDateTime(item.createdAt)}</div>
+      <div style="white-space:pre-wrap;font-size:var(--text-sm);line-height:1.7;color:var(--gray-800)">${esc(item.content)}</div>
+    </div>`,
+    actions: [{ label: "닫기", variant: "secondary", onClick: () => modal.close() }],
+  });
+
+  markAnnouncementRead({ announcementId: item.id }).then((result) => {
+    item.currentUserRead = true;
+    item.currentUserReadAt = result?.read?.readAt ?? item.currentUserReadAt;
+    renderPage(pageState.container);
+  }).catch((error) => {
+    console.error("[announcements] mark read failed", error?.code, error?.message);
+    toast.error(error?.message ?? "공지사항 읽음 처리에 실패했습니다.");
+  });
+}
+
+async function openAnnouncementReadStatus(item) {
+  if (!canViewReadStatus()) return;
+  modal.open({
+    title: "공지사항 읽음 현황",
+    size: "xl",
+    body: '<div class="empty-state">읽음 현황을 불러오는 중입니다.</div>',
+    actions: [{ label: "닫기", variant: "secondary", onClick: () => modal.close() }],
+  });
+  try {
+    const data = await getAnnouncementReadStatus({ announcementId: item.id });
+    modal.setBody(readStatusBody(data));
+    bindReadStatusFilters(data);
+  } catch (error) {
+    console.error("[announcements] read status failed", error?.code, error?.message);
+    modal.setBody(`<div class="empty-state"><div class="empty-state__title">읽음 현황을 불러오지 못했습니다.</div><div>${esc(error?.message ?? "알 수 없는 오류")}</div></div>`);
+  }
+}
+
+function readStatusBody(data) {
+  const summary = data?.summary ?? {};
+  return `<div style="display:flex;flex-direction:column;gap:var(--space-4)">
+    <div><div style="font-weight:var(--weight-semibold);color:var(--gray-900)">${esc(data?.announcement?.title ?? "공지사항")}</div></div>
+    <div style="display:grid;grid-template-columns:repeat(4,minmax(110px,1fr));gap:var(--space-3)">
+      ${readStatusMetric("대상자", summary.targetUserCount ?? 0, "명")}
+      ${readStatusMetric("확인", summary.readUserCount ?? 0, "명")}
+      ${readStatusMetric("미확인", summary.unreadUserCount ?? 0, "명")}
+      ${readStatusMetric("확인율", summary.readRate ?? 0, "%")}
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 180px;gap:var(--space-3)">
+      <input class="form-control" id="announcement-read-search" type="search" placeholder="이름·지점 검색" />
+      <select class="form-control" id="announcement-read-filter"><option value="all">전체</option><option value="read">확인</option><option value="unread">미확인</option></select>
+    </div>
+    <div id="announcement-read-results"></div>
+  </div>`;
+}
+
+function readStatusMetric(label, value, suffix) {
+  return `<div style="border:1px solid var(--gray-200);border-radius:var(--radius-md);padding:var(--space-3)"><div style="font-size:var(--text-xs);color:var(--gray-500)">${label}</div><div style="font-size:var(--text-xl);font-weight:var(--weight-semibold);margin-top:4px">${value}${suffix}</div></div>`;
+}
+
+function bindReadStatusFilters(data) {
+  const users = [...(data?.unreadUsers ?? []), ...(data?.readUsers ?? [])];
+  const renderResults = () => {
+    const query = String(document.getElementById("announcement-read-search")?.value ?? "").trim().toLowerCase();
+    const filter = document.getElementById("announcement-read-filter")?.value ?? "all";
+    const rows = users.filter((user) => {
+      const matchesFilter = filter === "all" || user.status === filter;
+      const haystack = `${user.name ?? ""} ${user.branchName ?? ""}`.toLowerCase();
+      return matchesFilter && (!query || haystack.includes(query));
+    });
+    const results = document.getElementById("announcement-read-results");
+    if (!results) return;
+    if (!users.length) {
+      results.innerHTML = '<div class="empty-state">읽음 대상자가 없습니다.</div>';
+      return;
+    }
+    if (!rows.length) {
+      results.innerHTML = '<div class="empty-state">검색 조건에 맞는 대상자가 없습니다.</div>';
+      return;
+    }
+    results.innerHTML = `<div style="overflow:auto"><table class="table"><thead><tr><th>이름</th><th>역할</th><th>지점</th><th>상태</th><th>확인 일시</th></tr></thead><tbody>${rows.map((user) => `<tr><td>${esc(user.name)}</td><td>강사</td><td>${esc(user.branchName)}</td><td><span class="chip ${user.status === "read" ? "chip--success" : "chip--warning"}">${user.status === "read" ? "확인" : "미확인"}</span></td><td>${user.readAt ? formatDateTime(user.readAt) : "-"}</td></tr>`).join("")}</tbody></table></div>`;
+  };
+  document.getElementById("announcement-read-search")?.addEventListener("input", renderResults);
+  document.getElementById("announcement-read-filter")?.addEventListener("change", renderResults);
+  renderResults();
 }
 
 function openEditor(item = null) {
@@ -96,8 +213,8 @@ function openEditor(item = null) {
             endsAt: document.getElementById("announcement-end")?.value || null,
             important: document.getElementById("announcement-important")?.checked ?? false,
           });
-          if (item) pageState.announcements = pageState.announcements.map((row) => row.id === item.id ? result.announcement : row);
-          else pageState.announcements.unshift(result.announcement);
+          const refreshed = await listAnnouncements();
+          pageState.announcements = refreshed.announcements ?? [];
           modal.close();
           renderPage(pageState.container);
           toast.success(result.message);
@@ -114,6 +231,14 @@ function dateInputValue(value) {
   if (!value) return "";
   const date = new Date(Number(value) || value);
   return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
+}
+
+function formatDateTime(value) {
+  const date = new Date(Number(value) || value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return new Intl.DateTimeFormat("ko-KR", {
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+  }).format(date);
 }
 
 function esc(value) {

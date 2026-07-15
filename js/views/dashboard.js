@@ -60,6 +60,9 @@ async function renderManagementDashboard(container, role) {
     ? roleScopedAnnouncements.filter(isPublishedAnnouncement)
     : roleScopedAnnouncements;
   const publishedAnnouncements = visibleAnnouncements.filter(isPublishedAnnouncement);
+  const unreadAnnouncementCount = isInstructor
+    ? publishedAnnouncements.filter((item) => !announcementReadBy(item, authStore.uid)).length
+    : 0;
   const buckets = resolveDashboardDeadlineBuckets(notificationSettings);
   const maxSoonDays = Math.max(0, ...buckets.map((bucket) => bucket.days));
   const uniqueDeadlineRows = dedupeDeadlineRows(deadlineData.rows ?? []);
@@ -92,6 +95,7 @@ async function renderManagementDashboard(container, role) {
       action: "announcements",
       variant: "warning",
       icon: iconBell(),
+      secondary: isInstructor ? `미확인 ${unreadAnnouncementCount}건` : "",
       error: announcementLoad.error,
     },
     {
@@ -173,6 +177,7 @@ function dashboardMetricCard(card) {
     <div class="stat-card__icon stat-card__icon--${card.variant}">${card.icon}</div>
     <div class="stat-card__label">${esc(card.label)}</div>
     <div class="stat-card__value">${card.error ? "-" : `${card.value}${card.suffix}`}</div>
+    ${!card.error && card.secondary ? `<div style="font-size:var(--text-xs);color:var(--gray-500);margin-top:2px">${esc(card.secondary)}</div>` : ""}
     ${card.error ? '<div style="font-size:var(--text-xs);color:var(--danger-600,#dc2626);margin-top:2px">불러오기 실패</div>' : ""}
   </button>`;
 }
@@ -237,6 +242,7 @@ function isImportantAnnouncement(item) {
 }
 
 function announcementReadBy(item, uid) {
+  if (item?.currentUserRead === true) return true;
   const candidates = [item?.readBy, item?.viewedBy, item?.acknowledgedBy, item?.readUids];
   return candidates.some((value) => Array.isArray(value) ? value.includes(uid) : value && typeof value === "object" ? !!value[uid] : false);
 }

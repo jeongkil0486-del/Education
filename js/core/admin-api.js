@@ -20,6 +20,8 @@ const listInstructorBranchEmployeesCallable = httpsCallable(functions, "listInst
 const getManagedEmployeeProfileCallable = httpsCallable(functions, "getManagedEmployeeProfile");
 const listInstructorBranchHistoriesCallable = httpsCallable(functions, "listInstructorBranchHistories");
 const listAnnouncementsCallable = httpsCallable(functions, "listAnnouncements");
+const markAnnouncementReadCallable = httpsCallable(functions, "markAnnouncementRead");
+const getAnnouncementReadStatusCallable = httpsCallable(functions, "getAnnouncementReadStatus");
 const listAuditLogsCallable = httpsCallable(functions, "listAuditLogs");
 const saveAnnouncementCallable = httpsCallable(functions, "saveAnnouncement");
 const deleteAnnouncementCallable = httpsCallable(functions, "deleteAnnouncement");
@@ -183,6 +185,16 @@ export async function listInstructorBranchHistories() {
 
 export async function listAnnouncements() {
   const result = await listAnnouncementsCallable({});
+  return result.data;
+}
+
+export async function markAnnouncementRead(payload) {
+  const result = await markAnnouncementReadCallable(payload);
+  return result.data;
+}
+
+export async function getAnnouncementReadStatus(payload) {
+  const result = await getAnnouncementReadStatusCallable(payload);
   return result.data;
 }
 

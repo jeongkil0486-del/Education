@@ -1924,6 +1924,65 @@ function announcementIsPublished(record, now = Date.now()) {
   return !["draft", "hidden", "inactive"].includes(status) && (!startsAt || startsAt <= now) && (!endsAt || endsAt >= now);
 }
 
+function announcementVisibleToActor(record, actor, companyId) {
+  if (!actor) return false;
+  if (actor.role !== "super_admin" && companyId && record?.companyId && normalizeText(record.companyId) !== companyId) {
+    return false;
+  }
+  if (["super_admin", "hq_admin"].includes(actor.role)) return true;
+  if (actor.role !== "instructor" || !announcementIsPublished(record)) return false;
+  const targets = announcementBranchIds(record);
+  if (!targets.length) return true;
+  const actorBranches = new Set(resolveInstructorBranchIds(actor).concat(normalizeText(actor.branchId)).filter(Boolean));
+  return targets.some((branchId) => actorBranches.has(branchId));
+}
+
+function announcementTargetUsers(record, users, branches = {}) {
+  const companyId = normalizeText(record?.companyId);
+  const targetBranches = announcementBranchIds(record);
+  return Object.entries(users ?? {}).flatMap(([uid, user]) => {
+    if (user?.role !== "instructor" || user?.active === false || user?.disabled === true) return [];
+    const userBranchIds = Array.from(new Set(resolveInstructorBranchIds(user).concat(normalizeText(user?.branchId)).filter(Boolean)));
+    const branchCompanyId = userBranchIds.map((branchId) => normalizeText(branches?.[branchId]?.companyId)).find(Boolean) || "";
+    const userCompanyId = normalizeText(user?.companyId) || branchCompanyId;
+    if (companyId && userCompanyId !== companyId) return [];
+    if (targetBranches.length && !targetBranches.some((branchId) => userBranchIds.includes(branchId))) return [];
+    const branchId = userBranchIds[0] || "";
+    return [{
+      uid,
+      name: normalizeText(user?.name) || normalizeText(user?.empNo) || "-",
+      role: "instructor",
+      branchId,
+      branchName: normalizeText(user?.branchName) || normalizeText(branches?.[branchId]?.name) || normalizeText(branches?.[branchId]?.code) || "-",
+    }];
+  });
+}
+
+function announcementReadSummary(record, users, branches, reads) {
+  const targets = announcementTargetUsers(record, users, branches);
+  const readUserCount = targets.filter((user) => reads?.[user.uid]).length;
+  const targetUserCount = targets.length;
+  return {
+    targetUserCount,
+    readUserCount,
+    unreadUserCount: Math.max(0, targetUserCount - readUserCount),
+    readRate: targetUserCount ? Math.round((readUserCount / targetUserCount) * 100) : 0,
+  };
+}
+
+function announcementReadResetFingerprint(record) {
+  return JSON.stringify({
+    title: normalizeText(record?.title),
+    content: normalizeText(record?.content),
+    targetBranchIds: announcementBranchIds(record).sort(),
+    important: Boolean(record?.important),
+    priority: normalizeText(record?.priority),
+    status: normalizeText(record?.status || "published").toLowerCase(),
+    startsAt: Number(record?.startsAt ?? record?.startAt ?? 0) || 0,
+    endsAt: Number(record?.endsAt ?? record?.endAt ?? 0) || 0,
+  });
+}
+
 function normalizeAnnouncementDate(value, endOfDay = false) {
   const parsed = normalizeProfileDate(value);
   if (!parsed) return null;
@@ -1940,24 +1999,129 @@ exports.listAnnouncements = onCall(OPTS, async (request) => {
   if (actor.role !== "super_admin" && !companyId) {
     throw new HttpsError("failed-precondition", "공지사항의 회사 범위를 결정할 수 없습니다.");
   }
-  const actorBranches = new Set(resolveInstructorBranchIds(actor).concat(normalizeText(actor.branchId)).filter(Boolean));
-  const [snap, usersSnap] = await Promise.all([db.ref("announcements").get(), db.ref("users").get()]);
+  const [snap, usersSnap, branchesSnap, readsSnap] = await Promise.all([
+    db.ref("announcements").get(),
+    db.ref("users").get(),
+    db.ref("branches").get(),
+    db.ref("announcementReads").get(),
+  ]);
   const users = usersSnap.val() ?? {};
+  const branches = branchesSnap.val() ?? {};
+  const reads = readsSnap.val() ?? {};
   const announcements = [];
   snap.forEach((child) => {
     const record = child.val() ?? {};
-    if (actor.role !== "super_admin" && companyId && record.companyId && normalizeText(record.companyId) !== companyId) return;
-    if (!["super_admin", "hq_admin"].includes(actor.role)) {
-      if (!announcementIsPublished(record)) return;
-      const targets = announcementBranchIds(record);
-      if (targets.length && !targets.some((branchId) => actorBranches.has(branchId))) return;
-    }
+    if (!announcementVisibleToActor(record, actor, companyId)) return;
     const authorUid = normalizeText(record.authorUid || record.createdByUid || record.createdBy);
     const authorName = normalizeText(record.authorName || record.createdByName || users[authorUid]?.name || record.publisherName);
-    announcements.push({ id: child.key, ...record, authorUid, authorName: authorName || "-" });
+    const item = {
+      id: child.key,
+      ...record,
+      authorUid,
+      authorName: authorName || "-",
+      currentUserRead: Boolean(reads?.[child.key]?.[request.auth.uid]),
+    };
+    if (actor.role === "hq_admin") {
+      const scopedRecord = normalizeText(record.companyId) ? record : { ...record, companyId };
+      item.readSummary = announcementReadSummary(scopedRecord, users, branches, reads?.[child.key] ?? {});
+    }
+    announcements.push(item);
   });
   announcements.sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0));
   return { announcements };
+});
+
+exports.markAnnouncementRead = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await getUserProfile(request.auth.uid);
+  if (!actor || !["super_admin", "hq_admin", "instructor"].includes(actor.role)) {
+    throw new HttpsError("permission-denied", "공지사항을 확인할 권한이 없습니다.");
+  }
+  const announcementId = normalizeText(request.data?.announcementId ?? request.data?.id);
+  if (!announcementId) throw new HttpsError("invalid-argument", "공지사항 ID가 필요합니다.");
+  const announcementSnap = await db.ref(`announcements/${announcementId}`).get();
+  if (!announcementSnap.exists()) throw new HttpsError("not-found", "공지사항을 찾을 수 없습니다.");
+  const announcement = announcementSnap.val() ?? {};
+  const companyId = await resolveActorCompanyId(actor);
+  if (!announcementVisibleToActor(announcement, actor, companyId)) {
+    throw new HttpsError("permission-denied", "이 공지사항을 확인할 권한이 없습니다.");
+  }
+  const branchId = normalizeText(actor.branchId) || resolveInstructorBranchIds(actor)[0] || "";
+  const readRef = db.ref(`announcementReads/${announcementId}/${request.auth.uid}`);
+  const readRecord = {
+    uid: request.auth.uid,
+    userName: normalizeText(actor.name) || normalizeText(actor.empNo) || "-",
+    role: actor.role,
+    companyId: companyId || normalizeText(actor.companyId),
+    branchId,
+    readAt: Date.now(),
+  };
+  let alreadyRead = false;
+  const transaction = await readRef.transaction((existing) => {
+    if (existing) {
+      alreadyRead = true;
+      return undefined;
+    }
+    return readRecord;
+  }, undefined, false);
+  const stored = transaction.snapshot.val() ?? readRecord;
+  return {
+    announcementId,
+    alreadyRead,
+    read: stored,
+  };
+});
+
+exports.getAnnouncementReadStatus = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await getUserProfile(request.auth.uid);
+  if (!actor || actor.role !== "hq_admin") {
+    throw new HttpsError("permission-denied", "공지사항 읽음 현황을 조회할 권한이 없습니다.");
+  }
+  const announcementId = normalizeText(request.data?.announcementId ?? request.data?.id);
+  if (!announcementId) throw new HttpsError("invalid-argument", "공지사항 ID가 필요합니다.");
+  const companyId = await resolveActorCompanyId(actor);
+  if (!companyId) throw new HttpsError("failed-precondition", "공지사항의 회사 범위를 결정할 수 없습니다.");
+  const [announcementSnap, usersSnap, branchesSnap, readsSnap] = await Promise.all([
+    db.ref(`announcements/${announcementId}`).get(),
+    db.ref("users").get(),
+    db.ref("branches").get(),
+    db.ref(`announcementReads/${announcementId}`).get(),
+  ]);
+  if (!announcementSnap.exists()) throw new HttpsError("not-found", "공지사항을 찾을 수 없습니다.");
+  const announcement = announcementSnap.val() ?? {};
+  if (announcement.companyId && normalizeText(announcement.companyId) !== companyId) {
+    throw new HttpsError("permission-denied", "다른 회사 공지사항의 읽음 현황은 조회할 수 없습니다.");
+  }
+  const users = usersSnap.val() ?? {};
+  const branches = branchesSnap.val() ?? {};
+  const reads = readsSnap.val() ?? {};
+  const scopedAnnouncement = normalizeText(announcement.companyId) ? announcement : { ...announcement, companyId };
+  const targets = announcementTargetUsers(scopedAnnouncement, users, branches).map((user) => {
+    const read = reads?.[user.uid] ?? null;
+    return { ...user, readAt: Number(read?.readAt ?? 0) || null, status: read ? "read" : "unread" };
+  }).sort((a, b) => {
+    if (a.status !== b.status) return a.status === "unread" ? -1 : 1;
+    return a.branchName.localeCompare(b.branchName, "ko") || a.name.localeCompare(b.name, "ko");
+  });
+  const readUsers = targets.filter((user) => user.status === "read");
+  const unreadUsers = targets.filter((user) => user.status === "unread");
+  return {
+    announcement: {
+      id: announcementId,
+      title: normalizeText(announcement.title),
+      targetType: announcementBranchIds(announcement).length ? "branches" : "all",
+      targetBranchIds: announcementBranchIds(announcement),
+    },
+    summary: {
+      targetUserCount: targets.length,
+      readUserCount: readUsers.length,
+      unreadUserCount: unreadUsers.length,
+      readRate: targets.length ? Math.round((readUsers.length / targets.length) * 100) : 0,
+    },
+    readUsers,
+    unreadUsers,
+  };
 });
 
 exports.saveAnnouncement = onCall(OPTS, async (request) => {
@@ -1999,6 +2163,7 @@ exports.saveAnnouncement = onCall(OPTS, async (request) => {
     companyId: companyId || normalizeText(request.data?.companyId) || existing.companyId || "",
     targetBranchId,
     important: Boolean(request.data?.important),
+    priority: normalizeText(request.data?.priority ?? existing.priority),
     status: normalizeText(request.data?.status || "published").toLowerCase(),
     startsAt,
     startAt: startsAt,
@@ -2013,8 +2178,17 @@ exports.saveAnnouncement = onCall(OPTS, async (request) => {
     updatedBy: request.auth.uid,
     updatedByName: actor.name ?? "",
   };
-  await ref.set(record);
-  return { announcement: { id: ref.key, ...record }, message: announcementId ? "공지사항이 수정되었습니다." : "공지사항이 등록되었습니다." };
+  const readsReset = Boolean(announcementId) && announcementReadResetFingerprint(existing) !== announcementReadResetFingerprint(record);
+  const updates = { [`announcements/${ref.key}`]: record };
+  if (readsReset) updates[`announcementReads/${ref.key}`] = null;
+  await db.ref().update(updates);
+  return {
+    announcement: { id: ref.key, ...record },
+    readsReset,
+    message: announcementId
+      ? `공지사항이 수정되었습니다.${readsReset ? " 공지 내용이 변경되어 기존 읽음 상태가 초기화되었습니다." : ""}`
+      : "공지사항이 등록되었습니다.",
+  };
 });
 
 exports.deleteAnnouncement = onCall(OPTS, async (request) => {
@@ -2032,7 +2206,10 @@ exports.deleteAnnouncement = onCall(OPTS, async (request) => {
   if (actor.role !== "super_admin" && snap.val()?.companyId && normalizeText(snap.val().companyId) !== companyId) {
     throw new HttpsError("permission-denied", "다른 회사 공지사항을 삭제할 수 없습니다.");
   }
-  await ref.remove();
+  await db.ref().update({
+    [`announcements/${announcementId}`]: null,
+    [`announcementReads/${announcementId}`]: null,
+  });
   return { announcementId, message: "공지사항이 삭제되었습니다." };
 });
 
