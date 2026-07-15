@@ -39,8 +39,10 @@ export function showLogin(container) {
               class="form-control"
               type="password"
               id="login-empno"
+              name="username"
               placeholder="아이디"
               autocomplete="username"
+              inputmode="text"
               autocapitalize="none"
               spellcheck="false"
               required
