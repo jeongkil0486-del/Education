@@ -42,6 +42,7 @@ const LEDGER_DEADLINE_UPCOMING_VALUE = "__deadline_upcoming__";
 const LEDGER_DEADLINE_OVERDUE_VALUE = "__deadline_overdue__";
 const LEDGER_PDF_JSPDF_URL = "https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js";
 const LEDGER_PDF_HTML2CANVAS_URL = "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js";
+const LEDGER_PDF_BRAND = "Trinity Air Service";
 
 /* ─── 모듈 상태 ─────────────────────────────────────────── */
 let viewState = { company: null, branches: [], employees: [], items: [] };
@@ -1723,14 +1724,14 @@ function buildLedgerPdfPage({ rows, isDeadline, branchLabel, trainingLabel, sort
       .ledger-pdf-page{width:1120px;height:790px;box-sizing:border-box;padding:28px 30px 22px;background:#fff;color:#172033;font-family:Arial,'Malgun Gothic','Apple SD Gothic Neo',sans-serif;overflow:hidden}
       .ledger-pdf-page *{box-sizing:border-box}.ledger-pdf-head{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:12px;border-bottom:2px solid #1f5fae;margin-bottom:10px}
       .ledger-pdf-brand{font-size:12px;font-weight:700;color:#1f5fae;letter-spacing:.2px}.ledger-pdf-title{font-size:24px;font-weight:800;margin-top:4px}.ledger-pdf-meta{text-align:right;font-size:11px;line-height:1.65;color:#475569}
-      .ledger-pdf-table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:10px}.ledger-pdf-table th{background:#eaf2fb;color:#163b66;font-weight:700;border:1px solid #9db4cc;padding:7px 4px;white-space:nowrap}
+      .ledger-pdf-table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:10px}.ledger-pdf-table th{background:#eaf2fb;color:#163b66;font-weight:700;border:1px solid #9db4cc;padding:7px 4px;white-space:nowrap;text-align:center;vertical-align:middle}
       .ledger-pdf-table td{border:1px solid #c9d4df;padding:5px 4px;vertical-align:middle;text-align:center;line-height:1.25;overflow-wrap:anywhere}.ledger-pdf-table tbody tr:nth-child(even){background:#f8fafc}
-      .ledger-pdf-table td:first-child{text-align:left;font-weight:700}.ledger-pdf-note{text-align:left!important}.ledger-pdf-dates{display:flex;flex-direction:column;gap:1px;white-space:nowrap}.ledger-pdf-status{font-weight:700}
+      .ledger-pdf-table td:first-child{font-weight:700}.ledger-pdf-note{text-align:center!important;white-space:normal}.ledger-pdf-dates{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;white-space:nowrap}.ledger-pdf-status{font-weight:700}
       .ledger-pdf-date{white-space:nowrap;overflow-wrap:normal!important}
       .ledger-pdf-footer{position:absolute;left:30px;right:30px;bottom:8px;display:flex;justify-content:space-between;color:#64748b;font-size:9px}
     </style>
     <div class="ledger-pdf-head">
-      <div><div class="ledger-pdf-brand">TAS Education Lab</div><div class="ledger-pdf-title">직원관리대장</div></div>
+      <div><div class="ledger-pdf-brand">${LEDGER_PDF_BRAND}</div><div class="ledger-pdf-title">직원관리대장</div></div>
       <div class="ledger-pdf-meta">
         <div><b>지점:</b> ${esc(branchLabel)} &nbsp; <b>교육:</b> ${esc(trainingLabel)}</div>
         <div><b>정렬:</b> ${esc(sortLabel)} &nbsp; <b>출력일시:</b> ${esc(generatedLabel)}</div>
@@ -1738,7 +1739,7 @@ function buildLedgerPdfPage({ rows, isDeadline, branchLabel, trainingLabel, sort
       </div>
     </div>
     ${isDeadline ? buildDeadlineLedgerPdfTable(rows) : buildStandardLedgerPdfTable(rows)}
-    <div class="ledger-pdf-footer"><span>TAS Education Lab · 직원관리대장</span><span>${pageNumber} / ${pageCount}</span></div>`;
+    <div class="ledger-pdf-footer"><span>${LEDGER_PDF_BRAND} · 직원관리대장</span><span>${pageNumber} / ${pageCount}</span></div>`;
   page.style.position = "relative";
   return page;
 }
