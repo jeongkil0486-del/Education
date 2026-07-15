@@ -1277,8 +1277,12 @@ body.pdf-slideshow-open {
 }
 
 .pdf-slideshow--audience {
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   cursor: default;
+}
+
+.pdf-slideshow--audience .pdf-slideshow__stage {
+  grid-row: 1;
 }
 
 .pdf-slideshow--audience .pdf-slideshow__toolbar {
