@@ -167,17 +167,20 @@
 .login-art__grid {
   position: absolute;
   inset: 0;
+  z-index: 0;
+  pointer-events: none;
   background-image:
-    linear-gradient(rgba(255,255,255,.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,.03) 1px, transparent 1px);
+    linear-gradient(rgb(255 255 255 / 3.8%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / 3.8%) 1px, transparent 1px);
   background-size: 40px 40px;
-  background-position: 0 0;
-  animation: login-grid-drift 36s linear infinite;
+  background-position: 0 0, 0 0;
+  animation: login-grid-drift 16s linear infinite;
   will-change: background-position;
 }
 
 @keyframes login-grid-drift {
-  to { background-position: 40px 40px; }
+  from { background-position: 0 0, 0 0; }
+  to { background-position: 40px 40px, 40px 40px; }
 }
 
 .login-art__shine {
@@ -191,32 +194,23 @@
   content: attr(data-shine-text);
   position: absolute;
   inset: 0;
-  color: transparent;
-  background: linear-gradient(
-    125deg,
-    transparent 30%,
-    rgb(255 255 255 / 8%) 42%,
-    rgb(255 255 255 / 42%) 49%,
-    rgb(255 255 255 / 10%) 56%,
-    transparent 68%
-  );
-  background-position: 130% 0;
-  background-size: 260% 100%;
-  background-clip: text;
-  -webkit-background-clip: text;
+  z-index: 1;
+  color: rgb(255 255 255 / 22%);
+  text-shadow: 0 0 10px rgb(191 219 254 / 16%);
+  clip-path: polygon(-30% -10%, -8% -10%, 18% 110%, -4% 110%);
   pointer-events: none;
-  animation: login-text-shine 1.55s ease-out .25s 1 both;
+  animation: login-text-shine 1.65s ease-out .35s 1 both;
 }
 
-.login-art__title::after { animation-delay: .4s; }
-.login-art__sub::after { animation-delay: .55s; }
-.login-art__stat:nth-child(1) .login-art__shine::after { animation-delay: .7s; }
-.login-art__stat:nth-child(2) .login-art__shine::after { animation-delay: .84s; }
-.login-art__stat:nth-child(3) .login-art__shine::after { animation-delay: .98s; }
+.login-art__title::after { animation-delay: .5s; }
+.login-art__sub::after { animation-delay: .65s; }
+.login-art__stat:nth-child(1) .login-art__shine::after { animation-delay: .8s; }
+.login-art__stat:nth-child(2) .login-art__shine::after { animation-delay: .94s; }
+.login-art__stat:nth-child(3) .login-art__shine::after { animation-delay: 1.08s; }
 
 @keyframes login-text-shine {
-  from { background-position: 130% 0; }
-  to { background-position: -130% 0; }
+  from { clip-path: polygon(-30% -10%, -8% -10%, 18% 110%, -4% 110%); }
+  to { clip-path: polygon(82% -10%, 104% -10%, 130% 110%, 108% 110%); }
 }
 
 @media (prefers-reduced-motion: reduce) {
