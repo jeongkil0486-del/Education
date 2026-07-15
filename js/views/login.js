@@ -26,20 +26,20 @@ export function showLogin(container) {
       </div>
 
       <h1 class="login-panel__heading">로그인</h1>
-      <p class="login-panel__subheading">사번과 비밀번호를 입력하세요.</p>
+      <p class="login-panel__subheading">아이디와 비밀번호를 입력하세요.</p>
 
       <div class="login-form" id="login-form">
         <div class="form-group">
-          <label class="form-label form-label--required" for="login-empno">사번</label>
+          <label class="form-label form-label--required" for="login-empno">아이디</label>
           <div class="input-group">
             <svg class="input-group__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
               <path d="M8 8a3 3 0 100-6 3 3 0 000 6zm-5 6a5 5 0 0110 0" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
             </svg>
             <input
               class="form-control"
-              type="text"
+              type="password"
               id="login-empno"
-              placeholder="사번"
+              placeholder="아이디"
               autocomplete="username"
               autocapitalize="none"
               spellcheck="false"
@@ -104,13 +104,7 @@ export function showLogin(container) {
     </div>
 
     <div class="login-art">
-      <div class="login-art__aurora login-art__aurora--primary" aria-hidden="true"></div>
-      <div class="login-art__aurora login-art__aurora--secondary" aria-hidden="true"></div>
-      <div class="login-art__pattern" aria-hidden="true"></div>
-      <div class="login-art__orbit login-art__orbit--one" aria-hidden="true"></div>
-      <div class="login-art__orbit login-art__orbit--two" aria-hidden="true"></div>
-      <div class="login-art__particles" aria-hidden="true"><span></span><span></span><span></span></div>
-      <div class="login-art__sweep" aria-hidden="true"></div>
+      <div class="login-art__grid" aria-hidden="true"></div>
       <h2 class="login-art__headline">
         <span class="login-art__eyebrow">Trinity Air Service</span>
         <span class="login-art__title">${TEXT.brand.serviceName}</span>
@@ -120,16 +114,16 @@ export function showLogin(container) {
       </p>
       <div class="login-art__stats">
         <div class="login-art__stat">
-          <div class="login-art__stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 7h8M7 12h10M9 17h6M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/></svg></div>
-          <div><div class="login-art__stat-value">통합</div><div class="login-art__stat-label">교육 운영</div></div>
+          <div class="login-art__stat-value">통합</div>
+          <div class="login-art__stat-label">교육 운영</div>
         </div>
         <div class="login-art__stat">
-          <div class="login-art__stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 4h12v4H6V4Zm-2 8h7v8H4v-8Zm11 0h5v8h-5v-8ZM9 8v4m6-4v4"/></svg></div>
-          <div><div class="login-art__stat-value">체계</div><div class="login-art__stat-label">이력 관리</div></div>
+          <div class="login-art__stat-value">체계</div>
+          <div class="login-art__stat-label">이력 관리</div>
         </div>
         <div class="login-art__stat">
-          <div class="login-art__stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.6 2.8 8.3 7 10 4.2-1.7 7-5.4 7-10V6l-7-3Zm-3 9 2 2 4-4"/></svg></div>
-          <div><div class="login-art__stat-value">보안</div><div class="login-art__stat-label">권한 관리</div></div>
+          <div class="login-art__stat-value">보안</div>
+          <div class="login-art__stat-label">권한 관리</div>
         </div>
       </div>
     </div>
@@ -163,7 +157,7 @@ async function attemptLogin() {
   const empNo = rawEmpNo.trim();
 
   if (!empNo) {
-    showError("사번을 입력하세요.", errorEl, errorTxt);
+    showError("아이디를 입력하세요.", errorEl, errorTxt);
     document.getElementById("login-empno")?.focus();
     return;
   }
@@ -202,12 +196,12 @@ function showError(msg, errorEl, errorTxt) {
 function friendlyError(code, empNo = "") {
   const map = {
     "auth/employee-login-disabled": "직원 계정은 로그인 대상이 아닙니다.",
-    "auth/user-not-found":      `등록되지 않은 사번입니다. (${empNo})`,
+    "auth/user-not-found":      `등록되지 않은 아이디입니다. (${empNo})`,
     "auth/wrong-password":      "비밀번호가 올바르지 않습니다.",
-    "auth/invalid-email":       "사번 형식이 올바르지 않습니다.",
+    "auth/invalid-email":       "아이디 형식이 올바르지 않습니다.",
     "auth/too-many-requests":   "로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요.",
     "auth/user-disabled":       "비활성화된 계정입니다. 관리자에게 문의하세요.",
-    "auth/invalid-credential":  "사번 또는 비밀번호가 올바르지 않습니다.",
+    "auth/invalid-credential":  "아이디 또는 비밀번호가 올바르지 않습니다.",
     "auth/network-request-failed": "네트워크 오류가 발생했습니다. 연결을 확인하세요.",
   };
   return map[code] ?? "로그인 중 오류가 발생했습니다. 다시 시도하세요.";
