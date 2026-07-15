@@ -159,6 +159,73 @@ async function resolveMaterialAccess(uid, materialId) {
   return { profile, material };
 }
 
+async function ensureGuideActor(uid) {
+  const actor = await getUserProfile(uid);
+  if (!actor || !["instructor", "hq_admin"].includes(actor.role)) {
+    throw new HttpsError("permission-denied", "개인 교안을 관리할 권한이 없습니다.");
+  }
+  if (!actor.companyId) actor.companyId = await resolveActorCompanyId(actor);
+  if (!actor.companyId) {
+    throw new HttpsError("failed-precondition", "교안의 회사 범위를 결정할 수 없습니다.");
+  }
+  return actor;
+}
+
+function guideText(value, maxLength) {
+  return String(value ?? "").trim().slice(0, maxLength);
+}
+
+function normalizeGuidePageNotes(value) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const pageNotes = {};
+  for (const [rawPage, rawNote] of Object.entries(source).slice(0, 2000)) {
+    const page = Number(rawPage);
+    if (!Number.isInteger(page) || page < 1 || page > 5000) continue;
+    const note = rawNote && typeof rawNote === "object" ? rawNote : {};
+    const normalized = {
+      note: guideText(note.note, 5000),
+      emphasis: guideText(note.emphasis, 1500),
+      question: guideText(note.question, 1500),
+      updatedAt: Date.now(),
+    };
+    if (normalized.note || normalized.emphasis || normalized.question) pageNotes[String(page)] = normalized;
+  }
+  return pageNotes;
+}
+
+function normalizeGuideInput(value) {
+  const input = value && typeof value === "object" ? value : {};
+  const title = guideText(input.title, 160);
+  const materialId = guideText(input.materialId, 140);
+  if (!title) throw new HttpsError("invalid-argument", "교안 제목을 입력해 주세요.");
+  if (!materialId) throw new HttpsError("invalid-argument", "연결할 PDF 교육자료를 선택해 주세요.");
+  return {
+    title,
+    materialId,
+    trainingItemId: guideText(input.trainingItemId, 120),
+    estimatedMinutes: Math.min(1440, Math.max(0, Math.round(Number(input.estimatedMinutes) || 0))),
+    objectives: guideText(input.objectives, 5000),
+    openingNotes: guideText(input.openingNotes, 5000),
+    closingNotes: guideText(input.closingNotes, 5000),
+    generalNotes: guideText(input.generalNotes, 10000),
+    pageNotes: normalizeGuidePageNotes(input.pageNotes),
+  };
+}
+
+function assertGuideId(guideId) {
+  if (!/^[A-Za-z0-9_-]{1,140}$/.test(guideId)) {
+    throw new HttpsError("invalid-argument", "올바른 guideId가 아닙니다.");
+  }
+}
+
+async function assertGuideOwner(uid, guideId) {
+  assertGuideId(guideId);
+  const ownerSnap = await db.ref(`instructorGuideOwners/${guideId}`).get();
+  if (ownerSnap.exists() && normalizeText(ownerSnap.val()) !== normalizeText(uid)) {
+    throw new HttpsError("permission-denied", "다른 사용자의 개인 교안에는 접근할 수 없습니다.");
+  }
+}
+
 exports.createMaterialUploadUrl = onCall(R2_OPTS, async (request) => {
   ensureAuthenticated(request);
 
@@ -415,6 +482,121 @@ exports.listMaterials = onCall(OPTS, async (request) => {
     finalCount: materials.length,
   });
   return { materials };
+});
+
+exports.listInstructorGuides = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await ensureGuideActor(request.auth.uid);
+  const snap = await db.ref(`instructorGuides/${request.auth.uid}`).get();
+  const guides = [];
+  snap.forEach((child) => {
+    const value = child.val() ?? {};
+    guides.push({
+      id: child.key,
+      ownerUid: request.auth.uid,
+      companyId: value.companyId ?? actor.companyId,
+      branchId: value.branchId ?? actor.branchId ?? "",
+      materialId: value.materialId ?? "",
+      materialTitle: value.materialTitle ?? "",
+      title: value.title ?? "",
+      trainingItemId: value.trainingItemId ?? "",
+      estimatedMinutes: Number(value.estimatedMinutes ?? 0),
+      pageNoteCount: Object.keys(value.pageNotes ?? {}).length,
+      createdAt: Number(value.createdAt ?? 0),
+      updatedAt: Number(value.updatedAt ?? 0),
+    });
+  });
+  guides.sort((a, b) => b.updatedAt - a.updatedAt);
+  return { guides };
+});
+
+exports.getInstructorGuide = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  await ensureGuideActor(request.auth.uid);
+  const guideId = normalizeText(request.data?.guideId);
+  await assertGuideOwner(request.auth.uid, guideId);
+  const snap = await db.ref(`instructorGuides/${request.auth.uid}/${guideId}`).get();
+  if (!snap.exists()) throw new HttpsError("not-found", "교안을 찾을 수 없습니다.");
+  return { guide: { id: guideId, ...snap.val() } };
+});
+
+exports.saveInstructorGuide = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await ensureGuideActor(request.auth.uid);
+  const inputGuide = request.data?.guide;
+  const normalized = normalizeGuideInput(inputGuide);
+  const requestedGuideId = normalizeText(inputGuide?.id || request.data?.guideId);
+  if (requestedGuideId) await assertGuideOwner(request.auth.uid, requestedGuideId);
+
+  const { material } = await resolveMaterialAccess(request.auth.uid, normalized.materialId);
+  if (!material.r2Key || !hasPdfExtension(material.fileName)) {
+    throw new HttpsError("failed-precondition", "PDF 교육자료만 교안에 연결할 수 있습니다.");
+  }
+
+  const guideId = requestedGuideId || db.ref(`instructorGuides/${request.auth.uid}`).push().key;
+  const existingSnap = await db.ref(`instructorGuides/${request.auth.uid}/${guideId}`).get();
+  const now = Date.now();
+  const guide = {
+    ...normalized,
+    id: guideId,
+    ownerUid: request.auth.uid,
+    ownerName: actor.name ?? "",
+    companyId: actor.companyId,
+    branchId: actor.branchId ?? "",
+    materialTitle: material.title || material.materialName || material.fileName || "교육자료",
+    materialFileName: material.fileName || "",
+    createdAt: existingSnap.val()?.createdAt ?? now,
+    updatedAt: now,
+  };
+  await db.ref().update({
+    [`instructorGuides/${request.auth.uid}/${guideId}`]: guide,
+    [`instructorGuideOwners/${guideId}`]: request.auth.uid,
+  });
+  await writeAuditLogSafe({
+    actor,
+    companyId: actor.companyId,
+    action: existingSnap.exists() ? "UPDATE_INSTRUCTOR_GUIDE" : "CREATE_INSTRUCTOR_GUIDE",
+    category: "GUIDE",
+    target: { type: "INSTRUCTOR_GUIDE", uid: guideId, name: guide.title },
+    summary: `개인 교안 ${existingSnap.exists() ? "수정" : "생성"}: ${guide.title}`,
+    metadata: {
+      guideId,
+      guideTitle: guide.title,
+      materialId: guide.materialId,
+      materialTitle: guide.materialTitle,
+      pageNoteCount: Object.keys(guide.pageNotes).length,
+    },
+  });
+  return { guide, guideId, message: existingSnap.exists() ? "교안을 수정했습니다." : "교안을 저장했습니다." };
+});
+
+exports.deleteInstructorGuide = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await ensureGuideActor(request.auth.uid);
+  const guideId = normalizeText(request.data?.guideId);
+  await assertGuideOwner(request.auth.uid, guideId);
+  const snap = await db.ref(`instructorGuides/${request.auth.uid}/${guideId}`).get();
+  if (!snap.exists()) throw new HttpsError("not-found", "삭제할 교안을 찾을 수 없습니다.");
+  const guide = snap.val() ?? {};
+  await db.ref().update({
+    [`instructorGuides/${request.auth.uid}/${guideId}`]: null,
+    [`instructorGuideOwners/${guideId}`]: null,
+  });
+  await writeAuditLogSafe({
+    actor,
+    companyId: actor.companyId,
+    action: "DELETE_INSTRUCTOR_GUIDE",
+    category: "GUIDE",
+    target: { type: "INSTRUCTOR_GUIDE", uid: guideId, name: guide.title },
+    summary: `개인 교안 삭제: ${guide.title || guideId}`,
+    metadata: {
+      guideId,
+      guideTitle: guide.title,
+      materialId: guide.materialId,
+      materialTitle: guide.materialTitle,
+    },
+  });
+  return { guideId, message: "교안을 삭제했습니다." };
 });
 
 exports.createEmployeeAccounts = onCall(OPTS, async (request) => {

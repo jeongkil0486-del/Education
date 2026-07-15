@@ -30,6 +30,7 @@ const NAV_CONFIG = {
         { path: "dashboard", label: TEXT.routes.dashboard, icon: iconGrid() },
         { path: "trainings", label: TEXT.routes.trainings, icon: iconBook() },
         { path: "materials", label: TEXT.routes.materials, icon: iconFile() },
+        { path: "lesson-plan", label: TEXT.routes.lessonPlan, icon: iconPencil() },
         { path: "templates", label: TEXT.routes.templates, icon: iconLayers() },
       ],
     },

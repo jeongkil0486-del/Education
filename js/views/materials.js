@@ -218,7 +218,7 @@ function renderTable(container) {
             <td class="cell--actions">
               <div style="display:flex;gap:4px;justify-content:flex-end;align-items:center">
                 ${canSlideshow() && m.r2Key
-                  ? `<button class="btn btn--primary btn--sm btn-mat-slideshow" data-id="${esc(m.id)}">슬라이드쇼</button>`
+                  ? `<button class="btn btn--primary btn--sm btn-mat-slideshow" data-id="${esc(m.id)}">슬라이드쇼</button><button class="btn btn--ghost btn--sm btn-mat-presenter" data-id="${esc(m.id)}">발표자 보기</button>`
                   : ""}
                 ${m.url || m.r2Key
                   ? `<button class="btn btn--ghost btn--sm btn-mat-download" data-id="${esc(m.id)}" title="다운로드">
@@ -259,6 +259,12 @@ function renderTable(container) {
     btn.addEventListener("click", () => {
       window.__slideshowLaunchAt = performance.now();
       router.push("slideshow", { materialId: btn.dataset.id });
+    });
+  });
+  wrap.querySelectorAll(".btn-mat-presenter").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      window.__slideshowLaunchAt = performance.now();
+      router.push("slideshow", { materialId: btn.dataset.id, presenter: "1" });
     });
   });
   wrap.querySelectorAll(".btn-mat-download").forEach((btn) => {

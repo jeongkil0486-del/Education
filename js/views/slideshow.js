@@ -1,6 +1,9 @@
 import { authStore, ROLES } from "../core/auth.js";
 import { router } from "../core/router.js";
 import { listMaterials, requestMaterialSlideshowSource } from "../services/material-service.js";
+import { getInstructorGuide, saveInstructorGuide } from "../services/guide-service.js";
+import { createPresenterSync } from "../modules/presenter-sync.js";
+import { toast } from "../utils/toast.js";
 
 const PDFJS_VERSION = "6.1.200";
 const PDFJS_BASE = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}`;
@@ -69,6 +72,22 @@ export async function render(container, params = {}) {
   }
 
   const materialId = String(params.materialId ?? "").trim();
+  const mode = params.audience === "1" ? "audience" : params.presenter === "1" ? "presenter" : "standard";
+  const requestedSessionId = String(params.sessionId ?? "").trim();
+  if (mode === "audience" && !/^[A-Za-z0-9_-]{8,100}$/.test(requestedSessionId)) {
+    renderError(container, "올바른 발표 세션 정보가 없습니다.");
+    return;
+  }
+  const sessionId = mode === "presenter"
+    ? (/^[A-Za-z0-9_-]{8,100}$/.test(requestedSessionId) ? requestedSessionId : crypto.randomUUID())
+    : requestedSessionId;
+  const guideId = String(params.guideId ?? "").trim();
+  const guideReady = mode === "presenter" && guideId
+    ? getInstructorGuide(guideId).then((guide) => ({ guide, error: null })).catch((error) => {
+      console.warn("[slideshow] guide unavailable", error?.code, error?.message);
+      return { guide: null, error };
+    })
+    : Promise.resolve({ guide: null, error: null });
   const perf = createPerformanceTracker(params);
   perf.mark("runtimeStart");
   const pdfRuntimeReady = materialId
@@ -99,7 +118,7 @@ export async function render(container, params = {}) {
       renderError(container, "조회 권한이 없거나 슬라이드쇼로 실행할 수 없는 PDF 자료입니다.");
       return;
     }
-    await startSlideshow(container, material, { slideshowStartupReady, perf });
+    await startSlideshow(container, material, { slideshowStartupReady, perf, mode, sessionId, guideReady });
   } catch (error) {
     console.error("[slideshow] initialization failed", error?.code, error?.message);
     renderError(container, slideshowErrorMessage(error));
@@ -129,9 +148,9 @@ function renderMaterialPicker(container, materials) {
 async function startSlideshow(container, material, runtime) {
   container.innerHTML = '<div class="empty-state" style="padding:var(--space-16)">슬라이드쇼를 준비하는 중입니다.</div>';
   const overlay = document.createElement("div");
-  overlay.className = "pdf-slideshow";
+  overlay.className = `pdf-slideshow pdf-slideshow--${runtime.mode}`;
   overlay.id = "pdf-slideshow-root";
-  overlay.innerHTML = slideshowShell(material);
+  overlay.innerHTML = slideshowShell(material, runtime.mode);
   document.body.appendChild(overlay);
   document.body.classList.add("pdf-slideshow-open");
 
@@ -161,6 +180,22 @@ async function startSlideshow(container, material, runtime) {
     textEditor: null,
     pageCache: new Map(),
     firstPageVisible: false,
+    mode: runtime.mode,
+    sessionId: runtime.sessionId,
+    guide: null,
+    guideLoadError: null,
+    sync: null,
+    pendingRemoteState: null,
+    audienceWindow: null,
+    pointerState: { x: 0, y: 0, visible: false },
+    timerStartedAt: Date.now(),
+    timerElapsedBeforePause: 0,
+    timerRunning: true,
+    timerInterval: null,
+    heartbeatCleanup: null,
+    nextRenderTask: null,
+    guideFontScale: 1,
+    guideCollapsed: false,
     destroyed: false,
   };
 
@@ -182,13 +217,19 @@ async function startSlideshow(container, material, runtime) {
     if (state.destroyed) return;
     state.destroyed = true;
     state.renderTask?.cancel?.();
+    state.nextRenderTask?.cancel?.();
     state.loadingTask?.destroy?.();
     state.pdf?.destroy?.();
+    if (state.mode === "presenter") state.sync?.end();
+    state.sync?.close();
+    state.audienceWindow?.close?.();
+    clearInterval(state.timerInterval);
     resizeObserver.disconnect();
     clearTimeout(resizeTimer);
     document.removeEventListener("keydown", onKeyDown);
     document.removeEventListener("fullscreenchange", onFullscreenChange);
     window.removeEventListener("hashchange", onHashChange);
+    window.removeEventListener("beforeunload", onBeforeUnload);
     if (document.fullscreenElement === overlay) document.exitFullscreen().catch(() => {});
     overlay.remove();
     document.body.classList.remove("pdf-slideshow-open");
@@ -200,13 +241,20 @@ async function startSlideshow(container, material, runtime) {
   const onHashChange = () => {
     if (!window.location.hash.startsWith("#/slideshow")) close(false);
   };
+  const onBeforeUnload = () => close(false);
   const onFullscreenChange = () => {
     overlay.classList.toggle("is-fullscreen", document.fullscreenElement === overlay);
-    overlay.querySelector('[data-action="fullscreen"]').textContent = document.fullscreenElement === overlay ? "전체화면 종료" : "전체화면";
+    overlay.querySelectorAll('[data-action="fullscreen"]').forEach((button) => {
+      button.textContent = document.fullscreenElement === overlay ? "전체화면 종료" : "전체화면";
+    });
     onResize();
   };
   const onKeyDown = (event) => {
     if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return;
+    if (state.mode === "audience") {
+      if (["f", "F"].includes(event.key)) { event.preventDefault(); toggleFullscreen(); }
+      return;
+    }
     const actions = {
       ArrowLeft: () => goPage(state.page - 1), PageUp: () => goPage(state.page - 1),
       ArrowRight: () => goPage(state.page + 1), PageDown: () => goPage(state.page + 1),
@@ -226,6 +274,7 @@ async function startSlideshow(container, material, runtime) {
   document.addEventListener("keydown", onKeyDown);
   document.addEventListener("fullscreenchange", onFullscreenChange);
   window.addEventListener("hashchange", onHashChange);
+  window.addEventListener("beforeunload", onBeforeUnload);
 
   function pageAnnotations(pageNumber = state.page) {
     if (!state.annotationsByPage.has(pageNumber)) {
@@ -328,7 +377,9 @@ async function startSlideshow(container, material, runtime) {
         resizeObserver.observe(stage);
         runtime.perf.mark("firstPageVisible");
         runtime.perf.report(runtime.sourceUrl);
+        renderPresenterNextPreview();
       }
+      state.sync?.sendState();
       prepareNextPage();
     } catch (error) {
       if (error?.name === "RenderingCancelledException") return;
@@ -380,6 +431,7 @@ async function startSlideshow(container, material, runtime) {
       context.stroke();
       context.restore();
     }
+    state.sync?.sendAnnotations(state.page, pageAnnotations().items);
   }
 
   function goPage(pageNumber) {
@@ -397,6 +449,8 @@ async function startSlideshow(container, material, runtime) {
     overlay.querySelector('[data-action="previous"]').disabled = state.page <= 1;
     overlay.querySelector('[data-action="next"]').disabled = state.page >= state.pageCount;
     updateHistoryButtons();
+    updatePresenterGuide();
+    renderPresenterNextPreview();
   }
 
   function setTool(tool) {
@@ -404,6 +458,10 @@ async function startSlideshow(container, material, runtime) {
     state.tool = tool;
     annotationCanvas.dataset.tool = tool;
     pointer.classList.remove("is-visible", "is-pulsing");
+    if (tool !== "pointer" && state.pointerState.visible) {
+      state.pointerState = { ...state.pointerState, visible: false };
+      state.sync?.sendPointer(state.pointerState);
+    }
     overlay.querySelectorAll(".pdf-slideshow__toolbar [data-tool]").forEach((button) => button.classList.toggle("is-active", button.dataset.tool === tool));
   }
 
@@ -433,6 +491,8 @@ async function startSlideshow(container, material, runtime) {
     pointer.style.left = `${point.px}px`;
     pointer.style.top = `${point.py}px`;
     pointer.classList.add("is-visible");
+    state.pointerState = { x: point.x, y: point.y, visible: true };
+    state.sync?.sendPointer(state.pointerState);
   }
 
   function pulsePointer() {
@@ -505,6 +565,264 @@ async function startSlideshow(container, material, runtime) {
     state.textEditor = null;
   }
 
+  function connectionLabel(status) {
+    return ({
+      waiting: "청중 화면 연결 대기",
+      connected: "청중 화면 연결됨",
+      disconnected: "청중 화면 연결 끊김 · 다시 열 수 있습니다",
+      unsupported: "이 브라우저는 발표자 동기화를 지원하지 않습니다",
+    })[status] || "연결 상태 확인 중";
+  }
+
+  function updateConnection(status) {
+    const element = overlay.querySelector("#presenter-connection");
+    if (!element) return;
+    element.dataset.state = status;
+    element.textContent = connectionLabel(status);
+  }
+
+  function applyRemotePointer(remotePointer) {
+    if (state.mode !== "audience" || !remotePointer) return;
+    const rect = annotationCanvas.getBoundingClientRect();
+    if (!remotePointer.visible) {
+      pointer.classList.remove("is-visible");
+      return;
+    }
+    pointer.style.left = `${Number(remotePointer.x || 0) * rect.width}px`;
+    pointer.style.top = `${Number(remotePointer.y || 0) * rect.height}px`;
+    pointer.classList.add("is-visible");
+  }
+
+  async function applyRemoteState(remoteState) {
+    if (state.mode !== "audience" || !remoteState) return;
+    if (!state.pdf) {
+      state.pendingRemoteState = remoteState;
+      return;
+    }
+    const page = Math.min(state.pageCount, Math.max(1, Number(remoteState.pageNumber) || 1));
+    state.page = page;
+    state.zoom = Math.min(3, Math.max(0.5, Number(remoteState.zoom) || 1));
+    pageAnnotations(page).items = Array.isArray(remoteState.annotations)
+      ? structuredClone(remoteState.annotations)
+      : [];
+    await renderPage();
+  }
+
+  function applyRemoteAnnotations(pageNumber, annotations) {
+    if (state.mode !== "audience") return;
+    const page = Number(pageNumber);
+    if (!Number.isInteger(page) || page < 1) return;
+    pageAnnotations(page).items = Array.isArray(annotations) ? structuredClone(annotations) : [];
+    if (page === state.page && state.pdf) renderAnnotations();
+  }
+
+  function syncSnapshot() {
+    return {
+      pageNumber: state.page,
+      zoom: state.zoom,
+      annotations: structuredClone(pageAnnotations().items),
+      pointerMode: state.tool === "pointer",
+    };
+  }
+
+  function openAudienceWindow() {
+    if (state.mode !== "presenter") return;
+    const params = new URLSearchParams({ materialId: material.id, audience: "1", sessionId: state.sessionId });
+    const url = `${window.location.origin}${window.location.pathname}#/slideshow?${params.toString()}`;
+    state.audienceWindow = window.open(url, `tas-presenter-${state.sessionId}`, "popup=yes,width=1280,height=800");
+    if (!state.audienceWindow) {
+      updateConnection("disconnected");
+      toast.warning("팝업이 차단되었습니다. 브라우저에서 팝업을 허용한 뒤 다시 시도하세요.");
+      return;
+    }
+    updateConnection("waiting");
+    state.audienceWindow.focus();
+    toast.info("청중용 발표 창을 빔프로젝터 화면으로 이동한 뒤 전체화면으로 전환하세요.");
+  }
+
+  function formatTimer(milliseconds) {
+    const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+    const hours = String(Math.floor(seconds / 3600)).padStart(2, "0");
+    const minutes = String(Math.floor((seconds % 3600) / 60)).padStart(2, "0");
+    return `${hours}:${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+  }
+
+  function elapsedTimer() {
+    return state.timerElapsedBeforePause + (state.timerRunning ? Date.now() - state.timerStartedAt : 0);
+  }
+
+  function renderTimer() {
+    const element = overlay.querySelector("#presenter-timer");
+    if (element) element.textContent = formatTimer(elapsedTimer());
+  }
+
+  function toggleTimer() {
+    if (state.timerRunning) {
+      state.timerElapsedBeforePause += Date.now() - state.timerStartedAt;
+      state.timerRunning = false;
+    } else {
+      state.timerStartedAt = Date.now();
+      state.timerRunning = true;
+    }
+    const button = overlay.querySelector('[data-action="timer-toggle"]');
+    if (button) button.textContent = state.timerRunning ? "일시정지" : "계속";
+    renderTimer();
+  }
+
+  function resetTimer() {
+    state.timerElapsedBeforePause = 0;
+    state.timerStartedAt = Date.now();
+    state.timerRunning = true;
+    const button = overlay.querySelector('[data-action="timer-toggle"]');
+    if (button) button.textContent = "일시정지";
+    renderTimer();
+  }
+
+  function adjustGuideFont(delta) {
+    state.guideFontScale = Math.min(1.5, Math.max(0.85, state.guideFontScale + delta));
+    const guidePanel = overlay.querySelector(".presenter-card--guide");
+    if (guidePanel) guidePanel.style.setProperty("--guide-font-scale", String(state.guideFontScale));
+  }
+
+  function toggleGuidePanel() {
+    state.guideCollapsed = !state.guideCollapsed;
+    const guidePanel = overlay.querySelector(".presenter-card--guide");
+    guidePanel?.classList.toggle("is-collapsed", state.guideCollapsed);
+    const button = overlay.querySelector('[data-action="guide-toggle"]');
+    if (button) button.textContent = state.guideCollapsed ? "펼치기" : "접기";
+  }
+
+  function currentGuideNote() {
+    return state.guide?.pageNotes?.[String(state.page)] || {};
+  }
+
+  function updatePresenterGuide() {
+    if (state.mode !== "presenter") return;
+    const page = overlay.querySelector("#presenter-guide-page");
+    if (page) page.textContent = `${state.page} / ${state.pageCount || "-"} 페이지`;
+    const note = currentGuideNote();
+    const status = overlay.querySelector("#presenter-guide-status");
+    if (status) status.textContent = state.guide
+      ? ""
+      : state.guideLoadError
+        ? "교안을 불러오지 못했습니다. 교안 목록에서 다시 발표를 시작하세요."
+        : "연결된 교안이 없습니다. 교안 작성 메뉴에서 교안을 선택해 발표를 시작하세요.";
+    const mappings = [
+      ["#presenter-page-note", note.note],
+      ["#presenter-page-emphasis", note.emphasis],
+      ["#presenter-page-question", note.question],
+      ["#presenter-general-note", state.guide?.generalNotes],
+    ];
+    mappings.forEach(([selector, value]) => {
+      const element = overlay.querySelector(selector);
+      if (element && element !== document.activeElement) element.value = value || "";
+    });
+    const saveButton = overlay.querySelector('[data-action="guide-quick-save"]');
+    if (saveButton) saveButton.disabled = !state.guide;
+  }
+
+  async function savePresenterGuide() {
+    if (!state.guide) {
+      toast.warning("연결된 교안이 없습니다. 교안 작성 메뉴에서 먼저 교안을 연결하세요.");
+      return;
+    }
+    const pageKey = String(state.page);
+    state.guide.pageNotes ??= {};
+    state.guide.pageNotes[pageKey] = {
+      ...(state.guide.pageNotes[pageKey] || {}),
+      note: overlay.querySelector("#presenter-page-note")?.value || "",
+      emphasis: overlay.querySelector("#presenter-page-emphasis")?.value || "",
+      question: overlay.querySelector("#presenter-page-question")?.value || "",
+    };
+    state.guide.generalNotes = overlay.querySelector("#presenter-general-note")?.value || "";
+    const button = overlay.querySelector('[data-action="guide-quick-save"]');
+    if (button) button.disabled = true;
+    try {
+      const result = await saveInstructorGuide(state.guide);
+      state.guide = result.guide;
+      toast.success("교안을 저장했습니다.");
+    } catch (error) {
+      console.error("[slideshow] guide quick save failed", error?.code, error?.message);
+      toast.error(error?.message || "교안을 저장하지 못했습니다.");
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  async function renderPresenterNextPreview() {
+    if (state.mode !== "presenter" || !state.pdf || !state.firstPageVisible) return;
+    const canvas = overlay.querySelector("#presenter-next-canvas");
+    const empty = overlay.querySelector("#presenter-next-empty");
+    if (!canvas || !empty) return;
+    state.nextRenderTask?.cancel?.();
+    if (state.page >= state.pageCount) {
+      canvas.classList.add("hidden");
+      empty.classList.remove("hidden");
+      empty.textContent = "마지막 페이지입니다.";
+      return;
+    }
+    empty.classList.add("hidden");
+    canvas.classList.remove("hidden");
+    const targetPage = state.page + 1;
+    const render = async () => {
+      try {
+        const page = await getPdfPage(targetPage);
+        if (state.destroyed || targetPage !== state.page + 1) return;
+        const base = page.getViewport({ scale: 1 });
+        const scale = Math.min(300 / base.width, 180 / base.height);
+        const viewport = page.getViewport({ scale });
+        canvas.width = Math.ceil(viewport.width);
+        canvas.height = Math.ceil(viewport.height);
+        state.nextRenderTask = page.render({ canvasContext: canvas.getContext("2d", { alpha: false }), viewport });
+        await state.nextRenderTask.promise;
+      } catch (error) {
+        if (error?.name !== "RenderingCancelledException") console.warn("[slideshow] next preview failed", error?.message);
+      }
+    };
+    if ("requestIdleCallback" in window) window.requestIdleCallback(render, { timeout: 900 });
+    else setTimeout(render, 120);
+  }
+
+  if (["presenter", "audience"].includes(state.mode)) {
+    state.sync = createPresenterSync({
+      mode: state.mode,
+      sessionId: state.sessionId,
+      getState: syncSnapshot,
+      onState: applyRemoteState,
+      onAnnotations: applyRemoteAnnotations,
+      onPointer: applyRemotePointer,
+      onConnection: updateConnection,
+      onEnd: () => {
+        if (state.mode !== "audience") return;
+        loading.classList.remove("hidden");
+        loading.innerHTML = '<div class="pdf-slideshow__error">발표가 종료되었습니다.<br><button class="pdf-slideshow__button" data-action="close">닫기</button></div>';
+        loading.querySelector('[data-action="close"]')?.addEventListener("click", () => close(true));
+      },
+    });
+  }
+
+  if (state.mode === "presenter") {
+    state.timerInterval = setInterval(renderTimer, 500);
+    renderTimer();
+    runtime.guideReady.then(({ guide, error }) => {
+      if (state.destroyed) return;
+      state.guide = guide;
+      state.guideLoadError = error;
+      updatePresenterGuide();
+    });
+  }
+
+  if (state.mode === "audience") {
+    let controlsTimer = null;
+    const showAudienceControls = () => {
+      overlay.classList.remove("is-controls-hidden");
+      clearTimeout(controlsTimer);
+      controlsTimer = setTimeout(() => overlay.classList.add("is-controls-hidden"), 2200);
+    };
+    overlay.addEventListener("pointermove", showAudienceControls);
+    showAudienceControls();
+  }
+
   annotationCanvas.addEventListener("pointerdown", (event) => {
     if (!state.pdf) return;
     const point = normalizedPoint(event);
@@ -562,7 +880,11 @@ async function startSlideshow(container, material, runtime) {
   annotationCanvas.addEventListener("pointerup", endPointerAction);
   annotationCanvas.addEventListener("pointercancel", endPointerAction);
   annotationCanvas.addEventListener("pointerleave", () => {
-    if (state.tool === "pointer") pointer.classList.remove("is-visible");
+    if (state.tool === "pointer") {
+      pointer.classList.remove("is-visible");
+      state.pointerState = { ...state.pointerState, visible: false };
+      state.sync?.sendPointer(state.pointerState);
+    }
   });
 
   overlay.querySelectorAll(".pdf-slideshow__toolbar [data-tool]").forEach((button) => button.addEventListener("click", () => setTool(button.dataset.tool)));
@@ -571,7 +893,18 @@ async function startSlideshow(container, material, runtime) {
   overlay.querySelector('[data-action="zoom-in"]').addEventListener("click", () => { state.zoom = Math.min(3, state.zoom + 0.25); renderPage(); });
   overlay.querySelector('[data-action="zoom-out"]').addEventListener("click", () => { state.zoom = Math.max(0.5, state.zoom - 0.25); renderPage(); });
   overlay.querySelector('[data-action="fit"]').addEventListener("click", () => { state.zoom = 1; renderPage(); });
-  overlay.querySelector('[data-action="fullscreen"]').addEventListener("click", toggleFullscreen);
+  overlay.querySelectorAll('[data-action="fullscreen"]').forEach((button) => button.addEventListener("click", toggleFullscreen));
+  overlay.querySelector('[data-action="presenter-mode"]')?.addEventListener("click", () => {
+    window.__slideshowLaunchAt = performance.now();
+    router.push("slideshow", { materialId: material.id, presenter: "1" });
+  });
+  overlay.querySelector('[data-action="open-audience"]')?.addEventListener("click", openAudienceWindow);
+  overlay.querySelector('[data-action="timer-toggle"]')?.addEventListener("click", toggleTimer);
+  overlay.querySelector('[data-action="timer-reset"]')?.addEventListener("click", resetTimer);
+  overlay.querySelector('[data-action="guide-smaller"]')?.addEventListener("click", () => adjustGuideFont(-0.1));
+  overlay.querySelector('[data-action="guide-larger"]')?.addEventListener("click", () => adjustGuideFont(0.1));
+  overlay.querySelector('[data-action="guide-toggle"]')?.addEventListener("click", toggleGuidePanel);
+  overlay.querySelector('[data-action="guide-quick-save"]')?.addEventListener("click", savePresenterGuide);
   overlay.querySelectorAll('[data-action="close"]').forEach((button) => button.addEventListener("click", () => close(true)));
   overlay.querySelector('[data-action="undo"]').addEventListener("click", undo);
   overlay.querySelector('[data-action="redo"]').addEventListener("click", redo);
@@ -608,6 +941,12 @@ async function startSlideshow(container, material, runtime) {
     state.pageCount = state.pdf.numPages;
     setTool("pointer");
     await renderPage();
+    if (state.mode === "audience" && state.pendingRemoteState) {
+      const pending = state.pendingRemoteState;
+      state.pendingRemoteState = null;
+      await applyRemoteState(pending);
+    }
+    if (state.mode === "audience") state.sync?.requestState();
   } catch (error) {
     console.error("[slideshow] PDF load failed", error?.name, error?.message);
     loading.classList.remove("hidden");
@@ -616,9 +955,37 @@ async function startSlideshow(container, material, runtime) {
   }
 }
 
-function slideshowShell(material) {
+function slideshowShell(material, mode = "standard") {
+  const headerActions = mode === "presenter"
+    ? '<div id="presenter-connection" class="presenter-connection" data-state="waiting">청중 화면 연결 대기</div><button type="button" class="pdf-slideshow__button" data-action="open-audience">청중 화면 열기</button><button type="button" class="pdf-slideshow__button" data-action="fullscreen">전체화면</button>'
+    : mode === "audience"
+      ? '<button type="button" class="pdf-slideshow__button" data-action="fullscreen">전체화면</button>'
+      : '<div id="slideshow-status">임시 주석 · 종료 시 삭제</div><button type="button" class="pdf-slideshow__button" data-action="presenter-mode">발표자 보기</button><button type="button" class="pdf-slideshow__button" data-action="fullscreen">전체화면</button>';
+  const presenterPanel = mode === "presenter" ? `
+    <aside class="pdf-slideshow__presenter" aria-label="발표자 전용 정보">
+      <section class="presenter-card presenter-card--timer">
+        <div><span class="presenter-card__label">발표 시간</span><strong id="presenter-timer">00:00:00</strong></div>
+        <div class="presenter-card__actions"><button type="button" data-action="timer-toggle">일시정지</button><button type="button" data-action="timer-reset">초기화</button></div>
+      </section>
+      <section class="presenter-card">
+        <div class="presenter-card__title">다음 슬라이드</div>
+        <div class="presenter-next"><canvas id="presenter-next-canvas"></canvas><div id="presenter-next-empty" class="hidden"></div></div>
+      </section>
+      <section class="presenter-card presenter-card--guide">
+        <div class="presenter-card__title"><span>발표자 교안</span><span id="presenter-guide-page">1 / - 페이지</span></div>
+        <div class="presenter-guide-controls"><button type="button" data-action="guide-smaller" aria-label="교안 글자 작게">A−</button><button type="button" data-action="guide-larger" aria-label="교안 글자 크게">A+</button><button type="button" data-action="guide-toggle">접기</button></div>
+        <div class="presenter-guide-body">
+          <div id="presenter-guide-status" class="presenter-guide-status">교안을 불러오는 중입니다.</div>
+          <label>페이지 설명<textarea id="presenter-page-note" rows="5" placeholder="연결된 교안의 페이지 메모가 표시됩니다."></textarea></label>
+          <label>강조 내용<textarea id="presenter-page-emphasis" rows="3"></textarea></label>
+          <label>교육생 질문<textarea id="presenter-page-question" rows="3"></textarea></label>
+          <label>전체 진행 참고사항<textarea id="presenter-general-note" rows="3"></textarea></label>
+          <button type="button" class="pdf-slideshow__button" data-action="guide-quick-save" disabled>교안 저장</button>
+        </div>
+      </section>
+    </aside>` : "";
   return `
-    <header class="pdf-slideshow__header"><div><strong>${esc(material.title)}</strong><span>${esc(material.fileName)}</span></div><div id="slideshow-status">임시 주석 · 종료 시 삭제</div><button type="button" class="pdf-slideshow__button" data-action="close">종료</button></header>
+    <header class="pdf-slideshow__header"><div><strong>${esc(material.title)}</strong><span>${esc(material.fileName)}</span></div>${headerActions}<button type="button" class="pdf-slideshow__button" data-action="close">종료</button></header>
     <main class="pdf-slideshow__stage" id="slideshow-stage">
       <div class="pdf-slideshow__canvas-stack" id="slideshow-canvas-stack">
         <canvas id="slideshow-pdf-canvas"></canvas>
@@ -627,6 +994,7 @@ function slideshowShell(material) {
       </div>
       <div class="pdf-slideshow__loading" id="slideshow-loading"><div class="splash__spinner"></div><span>PDF를 불러오는 중입니다.</span></div>
     </main>
+    ${presenterPanel}
     <footer class="pdf-slideshow__toolbar">
       <div class="pdf-slideshow__tool-group"><button data-action="previous">이전</button><input id="slideshow-page-input" type="number" min="1" value="1" aria-label="페이지 이동"><span id="slideshow-page-count">/ -</span><button data-action="next">다음</button></div>
       <div class="pdf-slideshow__tool-group"><button data-tool="pointer">포인터</button><button data-tool="pen">펜</button><button data-tool="highlight">형광펜</button><button data-tool="text">텍스트</button><button data-tool="eraser">지우개</button></div>

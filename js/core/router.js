@@ -20,7 +20,7 @@ const routes = [
   { path: "templates", title: TEXT.routes.templates, allow: [ROLES.HQ_ADMIN], view: () => import("../views/templates.js").then((m) => m.render) },
   { path: "notification-settings", title: TEXT.routes.notificationSettings, allow: [ROLES.HQ_ADMIN], view: () => import("../views/notification-settings.js").then((m) => m.render) },
   { path: "slideshow", title: TEXT.routes.slideshow, allow: [ROLES.INSTRUCTOR, ROLES.HQ_ADMIN], view: () => import("../views/slideshow.js").then((m) => m.render) },
-  { path: "lesson-plan", title: TEXT.routes.lessonPlan, allow: [ROLES.INSTRUCTOR], view: () => import("../views/lesson-plan.js").then((m) => m.render) },
+  { path: "lesson-plan", title: TEXT.routes.lessonPlan, allow: [ROLES.INSTRUCTOR, ROLES.HQ_ADMIN], view: () => import("../views/lesson-plan.js").then((m) => m.render) },
   { path: "admin/companies", title: TEXT.routes.companies, allow: [ROLES.SUPER_ADMIN], view: () => import("../views/admin/companies.js").then((m) => m.render) },
   { path: "admin/branches", title: TEXT.routes.branches, allow: [ROLES.SUPER_ADMIN], view: () => import("../views/admin/branches.js").then((m) => m.render) },
   { path: "admin/accounts", title: TEXT.routes.accounts, allow: [ROLES.SUPER_ADMIN], view: () => import("../views/admin/accounts.js").then((m) => m.render) },
