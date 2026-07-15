@@ -104,6 +104,8 @@ export function showLogin(container) {
     </div>
 
     <div class="login-art">
+      <div class="login-art__aurora login-art__aurora--primary" aria-hidden="true"></div>
+      <div class="login-art__aurora login-art__aurora--secondary" aria-hidden="true"></div>
       <div class="login-art__pattern" aria-hidden="true"></div>
       <div class="login-art__orbit login-art__orbit--one" aria-hidden="true"></div>
       <div class="login-art__orbit login-art__orbit--two" aria-hidden="true"></div>
