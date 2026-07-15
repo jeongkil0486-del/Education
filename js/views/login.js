@@ -9,6 +9,8 @@
 import { authStore } from "../core/auth.js";
 import { TEXT }      from "../constants/text.js";
 
+let stopLoginGridWave = null;
+
 /** 사번 → Firebase 이메일 변환 (고정 도메인: @tas.local) */
 function empNoToEmail(empNo) {
   return `${empNo.trim().toLowerCase()}@tas.local`;
@@ -105,6 +107,7 @@ export function showLogin(container) {
 
     <div class="login-art">
       <div class="login-art__grid"></div>
+      <canvas class="login-art__grid-wave" aria-hidden="true"></canvas>
       <h2 class="login-art__headline">
         <span class="login-art__eyebrow login-art__shine" data-shine-text="Trinity Air Service">Trinity Air Service</span>
         <span class="login-art__title login-art__shine" data-shine-text="${TEXT.brand.serviceName}">${TEXT.brand.serviceName}</span>
@@ -129,6 +132,9 @@ export function showLogin(container) {
     </div>
   `;
 
+  stopLoginGridWave?.();
+  stopLoginGridWave = startLoginGridWave(container.querySelector(".login-art__grid-wave"));
+
   // Event: submit on Enter (any input field)
   document.querySelectorAll("#login-empno, #login-password").forEach(input => {
     input.addEventListener("keydown", e => {
@@ -145,6 +151,143 @@ export function showLogin(container) {
     pw.type = pw.type === "password" ? "text" : "password";
   });
 
+}
+
+function startLoginGridWave(canvas) {
+  const art = canvas?.closest(".login-art");
+  const context = canvas?.getContext?.("2d");
+  if (!art || !context) return () => {};
+
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  const mobile = window.matchMedia("(max-width: 768px)");
+  const gridSize = 40;
+  const cycleMs = 10_000;
+  const waveDelayMs = 500;
+  const waveDurationMs = 3_600;
+  const amplitude = 12;
+  const sigma = 72;
+  const frequency = 0.085;
+  const frameInterval = 1000 / 30;
+  let width = 0;
+  let height = 0;
+  let pixelRatio = 1;
+  let animationFrame = 0;
+  let lastFrameAt = 0;
+  let startedAt = performance.now();
+  let highlighted = false;
+  let destroyed = false;
+
+  const resize = () => {
+    const rect = canvas.getBoundingClientRect();
+    width = Math.max(0, Math.round(rect.width));
+    height = Math.max(0, Math.round(rect.height));
+    pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+    canvas.width = Math.max(1, Math.round(width * pixelRatio));
+    canvas.height = Math.max(1, Math.round(height * pixelRatio));
+    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  };
+
+  const wavePoint = (x, y, center, active) => {
+    if (!active) return { x, y };
+    const travel = x - y * 0.35;
+    const distance = travel - center;
+    const falloff = Math.exp(-(distance * distance) / (2 * sigma * sigma));
+    const offset = Math.sin(distance * frequency) * amplitude * falloff;
+    return { x: x + offset * 0.35, y: y + offset };
+  };
+
+  const drawGrid = (timestamp) => {
+    if (destroyed || !canvas.isConnected) {
+      cleanup();
+      return;
+    }
+    animationFrame = requestAnimationFrame(drawGrid);
+    if (timestamp - lastFrameAt < frameInterval || !width || !height) return;
+    lastFrameAt = timestamp;
+
+    const cycleTime = (timestamp - startedAt) % cycleMs;
+    const progress = (cycleTime - waveDelayMs) / waveDurationMs;
+    const active = progress >= 0 && progress <= 1;
+    const travelMin = -height * 0.35 - sigma * 2;
+    const travelMax = width + sigma * 2;
+    const center = travelMin + (travelMax - travelMin) * Math.min(1, Math.max(0, progress));
+    const shouldHighlight = active && progress >= 0.16 && progress <= 0.98;
+    if (highlighted !== shouldHighlight) {
+      highlighted = shouldHighlight;
+      art.classList.toggle("is-wave-highlight", highlighted);
+    }
+
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    context.strokeStyle = "rgba(255, 255, 255, 0.055)";
+    context.lineWidth = 1;
+
+    const segment = 10;
+    for (let x = 0; x <= width + gridSize; x += gridSize) {
+      context.beginPath();
+      for (let y = -segment; y <= height + segment; y += segment) {
+        const point = wavePoint(x, y, center, active);
+        if (y === -segment) context.moveTo(point.x, point.y);
+        else context.lineTo(point.x, point.y);
+      }
+      context.stroke();
+    }
+    for (let y = 0; y <= height + gridSize; y += gridSize) {
+      context.beginPath();
+      for (let x = -segment; x <= width + segment; x += segment) {
+        const point = wavePoint(x, y, center, active);
+        if (x === -segment) context.moveTo(point.x, point.y);
+        else context.lineTo(point.x, point.y);
+      }
+      context.stroke();
+    }
+  };
+
+  const stop = () => {
+    if (animationFrame) cancelAnimationFrame(animationFrame);
+    animationFrame = 0;
+    highlighted = false;
+    art.classList.remove("is-wave-highlight");
+  };
+
+  const start = () => {
+    if (destroyed || animationFrame || document.hidden || reducedMotion.matches || mobile.matches) return;
+    art.classList.add("has-grid-wave");
+    canvas.hidden = false;
+    resize();
+    startedAt = performance.now();
+    animationFrame = requestAnimationFrame(drawGrid);
+  };
+
+  const syncMotionPolicy = () => {
+    stop();
+    const enabled = !document.hidden && !reducedMotion.matches && !mobile.matches;
+    art.classList.toggle("has-grid-wave", enabled);
+    canvas.hidden = !enabled;
+    if (enabled) start();
+  };
+
+  const resizeObserver = new ResizeObserver(resize);
+  const onVisibilityChange = () => syncMotionPolicy();
+  resizeObserver.observe(art);
+  reducedMotion.addEventListener("change", syncMotionPolicy);
+  mobile.addEventListener("change", syncMotionPolicy);
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  syncMotionPolicy();
+
+  function cleanup() {
+    if (destroyed) return;
+    destroyed = true;
+    stop();
+    resizeObserver.disconnect();
+    reducedMotion.removeEventListener("change", syncMotionPolicy);
+    mobile.removeEventListener("change", syncMotionPolicy);
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+    art.classList.remove("has-grid-wave");
+  }
+
+  return cleanup;
 }
 
 async function attemptLogin() {
