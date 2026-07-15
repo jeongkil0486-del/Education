@@ -40,6 +40,8 @@ const PY = CY - 1;
 const LEDGER_ALL_BRANCHES_VALUE = "__all_branches__";
 const LEDGER_DEADLINE_UPCOMING_VALUE = "__deadline_upcoming__";
 const LEDGER_DEADLINE_OVERDUE_VALUE = "__deadline_overdue__";
+const LEDGER_PDF_JSPDF_URL = "https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js";
+const LEDGER_PDF_HTML2CANVAS_URL = "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js";
 
 /* ─── 모듈 상태 ─────────────────────────────────────────── */
 let viewState = { company: null, branches: [], employees: [], items: [] };
@@ -53,6 +55,7 @@ let ledgerSort    = { key: "", direction: "none" }; // none | asc | desc
 let selectedUids  = new Set();
 let currentLedgerMeta = null;   // { branchId, branchLabel, trainingVal, trainingMeta, cycleMonths }
 let deadlineLedgerCache = null; // { deadlineData, settings }
+let ledgerPdfLibrariesPromise = null;
 
 async function refreshViewState() {
   const [references, items] = await Promise.all([
@@ -217,6 +220,7 @@ export async function render(container) {
             <div class="card__subtitle" id="ledger-subtitle"></div>
           </div>
           <div style="display:flex;gap:var(--space-2);flex-wrap:wrap;align-items:center">
+            ${canManageLedger ? `<button class="btn btn--secondary btn--sm" id="btn-ledger-pdf" disabled>PDF 다운로드</button>` : ""}
             ${canManageLedger ? `<button class="btn btn--danger btn--sm" id="btn-reset-history" disabled>초기화</button>` : ""}
             <div class="input-group" style="width:200px">
               <svg class="input-group__icon" width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.25"/><path d="M11 11l3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>
@@ -256,6 +260,7 @@ export async function render(container) {
     });
     document.getElementById("history-upload-file-inline")?.addEventListener("change", parseHistoryUploadFileInline);
     document.getElementById("btn-history-upload-submit")?.addEventListener("click", submitHistoryUploadInline);
+    document.getElementById("btn-ledger-pdf")?.addEventListener("click", openLedgerPdfDownloadModal);
     document.getElementById("btn-reset-history")?.addEventListener("click", openResetConfirmModal);
     if (isHQAdmin) document.getElementById("btn-cycle-config")?.addEventListener("click", openCycleConfigModal);
   }
@@ -1156,28 +1161,8 @@ function renderLedgerTable() {
   }
   const isHQAdmin = authStore.role === ROLES.HQ_ADMIN;
   const canManageEmployee = isHQAdmin || authStore.role === ROLES.INSTRUCTOR;
-
-  let rows = ledgerRows;
-
-  // 검색 필터
-  if (ledgerSearch) {
-    rows = rows.filter((r) =>
-      String(r.name).toLowerCase().includes(ledgerSearch) ||
-      String(r.empNo).toLowerCase().includes(ledgerSearch)
-    );
-  }
-
-  // 상태 필터 (요약 카드 클릭)
-  if (ledgerFilter !== "all") {
-    rows = rows.filter((r) => {
-      if (ledgerFilter === "soon30")  return r.daysRemaining !== null && r.daysRemaining >= 0 && r.daysRemaining <= 30;
-      if (ledgerFilter === "soon7")   return r.daysRemaining !== null && r.daysRemaining >= 0 && r.daysRemaining <= 7;
-      if (ledgerFilter === "overdue") return r.daysRemaining !== null && r.daysRemaining < 0;
-      return true;
-    });
-  }
-
-  rows = sortLedgerRows(rows);
+  const rows = sortLedgerRows(getCurrentFilteredLedgerRows());
+  updateLedgerPdfButton(rows.length);
 
   if (!rows.length) {
     el.innerHTML = `<div class="empty-state" style="padding:var(--space-10)"><div class="empty-state__title" style="font-size:var(--text-sm)">조건에 맞는 직원이 없습니다.</div></div>`;
@@ -1306,15 +1291,8 @@ function renderLedgerTable() {
 }
 
 function renderDeadlineLedgerTable(el, mode) {
-  let rows = ledgerRows;
-  if (ledgerSearch) {
-    rows = rows.filter((row) => [
-      row.name,
-      row.empNo,
-      row.trainingItemName,
-      row.branchName,
-    ].some((value) => String(value ?? "").toLowerCase().includes(ledgerSearch)));
-  }
+  const rows = getCurrentFilteredLedgerRows();
+  updateLedgerPdfButton(rows.length);
 
   if (!rows.length) {
     const message = currentLedgerMeta?.calculationUnavailable
@@ -1354,6 +1332,33 @@ function renderDeadlineLedgerTable(el, mode) {
   el.querySelectorAll("tbody tr[data-uid]").forEach((row) => {
     row.addEventListener("dblclick", () => router.push("history-cards", { uid: row.dataset.uid }));
   });
+}
+
+function getCurrentFilteredLedgerRows() {
+  let rows = [...(ledgerRows ?? [])];
+  if (ledgerSearch) {
+    rows = rows.filter((row) => {
+      const values = currentLedgerMeta?.deadlineMode
+        ? [row.name, row.empNo, row.trainingItemName, row.branchName]
+        : [row.name, row.empNo];
+      return values.some((value) => String(value ?? "").toLowerCase().includes(ledgerSearch));
+    });
+  }
+
+  if (!currentLedgerMeta?.deadlineMode && ledgerFilter !== "all") {
+    rows = rows.filter((row) => {
+      if (ledgerFilter === "soon30") return row.daysRemaining !== null && row.daysRemaining >= 0 && row.daysRemaining <= 30;
+      if (ledgerFilter === "soon7") return row.daysRemaining !== null && row.daysRemaining >= 0 && row.daysRemaining <= 7;
+      if (ledgerFilter === "overdue") return row.daysRemaining !== null && row.daysRemaining < 0;
+      return true;
+    });
+  }
+  return rows;
+}
+
+function updateLedgerPdfButton(resultCount = getCurrentFilteredLedgerRows().length) {
+  const button = document.getElementById("btn-ledger-pdf");
+  if (button) button.disabled = !currentLedgerMeta || resultCount === 0;
 }
 
 function formatLedgerDisplayDate(value) {
@@ -1458,6 +1463,339 @@ function ledgerDateValue(value) {
   }
   const timestamp = Date.parse(first);
   return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+const LEDGER_PDF_SORT_OPTIONS = Object.freeze({
+  joinDate: { label: "입사일", directions: [["asc", "빠른 순"], ["desc", "늦은 순"]] },
+  name: { label: "성명", directions: [["asc", "가나다순"], ["desc", "가나다 역순"]] },
+  empNo: { label: "아이디/사번", directions: [["asc", "오름차순"], ["desc", "내림차순"]] },
+  initialDate: { label: "초기교육일", directions: [["asc", "빠른 순"], ["desc", "늦은 순"]] },
+  lastDate: { label: "최종교육일", directions: [["asc", "빠른 순"], ["desc", "늦은 순"]] },
+  nextDueDate: { label: "다음 예정일", directions: [["asc", "빠른 순"], ["desc", "늦은 순"]] },
+  daysRemaining: { label: "남은 일수", directions: [["asc", "적은 순"], ["desc", "많은 순"]] },
+  dueStatus: { label: "상태", directions: [["asc", "위험 우선"], ["desc", "정상 우선"]] },
+});
+
+function openLedgerPdfDownloadModal() {
+  const sourceRows = getCurrentFilteredLedgerRows();
+  if (!currentLedgerMeta || !sourceRows.length) {
+    toast.warning("다운로드할 직원관리대장 데이터가 없습니다.");
+    return;
+  }
+
+  const branchLabel = currentLedgerMeta.branchLabel || "-";
+  const trainingLabel = currentLedgerMeta.trainingMeta?.label || currentLedgerMeta.trainingVal || "-";
+  modal.open({
+    title: "직원관리대장 PDF 다운로드",
+    size: "sm",
+    body: `
+      <div style="display:flex;flex-direction:column;gap:var(--space-4)">
+        <p style="margin:0;color:var(--gray-600);font-size:var(--text-sm)">PDF에 적용할 정렬 기준과 순서를 선택하세요.</p>
+        <div style="padding:var(--space-3);border:1px solid var(--gray-200);border-radius:var(--radius-md);background:var(--gray-50);font-size:var(--text-sm);line-height:1.8">
+          <div><b>현재 지점:</b> ${esc(branchLabel)}</div>
+          <div><b>현재 교육:</b> ${esc(trainingLabel)}</div>
+          <div><b>현재 검색 결과:</b> ${sourceRows.length}건</div>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label" for="ledger-pdf-sort-key">정렬 기준</label>
+          <select class="form-control" id="ledger-pdf-sort-key">
+            ${Object.entries(LEDGER_PDF_SORT_OPTIONS).map(([value, option]) => `<option value="${value}">${esc(option.label)}</option>`).join("")}
+          </select>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label" for="ledger-pdf-sort-direction">정렬 방향</label>
+          <select class="form-control" id="ledger-pdf-sort-direction"></select>
+        </div>
+        <div id="ledger-pdf-error" style="display:none;color:var(--color-danger,#dc2626);font-size:var(--text-sm)"></div>
+      </div>`,
+    actions: [
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      { label: "다운로드", variant: "primary", onClick: downloadCurrentLedgerPdf },
+    ],
+  });
+
+  const sortKey = document.getElementById("ledger-pdf-sort-key");
+  sortKey?.addEventListener("change", updateLedgerPdfDirectionOptions);
+  updateLedgerPdfDirectionOptions();
+}
+
+function updateLedgerPdfDirectionOptions() {
+  const key = document.getElementById("ledger-pdf-sort-key")?.value || "joinDate";
+  const direction = document.getElementById("ledger-pdf-sort-direction");
+  if (!direction) return;
+  direction.innerHTML = (LEDGER_PDF_SORT_OPTIONS[key]?.directions ?? []).map(([value, label]) =>
+    `<option value="${value}">${esc(label)}</option>`
+  ).join("");
+}
+
+async function downloadCurrentLedgerPdf() {
+  const sortKey = document.getElementById("ledger-pdf-sort-key")?.value || "joinDate";
+  const direction = document.getElementById("ledger-pdf-sort-direction")?.value || "asc";
+  const sourceRows = getCurrentFilteredLedgerRows();
+  const error = document.getElementById("ledger-pdf-error");
+  const button = document.querySelector('[data-action="다운로드"]');
+  if (!sourceRows.length) {
+    if (error) { error.style.display = "block"; error.textContent = "다운로드할 직원관리대장 데이터가 없습니다."; }
+    return;
+  }
+
+  if (error) { error.style.display = "none"; error.textContent = ""; }
+  if (button) { button.disabled = true; button.textContent = "PDF 생성 중..."; }
+  try {
+    // 화면에서 사용하는 배열은 건드리지 않고 PDF 전용 얕은 복사본만 정렬한다.
+    const pdfRows = sortLedgerPdfRows(sourceRows.map((row) => ({ ...row })), sortKey, direction);
+    await createLedgerPdf(pdfRows, sortKey, direction);
+    modal.close();
+    toast.success("직원관리대장 PDF를 다운로드했습니다.");
+  } catch (downloadError) {
+    console.error("[employees] ledger PDF generation failed", downloadError);
+    if (error) {
+      error.style.display = "block";
+      error.textContent = "PDF 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.";
+    }
+  } finally {
+    if (button?.isConnected) { button.disabled = false; button.textContent = "다운로드"; }
+  }
+}
+
+function sortLedgerPdfRows(inputRows, key, direction) {
+  return inputRows.map((row, index) => ({ row, index })).sort((left, right) => {
+    const av = ledgerPdfSortValue(left.row, key, direction);
+    const bv = ledgerPdfSortValue(right.row, key, direction);
+    const aEmpty = av === null || av === undefined || av === "" || Number.isNaN(av);
+    const bEmpty = bv === null || bv === undefined || bv === "" || Number.isNaN(bv);
+    if (aEmpty !== bEmpty) return aEmpty ? 1 : -1;
+    if (!aEmpty) {
+      let compared = typeof av === "number" && typeof bv === "number"
+        ? av - bv
+        : String(av).localeCompare(String(bv), "ko", { numeric: true, sensitivity: "base" });
+      if (key !== "dueStatus" && direction === "desc") compared *= -1;
+      if (compared) return compared;
+    }
+    const byName = String(left.row.name ?? "").localeCompare(String(right.row.name ?? ""), "ko", { numeric: true, sensitivity: "base" });
+    return byName || left.index - right.index;
+  }).map(({ row }) => row);
+}
+
+function ledgerPdfSortValue(row, key, direction) {
+  if (["joinDate", "initialDate", "lastDate", "nextDueDate"].includes(key)) return ledgerDateValue(row[key]);
+  if (key === "daysRemaining") {
+    if (row.daysRemaining === null || row.daysRemaining === undefined || row.daysRemaining === "") return null;
+    return Number.isFinite(Number(row.daysRemaining)) ? Number(row.daysRemaining) : null;
+  }
+  if (key === "dueStatus") {
+    const days = Number(row.daysRemaining);
+    const hasDays = row.daysRemaining !== null && row.daysRemaining !== undefined && row.daysRemaining !== "" && Number.isFinite(days);
+    let category = "";
+    if (hasDays && days < 0) category = "overdue";
+    else if (hasDays && days === 0) category = "dday";
+    else if (hasDays && days <= 30) category = "soon";
+    else if (row.dueStatus === "normal" || (hasDays && days > 30)) category = "normal";
+    if (!category) return null;
+    const order = direction === "desc"
+      ? { normal: 0, soon: 1, dday: 2, overdue: 3 }
+      : { overdue: 0, dday: 1, soon: 2, normal: 3 };
+    return order[category];
+  }
+  return String(row[key] ?? "").trim() || null;
+}
+
+async function loadLedgerPdfLibraries() {
+  ledgerPdfLibrariesPromise ??= Promise.all([
+    loadLedgerPdfScript(LEDGER_PDF_JSPDF_URL, () => window.jspdf?.jsPDF),
+    loadLedgerPdfScript(LEDGER_PDF_HTML2CANVAS_URL, () => window.html2canvas),
+  ])
+    .then(() => ({ jsPDF: window.jspdf.jsPDF, html2canvas: window.html2canvas }))
+    .catch((error) => {
+      ledgerPdfLibrariesPromise = null;
+      throw error;
+    });
+  return ledgerPdfLibrariesPromise;
+}
+
+function loadLedgerPdfScript(src, resolveGlobal) {
+  if (resolveGlobal()) return Promise.resolve(resolveGlobal());
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector(`script[data-ledger-pdf-src="${src}"]`);
+    if (existing) {
+      if (existing.dataset.loaded === "true") {
+        reject(new Error(`PDF 라이브러리를 초기화하지 못했습니다: ${src}`));
+        return;
+      }
+      existing.addEventListener("load", () => {
+        const loaded = resolveGlobal();
+        loaded ? resolve(loaded) : reject(new Error(`PDF 라이브러리를 초기화하지 못했습니다: ${src}`));
+      }, { once: true });
+      existing.addEventListener("error", () => reject(new Error(`PDF 라이브러리 로드 실패: ${src}`)), { once: true });
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = src;
+    script.async = true;
+    script.crossOrigin = "anonymous";
+    script.dataset.ledgerPdfSrc = src;
+    script.addEventListener("load", () => {
+      script.dataset.loaded = "true";
+      const loaded = resolveGlobal();
+      loaded ? resolve(loaded) : reject(new Error(`PDF 라이브러리를 초기화하지 못했습니다: ${src}`));
+    }, { once: true });
+    script.addEventListener("error", () => {
+      script.remove();
+      reject(new Error(`PDF 라이브러리 로드 실패: ${src}`));
+    }, { once: true });
+    document.head.appendChild(script);
+  });
+}
+
+async function createLedgerPdf(rows, sortKey, direction) {
+  const { jsPDF, html2canvas } = await loadLedgerPdfLibraries();
+  await document.fonts?.ready;
+  const isDeadline = Boolean(currentLedgerMeta?.deadlineMode);
+  const chunks = chunkLedgerPdfRows(rows, isDeadline);
+  const sortOption = LEDGER_PDF_SORT_OPTIONS[sortKey] ?? LEDGER_PDF_SORT_OPTIONS.joinDate;
+  const directionLabel = sortOption.directions.find(([value]) => value === direction)?.[1] ?? "";
+  const sortLabel = `${sortOption.label} ${directionLabel}`.trim();
+  const branchLabel = currentLedgerMeta?.branchLabel || "-";
+  const trainingLabel = currentLedgerMeta?.trainingMeta?.label || currentLedgerMeta?.trainingVal || "-";
+  const generatedAt = new Date();
+  const generatedLabel = formatLedgerPdfDateTime(generatedAt);
+  const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4", compress: true });
+  const staging = document.createElement("div");
+  staging.setAttribute("aria-hidden", "true");
+  staging.style.cssText = "position:fixed;left:-12000px;top:0;width:1120px;z-index:2147483647;pointer-events:none";
+  document.body.appendChild(staging);
+
+  try {
+    for (let index = 0; index < chunks.length; index += 1) {
+      const page = buildLedgerPdfPage({
+        rows: chunks[index], isDeadline, branchLabel, trainingLabel, sortLabel,
+        generatedLabel, totalCount: rows.length, pageNumber: index + 1, pageCount: chunks.length,
+      });
+      staging.replaceChildren(page);
+      const canvas = await html2canvas(page, {
+        backgroundColor: "#ffffff",
+        scale: Math.max(1.25, Math.min(window.devicePixelRatio || 1, 1.5)),
+        useCORS: true,
+        logging: false,
+      });
+      if (index > 0) pdf.addPage("a4", "landscape");
+      pdf.addImage(canvas.toDataURL("image/jpeg", 0.94), "JPEG", 0, 0, 297, 210, undefined, "FAST");
+      canvas.width = 1;
+      canvas.height = 1;
+    }
+    pdf.save(buildLedgerPdfFileName(branchLabel, trainingLabel, sortLabel, generatedAt));
+  } finally {
+    staging.remove();
+  }
+}
+
+function chunkLedgerPdfRows(rows, isDeadline) {
+  const chunks = [];
+  let chunk = [];
+  let usedHeight = 0;
+  const maxHeight = 545;
+  for (const row of rows) {
+    const height = estimateLedgerPdfRowHeight(row, isDeadline);
+    if (chunk.length && usedHeight + height > maxHeight) {
+      chunks.push(chunk);
+      chunk = [];
+      usedHeight = 0;
+    }
+    chunk.push(row);
+    usedHeight += height;
+  }
+  if (chunk.length) chunks.push(chunk);
+  return chunks;
+}
+
+function estimateLedgerPdfRowHeight(row, isDeadline) {
+  if (isDeadline) return 27;
+  const yearLines = Math.max(ledgerPdfDateList(row.prevDates).length, ledgerPdfDateList(row.currDates).length, 1);
+  const noteLines = Math.max(1, Math.ceil(String(row.note || "").length / 24));
+  return 25 + (Math.max(yearLines, noteLines) - 1) * 12;
+}
+
+function buildLedgerPdfPage({ rows, isDeadline, branchLabel, trainingLabel, sortLabel, generatedLabel, totalCount, pageNumber, pageCount }) {
+  const page = document.createElement("section");
+  page.className = "ledger-pdf-page";
+  page.innerHTML = `
+    <style>
+      .ledger-pdf-page{width:1120px;height:790px;box-sizing:border-box;padding:28px 30px 22px;background:#fff;color:#172033;font-family:Arial,'Malgun Gothic','Apple SD Gothic Neo',sans-serif;overflow:hidden}
+      .ledger-pdf-page *{box-sizing:border-box}.ledger-pdf-head{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:12px;border-bottom:2px solid #1f5fae;margin-bottom:10px}
+      .ledger-pdf-brand{font-size:12px;font-weight:700;color:#1f5fae;letter-spacing:.2px}.ledger-pdf-title{font-size:24px;font-weight:800;margin-top:4px}.ledger-pdf-meta{text-align:right;font-size:11px;line-height:1.65;color:#475569}
+      .ledger-pdf-table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:10px}.ledger-pdf-table th{background:#eaf2fb;color:#163b66;font-weight:700;border:1px solid #9db4cc;padding:7px 4px;white-space:nowrap}
+      .ledger-pdf-table td{border:1px solid #c9d4df;padding:5px 4px;vertical-align:middle;text-align:center;line-height:1.25;overflow-wrap:anywhere}.ledger-pdf-table tbody tr:nth-child(even){background:#f8fafc}
+      .ledger-pdf-table td:first-child{text-align:left;font-weight:700}.ledger-pdf-note{text-align:left!important}.ledger-pdf-dates{display:flex;flex-direction:column;gap:1px;white-space:nowrap}.ledger-pdf-status{font-weight:700}
+      .ledger-pdf-date{white-space:nowrap;overflow-wrap:normal!important}
+      .ledger-pdf-footer{position:absolute;left:30px;right:30px;bottom:8px;display:flex;justify-content:space-between;color:#64748b;font-size:9px}
+    </style>
+    <div class="ledger-pdf-head">
+      <div><div class="ledger-pdf-brand">TAS Education Lab</div><div class="ledger-pdf-title">직원관리대장</div></div>
+      <div class="ledger-pdf-meta">
+        <div><b>지점:</b> ${esc(branchLabel)} &nbsp; <b>교육:</b> ${esc(trainingLabel)}</div>
+        <div><b>정렬:</b> ${esc(sortLabel)} &nbsp; <b>출력일시:</b> ${esc(generatedLabel)}</div>
+        <div>${ledgerSearch ? `<b>검색:</b> ${esc(ledgerSearch)} &nbsp; ` : ""}<b>총 ${totalCount}건</b></div>
+      </div>
+    </div>
+    ${isDeadline ? buildDeadlineLedgerPdfTable(rows) : buildStandardLedgerPdfTable(rows)}
+    <div class="ledger-pdf-footer"><span>TAS Education Lab · 직원관리대장</span><span>${pageNumber} / ${pageCount}</span></div>`;
+  page.style.position = "relative";
+  return page;
+}
+
+function buildStandardLedgerPdfTable(rows) {
+  return `<table class="ledger-pdf-table">
+    <colgroup><col style="width:8%"><col style="width:8%"><col style="width:8%"><col style="width:7%"><col style="width:8%"><col style="width:8%"><col style="width:9%"><col style="width:9%"><col style="width:9%"><col style="width:7%"><col style="width:7%"><col style="width:12%"></colgroup>
+    <thead><tr><th>성명</th><th>아이디/사번</th><th>입사일</th><th>직급/직책</th><th>초기교육</th><th>최종교육일</th><th>${PY}년</th><th>${CY}년</th><th>다음 예정일</th><th>남은 일수</th><th>상태</th><th>비고</th></tr></thead>
+    <tbody>${rows.map((row) => `<tr>
+      <td>${esc(row.name || "-")}</td><td>${esc(row.empNo || "-")}</td><td class="ledger-pdf-date">${esc(formatLedgerDisplayDate(row.joinDate))}</td><td>${esc(row.position || "-")}</td>
+      <td class="ledger-pdf-date">${esc(formatLedgerDisplayDate(row.initialDate))}</td><td class="ledger-pdf-date">${esc(formatLedgerDisplayDate(row.lastDate))}</td>
+      <td>${renderLedgerPdfDates(row.prevDates)}</td><td>${renderLedgerPdfDates(row.currDates)}</td><td class="ledger-pdf-date">${esc(formatLedgerDisplayDate(row.nextDueDate))}</td>
+      <td>${esc(ledgerPdfDaysLabel(row))}</td><td class="ledger-pdf-status">${esc(ledgerPdfStatusLabel(row))}</td><td class="ledger-pdf-note">${esc(row.note || "-")}</td>
+    </tr>`).join("")}</tbody></table>`;
+}
+
+function buildDeadlineLedgerPdfTable(rows) {
+  return `<table class="ledger-pdf-table">
+    <colgroup><col style="width:11%"><col style="width:11%"><col style="width:11%"><col style="width:20%"><col style="width:13%"><col style="width:13%"><col style="width:10%"><col style="width:11%"></colgroup>
+    <thead><tr><th>지점</th><th>성명</th><th>아이디/사번</th><th>교육항목</th><th>기준 교육일</th><th>다음 예정일</th><th>남은 일수</th><th>상태</th></tr></thead>
+    <tbody>${rows.map((row) => `<tr>
+      <td>${esc(row.branchName || "-")}</td><td>${esc(row.name || "-")}</td><td>${esc(row.empNo || "-")}</td><td>${esc(row.trainingItemName || "-")}</td>
+      <td class="ledger-pdf-date">${esc(formatLedgerDisplayDate(row.baseTrainingDate))}</td><td class="ledger-pdf-date">${esc(formatLedgerDisplayDate(row.nextDueDate))}</td><td>${esc(ledgerPdfDaysLabel(row))}</td><td class="ledger-pdf-status">${esc(ledgerPdfStatusLabel(row))}</td>
+    </tr>`).join("")}</tbody></table>`;
+}
+
+function ledgerPdfDateList(value) {
+  const values = Array.isArray(value) ? value : String(value ?? "").split(/[,，、]/);
+  return [...new Set(values.map((item) => String(item ?? "").trim()).filter((item) => item && item !== "-" && item !== "–"))];
+}
+
+function renderLedgerPdfDates(value) {
+  const dates = ledgerPdfDateList(value);
+  return dates.length ? `<div class="ledger-pdf-dates">${dates.map((date) => `<span>${esc(date)}</span>`).join("")}</div>` : "-";
+}
+
+function ledgerPdfDaysLabel(row) {
+  const value = Number(row.daysRemaining);
+  if (row.daysRemaining === null || row.daysRemaining === undefined || row.daysRemaining === "" || !Number.isFinite(value)) return "-";
+  if (value < 0) return `${Math.abs(value)}일 초과`;
+  if (value === 0) return "D-day";
+  return `${value}일`;
+}
+
+function ledgerPdfStatusLabel(row) {
+  return row.deadlineStatusLabel || row.dueStatusLabel || (Number(row.daysRemaining) < 0 ? "기한 초과" : "-");
+}
+
+function formatLedgerPdfDateTime(value) {
+  const pad = (part) => String(part).padStart(2, "0");
+  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())} ${pad(value.getHours())}:${pad(value.getMinutes())}`;
+}
+
+function buildLedgerPdfFileName(branchLabel, trainingLabel, sortLabel, generatedAt) {
+  const safe = (value) => String(value ?? "").replace(/[\\/:*?"<>|]/g, "").replace(/\s+/g, "").slice(0, 40) || "미지정";
+  const date = `${generatedAt.getFullYear()}${String(generatedAt.getMonth() + 1).padStart(2, "0")}${String(generatedAt.getDate()).padStart(2, "0")}`;
+  return `직원관리대장_${safe(branchLabel)}_${safe(trainingLabel)}_${safe(sortLabel)}_${date}.pdf`;
 }
 
 function updateResetBtn() {
