@@ -22,6 +22,7 @@
 import { authStore } from "../core/auth.js";
 import { templatesDB } from "../core/db.js";
 import { formatDate } from "../utils/date.js";
+import { createEmployeeHistoryCardPdf } from "./history-card-pdf-export.js";
 
 /* ──────────────────────────────────────────────────────────
    SheetJS 로더
@@ -89,41 +90,8 @@ export async function uploadHistoryCardTemplate(file) {
 /* ──────────────────────────────────────────────────────────
    메인 내보내기 함수
 ────────────────────────────────────────────────────────── */
-export async function exportEmployeeHistoryCard({ employee, rows, template = null }) {
-  const xlsx = await loadXlsx();
-
-  if (!xlsx) {
-    // SheetJS 없음 → JSON fallback
-    const jsonData = buildJsonFallback(employee, rows);
-    downloadBlob(
-      new Blob([JSON.stringify(jsonData, null, 2)], { type: "application/json;charset=utf-8" }),
-      buildFileName(employee, "json")
-    );
-    return { mode: "json-fallback", fileName: buildFileName(employee, "json") };
-  }
-
-  const tpl = template ?? await getLatestHistoryCardTemplate().catch(() => null);
-  let workbook;
-
-  if (tpl?.fileData) {
-    // ── 원본 양식 사용 (서식 완전 유지)
-    workbook = xlsx.read(base64ToArrayBuffer(tpl.fileData), {
-      type: "array", cellStyles: true, cellNF: true, cellDates: true, dense: false,
-    });
-    fillTemplateWorkbook(xlsx, workbook, employee, rows);
-  } else {
-    // ── 양식 없음: 간단한 기본 워크북
-    workbook = buildDefaultWorkbook(xlsx, employee, rows);
-  }
-
-  const output = xlsx.write(workbook, { type: "array", bookType: "xlsx", cellStyles: true });
-  const fileName = buildFileName(employee, "xlsx");
-  downloadBlob(
-    new Blob([output], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
-    fileName
-  );
-
-  return { mode: tpl?.fileData ? "template-workbook" : "generated-workbook", fileName };
+export async function exportEmployeeHistoryCard({ employee, rows }) {
+  return createEmployeeHistoryCardPdf({ employee, rows });
 }
 
 /* ──────────────────────────────────────────────────────────
