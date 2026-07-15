@@ -1726,6 +1726,7 @@ function buildLedgerPdfPage({ rows, isDeadline, branchLabel, trainingLabel, sort
       .ledger-pdf-brand{font-size:12px;font-weight:700;color:#1f5fae;letter-spacing:.2px}.ledger-pdf-title{font-size:24px;font-weight:800;margin-top:4px}.ledger-pdf-meta{text-align:right;font-size:11px;line-height:1.65;color:#475569}
       .ledger-pdf-table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:10px}.ledger-pdf-table th{background:#eaf2fb;color:#163b66;font-weight:700;border:1px solid #9db4cc;padding:7px 4px;white-space:nowrap;text-align:center;vertical-align:middle}
       .ledger-pdf-table td{border:1px solid #c9d4df;padding:5px 4px;vertical-align:middle;text-align:center;line-height:1.25;overflow-wrap:anywhere}.ledger-pdf-table tbody tr:nth-child(even){background:#f8fafc}
+      .ledger-pdf-table th,.ledger-pdf-table td{display:table-cell!important;text-align:center!important;vertical-align:middle!important}
       .ledger-pdf-table td:first-child{font-weight:700}.ledger-pdf-note{text-align:center!important;white-space:normal}.ledger-pdf-dates{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;white-space:nowrap}.ledger-pdf-status{font-weight:700}
       .ledger-pdf-date{white-space:nowrap;overflow-wrap:normal!important}
       .ledger-pdf-footer{position:absolute;left:30px;right:30px;bottom:8px;display:flex;justify-content:space-between;color:#64748b;font-size:9px}
