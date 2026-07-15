@@ -112,6 +112,17 @@ export async function requestMaterialDownloadUrl(materialId) {
   return downloadUrl;
 }
 
+export async function requestMaterialSlideshowSource(materialId) {
+  const user = authStore.firebaseUser;
+  const projectId = window.__firebase?.app?.options?.projectId;
+  if (!user || !projectId) throw new Error("로그인 정보를 확인할 수 없습니다. 다시 로그인해 주세요.");
+  const idToken = await user.getIdToken(true);
+  return {
+    url: `https://us-central1-${projectId}.cloudfunctions.net/streamMaterialPdf?materialId=${encodeURIComponent(materialId)}`,
+    httpHeaders: { Authorization: `Bearer ${idToken}` },
+  };
+}
+
 export function putFileToR2(uploadUrl, file, opts = {}) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -196,7 +207,12 @@ export async function listMaterials() {
       : Array.isArray(result.data?.rows)
         ? result.data.rows
         : Array.isArray(result.data) ? result.data : [];
-  console.info("[material-service] listMaterials response", { count: items.length, sample: items[0] ?? null });
+  console.info("[material-service] listMaterials response", {
+    count: items.length,
+    sample: items[0]
+      ? { id: items[0].id, title: items[0].title, fileType: items[0].fileType, hasFile: Boolean(items[0].r2Key || items[0].url) }
+      : null,
+  });
 
   return items
     .map((item) => {

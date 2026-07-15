@@ -1,6 +1,6 @@
 ﻿"use strict";
 
-const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { onCall, onRequest, HttpsError } = require("firebase-functions/v2/https");
 const logger = require("firebase-functions/logger");
 const { defineSecret } = require("firebase-functions/params");
 const admin = require("firebase-admin");
@@ -133,6 +133,30 @@ async function resolveLegacyMaterialCompany(material) {
   return companyId ? { ...material, companyId, legacyCompanyResolved: true } : material;
 }
 
+async function resolveMaterialAccess(uid, materialId) {
+  const profileSnap = await db.ref(`users/${uid}`).get();
+  if (!profileSnap.exists()) {
+    throw new HttpsError("permission-denied", "사용자 프로필을 찾을 수 없습니다.");
+  }
+  const profile = { uid, ...profileSnap.val() };
+  if (!["super_admin", "hq_admin", "instructor"].includes(profile.role)) {
+    throw new HttpsError("permission-denied", "교육자료 조회 권한이 없습니다.");
+  }
+  const materialSnap = await db.ref(`materials/${materialId}`).get();
+  if (!materialSnap.exists()) {
+    throw new HttpsError("not-found", "교육자료를 찾을 수 없습니다.");
+  }
+  const material = await resolveLegacyMaterialCompany(materialSnap.val());
+  if (profile.role !== "super_admin" && !profile.companyId) profile.companyId = await resolveActorCompanyId(profile);
+  if (profile.role !== "super_admin" && !profile.companyId) {
+    throw new HttpsError("failed-precondition", "교육자료의 회사 범위를 결정할 수 없습니다.");
+  }
+  if (!materialVisibleToActor(material, profile)) {
+    throw new HttpsError("permission-denied", "조회 권한이 없는 교육자료입니다.");
+  }
+  return { profile, material };
+}
+
 exports.createMaterialUploadUrl = onCall(R2_OPTS, async (request) => {
   ensureAuthenticated(request);
 
@@ -212,29 +236,7 @@ exports.getMaterialDownloadUrl = onCall(R2_OPTS, async (request) => {
     throw new HttpsError("invalid-argument", "materialId가 필요합니다.");
   }
 
-  const profileSnap = await db.ref(`users/${request.auth.uid}`).get();
-  if (!profileSnap.exists()) {
-    throw new HttpsError("permission-denied", "사용자 프로필을 찾을 수 없습니다.");
-  }
-
-  const profile = { uid: request.auth.uid, ...profileSnap.val() };
-  if (!["super_admin", "hq_admin", "instructor"].includes(profile.role)) {
-    throw new HttpsError("permission-denied", "교육자료 다운로드 권한이 없습니다.");
-  }
-
-  const materialSnap = await db.ref(`materials/${materialId}`).get();
-  if (!materialSnap.exists()) {
-    throw new HttpsError("not-found", "교육자료를 찾을 수 없습니다.");
-  }
-
-  const material = await resolveLegacyMaterialCompany(materialSnap.val());
-  if (profile.role !== "super_admin" && !profile.companyId) profile.companyId = await resolveActorCompanyId(profile);
-  if (profile.role !== "super_admin" && !profile.companyId) {
-    throw new HttpsError("failed-precondition", "교육자료의 회사 범위를 결정할 수 없습니다.");
-  }
-  if (!materialVisibleToActor(material, profile)) {
-    throw new HttpsError("permission-denied", "조회 권한이 없는 교육자료입니다.");
-  }
+  const { material } = await resolveMaterialAccess(request.auth.uid, materialId);
 
   if (!material.r2Key) {
     if (material.url) {
@@ -267,6 +269,101 @@ exports.getMaterialDownloadUrl = onCall(R2_OPTS, async (request) => {
       message: err?.message,
     });
     throw new HttpsError("internal", `download presigned URL 생성 실패: ${err?.message || "알 수 없는 오류"}`);
+  }
+});
+
+exports.streamMaterialPdf = onRequest(R2_OPTS, async (request, response) => {
+  const origin = normalizeText(request.get("origin"));
+  response.set("Access-Control-Allow-Origin", origin || "*");
+  response.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+  response.set("Access-Control-Allow-Headers", "Authorization, Content-Type, Range");
+  response.set("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range");
+  response.set("Vary", "Origin");
+  if (request.method === "OPTIONS") {
+    response.status(204).send("");
+    return;
+  }
+  if (!["GET", "HEAD"].includes(request.method)) {
+    response.status(405).json({ error: "method-not-allowed" });
+    return;
+  }
+
+  try {
+    const authorization = normalizeText(request.get("authorization"));
+    const match = authorization.match(/^Bearer\s+(.+)$/i);
+    if (!match) {
+      response.status(401).json({ error: "unauthenticated" });
+      return;
+    }
+    const decoded = await auth.verifyIdToken(match[1]);
+    const materialId = normalizeText(request.query?.materialId);
+    if (!materialId) {
+      response.status(400).json({ error: "materialId-required" });
+      return;
+    }
+    const { material } = await resolveMaterialAccess(decoded.uid, materialId);
+    const fileType = normalizeText(material.fileType).toLowerCase();
+    if ((fileType && fileType !== "application/pdf") || !hasPdfExtension(material.fileName || "file.pdf")) {
+      response.status(415).json({ error: "pdf-only" });
+      return;
+    }
+    if (!material.r2Key) {
+      response.status(412).json({ error: "r2-file-required" });
+      return;
+    }
+    const { bucket } = getR2Config();
+    if (!bucket) throw new Error("R2_BUCKET is missing");
+    const range = normalizeText(request.get("range"));
+    if (range && !/^bytes=\d+-\d*$/.test(range)) {
+      response.status(416).json({ error: "invalid-range" });
+      return;
+    }
+    const object = await buildR2Client().send(new GetObjectCommand({
+      Bucket: bucket,
+      Key: material.r2Key,
+      ...(range ? { Range: range } : {}),
+    }));
+    response.status(object.ContentRange ? 206 : 200);
+    response.set("Content-Type", "application/pdf");
+    response.set("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(material.fileName || "material.pdf")}`);
+    response.set("Accept-Ranges", "bytes");
+    response.set("Cache-Control", "private, no-store, max-age=0");
+    if (object.ContentLength != null) response.set("Content-Length", String(object.ContentLength));
+    if (object.ContentRange) response.set("Content-Range", object.ContentRange);
+    if (request.method === "HEAD") {
+      object.Body?.destroy?.();
+      response.end();
+      return;
+    }
+    await new Promise((resolve, reject) => {
+      const body = object.Body;
+      if (!body?.pipe) {
+        reject(new Error("R2 response body is not streamable"));
+        return;
+      }
+      body.once("error", reject);
+      response.once("finish", resolve);
+      response.once("close", resolve);
+      body.pipe(response);
+    });
+  } catch (error) {
+    logger.error("[materials] PDF stream failed", {
+      code: error?.code,
+      message: error?.message,
+      materialId: normalizeText(request.query?.materialId),
+    });
+    if (response.headersSent) {
+      response.end();
+      return;
+    }
+    const statusByCode = {
+      "permission-denied": 403,
+      unauthenticated: 401,
+      "not-found": 404,
+      "invalid-argument": 400,
+      "failed-precondition": 412,
+    };
+    response.status(statusByCode[error?.code] || 500).json({ error: error?.code || "internal" });
   }
 });
 

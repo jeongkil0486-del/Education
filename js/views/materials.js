@@ -17,6 +17,7 @@
 import { modal }            from "../utils/modal.js";
 import { toast }            from "../utils/toast.js";
 import { authStore, ROLES } from "../core/auth.js";
+import { router }           from "../core/router.js";
 import {
   MATERIAL_TYPES,
   MATERIAL_TYPE_LABELS,
@@ -37,6 +38,7 @@ let state = { materials: [], loadError: null };
 const canUpload = () => authStore.role === ROLES.HQ_ADMIN;
 const canDelete = () =>
   authStore.role === ROLES.HQ_ADMIN || authStore.role === ROLES.SUPER_ADMIN;
+const canSlideshow = () => [ROLES.HQ_ADMIN, ROLES.INSTRUCTOR].includes(authStore.role);
 
 /* ══════════════════════════════════════════════════════════
    진입점
@@ -188,7 +190,7 @@ function renderTable(container) {
           <th>크기</th>
           <th>업로드자</th>
           <th>등록일</th>
-          <th style="width:140px"></th>
+          <th style="width:250px"></th>
         </tr>
       </thead>
       <tbody>
@@ -215,6 +217,9 @@ function renderTable(container) {
             <td style="white-space:nowrap">${fmtDate(m.createdAt)}</td>
             <td class="cell--actions">
               <div style="display:flex;gap:4px;justify-content:flex-end;align-items:center">
+                ${canSlideshow() && m.r2Key
+                  ? `<button class="btn btn--primary btn--sm btn-mat-slideshow" data-id="${esc(m.id)}">슬라이드쇼</button>`
+                  : ""}
                 ${m.url || m.r2Key
                   ? `<button class="btn btn--ghost btn--sm btn-mat-download" data-id="${esc(m.id)}" title="다운로드">
                        <svg width="14" height="14" viewBox="0 0 14 14" fill="none"
@@ -249,6 +254,9 @@ function renderTable(container) {
     btn.addEventListener("click", () =>
       confirmDelete(btn.dataset.id, btn.dataset.title, container)
     );
+  });
+  wrap.querySelectorAll(".btn-mat-slideshow").forEach((btn) => {
+    btn.addEventListener("click", () => router.push("slideshow", { materialId: btn.dataset.id }));
   });
   wrap.querySelectorAll(".btn-mat-download").forEach((btn) => {
     btn.addEventListener("click", async () => {
