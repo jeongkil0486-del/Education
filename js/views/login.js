@@ -37,10 +37,10 @@ export function showLogin(container) {
             </svg>
             <input
               class="form-control"
-              type="password"
+              type="text"
               id="login-empno"
               name="username"
-              placeholder="아이디"
+              placeholder="••••••••"
               autocomplete="username"
               inputmode="text"
               autocapitalize="none"
