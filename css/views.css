@@ -80,7 +80,7 @@
 .login-options {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
 }
 
 .login-panel__footer {
@@ -119,7 +119,18 @@
   z-index: 1;
 }
 
-.login-art__headline span { color: var(--brand-300); }
+.login-art__eyebrow,
+.login-art__title {
+  display: block;
+}
+
+.login-art__eyebrow {
+  color: var(--white);
+}
+
+.login-art__title {
+  color: var(--brand-300);
+}
 
 .login-art__sub {
   font-size: var(--text-base);
@@ -141,7 +152,7 @@
 
 .login-art__stat { text-align: center; }
 .login-art__stat-value {
-  font-size: var(--text-3xl);
+  font-size: var(--text-2xl);
   font-weight: var(--weight-bold);
   color: var(--white);
   font-variant-numeric: tabular-nums;
@@ -160,6 +171,59 @@
     linear-gradient(rgba(255,255,255,.03) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255,255,255,.03) 1px, transparent 1px);
   background-size: 40px 40px;
+  background-position: 0 0;
+  animation: login-grid-drift 36s linear infinite;
+  will-change: background-position;
+}
+
+@keyframes login-grid-drift {
+  to { background-position: 40px 40px; }
+}
+
+.login-art__shine {
+  position: relative;
+  text-shadow:
+    0 1px 0 rgb(255 255 255 / 7%),
+    0 4px 12px rgb(0 0 0 / 18%);
+}
+
+.login-art__shine::after {
+  content: attr(data-shine-text);
+  position: absolute;
+  inset: 0;
+  color: transparent;
+  background: linear-gradient(
+    125deg,
+    transparent 30%,
+    rgb(255 255 255 / 8%) 42%,
+    rgb(255 255 255 / 42%) 49%,
+    rgb(255 255 255 / 10%) 56%,
+    transparent 68%
+  );
+  background-position: 130% 0;
+  background-size: 260% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  pointer-events: none;
+  animation: login-text-shine 1.55s ease-out .25s 1 both;
+}
+
+.login-art__title::after { animation-delay: .4s; }
+.login-art__sub::after { animation-delay: .55s; }
+.login-art__stat:nth-child(1) .login-art__shine::after { animation-delay: .7s; }
+.login-art__stat:nth-child(2) .login-art__shine::after { animation-delay: .84s; }
+.login-art__stat:nth-child(3) .login-art__shine::after { animation-delay: .98s; }
+
+@keyframes login-text-shine {
+  from { background-position: 130% 0; }
+  to { background-position: -130% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-art__grid,
+  .login-art__shine::after {
+    animation: none !important;
+  }
 }
 
 @media (max-width: 768px) {

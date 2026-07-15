@@ -8,7 +8,6 @@
 
 import { authStore } from "../core/auth.js";
 import { TEXT }      from "../constants/text.js";
-import { toast }     from "../utils/toast.js";
 
 /** 사번 → Firebase 이메일 변환 (고정 도메인: @tas.local) */
 function empNoToEmail(empNo) {
@@ -40,7 +39,7 @@ export function showLogin(container) {
               class="form-control"
               type="text"
               id="login-empno"
-              placeholder="사번 입력 (예: TASEDU)"
+              placeholder="사번"
               autocomplete="username"
               autocapitalize="none"
               spellcheck="false"
@@ -83,7 +82,6 @@ export function showLogin(container) {
             <input type="checkbox" id="remember-me" />
             <span class="check-group__label">로그인 상태 유지</span>
           </label>
-          <button class="link-btn" type="button" id="btn-forgot-pw">비밀번호 찾기</button>
         </div>
 
         <div id="login-error" class="form-error hidden" style="margin-top:var(--space-1)">
@@ -108,25 +106,24 @@ export function showLogin(container) {
     <div class="login-art">
       <div class="login-art__grid"></div>
       <h2 class="login-art__headline">
-        효율적인 교육 관리,<br />
-        <span>${TEXT.brand.serviceName}</span>
+        <span class="login-art__eyebrow login-art__shine" data-shine-text="Trinity Air Service">Trinity Air Service</span>
+        <span class="login-art__title login-art__shine" data-shine-text="${TEXT.brand.serviceName}">${TEXT.brand.serviceName}</span>
       </h2>
-      <p class="login-art__sub">
-        교육자료 업로드부터 수료 관리, 전자서명, 통계까지<br />
-        하나의 플랫폼에서 관리하세요.
+      <p class="login-art__sub login-art__shine" data-shine-text="교육 운영 및 이력 관리 통합 플랫폼">
+        교육 운영 및 이력 관리 통합 플랫폼
       </p>
       <div class="login-art__stats">
         <div class="login-art__stat">
-          <div class="login-art__stat-value">500+</div>
-          <div class="login-art__stat-label">사용자</div>
+          <div class="login-art__stat-value login-art__shine" data-shine-text="통합">통합</div>
+          <div class="login-art__stat-label login-art__shine" data-shine-text="교육 운영">교육 운영</div>
         </div>
         <div class="login-art__stat">
-          <div class="login-art__stat-value">3</div>
-          <div class="login-art__stat-label">권한 레벨</div>
+          <div class="login-art__stat-value login-art__shine" data-shine-text="체계">체계</div>
+          <div class="login-art__stat-label login-art__shine" data-shine-text="이력 관리">이력 관리</div>
         </div>
         <div class="login-art__stat">
-          <div class="login-art__stat-value">PWA</div>
-          <div class="login-art__stat-label">모바일 지원</div>
+          <div class="login-art__stat-value login-art__shine" data-shine-text="보안">보안</div>
+          <div class="login-art__stat-label login-art__shine" data-shine-text="권한 관리">권한 관리</div>
         </div>
       </div>
     </div>
@@ -148,10 +145,6 @@ export function showLogin(container) {
     pw.type = pw.type === "password" ? "text" : "password";
   });
 
-  // Forgot password placeholder
-  document.getElementById("btn-forgot-pw")?.addEventListener("click", () => {
-    toast.info("비밀번호 초기화는 관리자에게 문의하세요.");
-  });
 }
 
 async function attemptLogin() {

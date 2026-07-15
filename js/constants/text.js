@@ -68,7 +68,7 @@ export const TEXT = {
   brand: {
     serviceName: "TAS Education Lab",
     platformName: "TAS Education Lab v1.0",
-    loginTagline: "사내 교육 운영과 이력 관리를 위한 통합 플랫폼",
+    loginTagline: "Trinity Air Service Education Lab",
     loginFooter: "TAS Education Lab",
     shortName: "TAS Lab",
   },
