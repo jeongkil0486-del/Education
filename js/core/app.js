@@ -5,7 +5,7 @@
 
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import { router }   from "./router.js";
-import { authStore } from "./auth.js";
+import { authStore, isPortalRole } from "./auth.js";
 import { initNav }   from "../modules/nav.js";
 import { initNotifications } from "../modules/notifications.js";
 import { initTopbar } from "../modules/topbar.js";
@@ -25,6 +25,12 @@ export function boot() {
 
     try {
       await authStore.loadUser(firebaseUser.uid);
+      if (!isPortalRole(authStore.role)) {
+        await authStore.signOut();
+        toast.error("직원 계정은 로그인 대상이 아닙니다.");
+        showLoginScreen();
+        return;
+      }
       showApp();
       initTopbar();
       initNav();

@@ -1,12 +1,11 @@
-import { authStore, ROLES } from "./auth.js";
+import { authStore, PORTAL_ROLES, ROLES } from "./auth.js";
 import { TEXT } from "../constants/text.js";
 import { setBreadcrumb, setPageTitle } from "../modules/topbar.js";
 import { toast } from "../utils/toast.js";
 
 const routes = [
-  { path: "dashboard", title: TEXT.routes.dashboard, allow: null, view: () => import("../views/dashboard.js").then((m) => m.render) },
-  { path: "my-trainings", title: TEXT.routes.myTrainings, allow: [ROLES.EMPLOYEE, ROLES.INSTRUCTOR], view: () => import("../views/my-trainings.js").then((m) => m.render) },
-  { path: "my-history", title: TEXT.routes.myHistory, allow: [ROLES.EMPLOYEE], view: () => import("../views/my-history.js").then((m) => m.render) },
+  { path: "dashboard", title: TEXT.routes.dashboard, allow: PORTAL_ROLES, view: () => import("../views/dashboard.js").then((m) => m.render) },
+  { path: "my-trainings", title: TEXT.routes.myTrainings, allow: [ROLES.INSTRUCTOR], view: () => import("../views/my-trainings.js").then((m) => m.render) },
   { path: "trainings", title: TEXT.routes.trainings, allow: [ROLES.HQ_ADMIN, ROLES.SUPER_ADMIN], view: () => import("../views/trainings.js").then((m) => m.render) },
   { path: "instructor-trainings", title: TEXT.routes.instructorTrainings, allow: [ROLES.INSTRUCTOR], view: () => import("../views/instructor-trainings.js").then((m) => m.render) },
   { path: "training-detail", title: TEXT.routes.trainingDetail, allow: [ROLES.HQ_ADMIN, ROLES.SUPER_ADMIN, ROLES.INSTRUCTOR], view: () => import("../views/training-detail.js").then((m) => m.render) },
@@ -16,7 +15,7 @@ const routes = [
   { path: "employees", title: TEXT.routes.employees, allow: [ROLES.HQ_ADMIN, ROLES.SUPER_ADMIN, ROLES.INSTRUCTOR], view: () => import("../views/employees.js").then((m) => m.render) },
   { path: "employee-detail", title: TEXT.routes.employeeDetail, allow: [ROLES.HQ_ADMIN], view: () => import("../views/employee-detail.js").then((m) => m.render) },
   { path: "statistics", title: TEXT.routes.statistics, allow: [ROLES.HQ_ADMIN], view: () => import("../views/statistics.js").then((m) => m.render) },
-  { path: "announcements", title: TEXT.routes.announcements, allow: null, view: () => import("../views/announcements.js").then((m) => m.render) },
+  { path: "announcements", title: TEXT.routes.announcements, allow: PORTAL_ROLES, view: () => import("../views/announcements.js").then((m) => m.render) },
   { path: "audit-logs", title: TEXT.routes.auditLogs, allow: [ROLES.HQ_ADMIN], view: () => import("../views/audit-logs.js").then((m) => m.render) },
   { path: "templates", title: TEXT.routes.templates, allow: [ROLES.HQ_ADMIN], view: () => import("../views/templates.js").then((m) => m.render) },
   { path: "notification-settings", title: TEXT.routes.notificationSettings, allow: [ROLES.HQ_ADMIN], view: () => import("../views/notification-settings.js").then((m) => m.render) },

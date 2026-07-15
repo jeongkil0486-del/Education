@@ -121,7 +121,7 @@ export function showLogin(container) {
           <div class="login-art__stat-label">사용자</div>
         </div>
         <div class="login-art__stat">
-          <div class="login-art__stat-value">4</div>
+          <div class="login-art__stat-value">3</div>
           <div class="login-art__stat-label">권한 레벨</div>
         </div>
         <div class="login-art__stat">
@@ -202,6 +202,7 @@ function showError(msg, errorEl, errorTxt) {
 
 function friendlyError(code, empNo = "") {
   const map = {
+    "auth/employee-login-disabled": "직원 계정은 로그인 대상이 아닙니다.",
     "auth/user-not-found":      `등록되지 않은 사번입니다. (${empNo})`,
     "auth/wrong-password":      "비밀번호가 올바르지 않습니다.",
     "auth/invalid-email":       "사번 형식이 올바르지 않습니다.",

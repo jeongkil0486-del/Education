@@ -231,7 +231,6 @@ function renderTable(list) {
           <th>${t.table.name}</th>
           <th>${t.table.branch}</th>
           <th>${t.table.position}</th>
-          <th>${t.table.login}</th>
           <th>${t.table.status}</th>
           <th>${t.table.createdAt}</th>
           <th style="width:96px"></th>
@@ -261,7 +260,6 @@ function renderTable(list) {
               <td style="font-weight:var(--weight-medium);color:var(--gray-800)">${esc(item.name)}</td>
               <td>${esc(item.branchName ?? item.branchCode ?? "-")}</td>
               <td>${esc(item.position ?? "-")}</td>
-              <td class="cell--mono">${esc(item.email ?? `${item.empNo}@tas.local`)}</td>
               <td>
                 <span class="chip ${item.active === false || item.disabled ? "chip--danger" : "chip--success"}">
                   ${item.active === false || item.disabled ? t.status.inactive : t.status.active}
@@ -588,12 +586,6 @@ function openUploadResultModal(result) {
           ${inlineStat(t.uploadModal.created, result.createdCount)}
           ${inlineStat(t.uploadModal.skipped, result.skippedCount)}
           ${inlineStat(t.uploadModal.failed, result.failedCount)}
-        </div>
-        <div class="card">
-          <div class="card__body" style="font-size:var(--text-sm);line-height:1.7">
-            ${t.uploadModal.loginFormat}: <code style="font-family:var(--font-mono)">empNo@tas.local</code><br/>
-            ${t.uploadModal.initialPassword}: <code style="font-family:var(--font-mono)">empNo</code>
-          </div>
         </div>
         ${renderResultList(t.uploadModal.createdEmployees, result.created, "chip--success")}
         ${renderResultList(t.uploadModal.skippedEmployees, result.skipped, "chip--warning")}

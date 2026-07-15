@@ -1933,7 +1933,9 @@ function normalizeAnnouncementDate(value, endOfDay = false) {
 exports.listAnnouncements = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
   const actor = await getUserProfile(request.auth.uid);
-  if (!actor) throw new HttpsError("permission-denied", "사용자 프로필을 찾을 수 없습니다.");
+  if (!actor || !["super_admin", "hq_admin", "instructor"].includes(actor.role)) {
+    throw new HttpsError("permission-denied", "공지사항을 조회할 권한이 없습니다.");
+  }
   const companyId = await resolveActorCompanyId(actor);
   if (actor.role !== "super_admin" && !companyId) {
     throw new HttpsError("failed-precondition", "공지사항의 회사 범위를 결정할 수 없습니다.");

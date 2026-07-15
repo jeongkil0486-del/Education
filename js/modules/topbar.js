@@ -1,6 +1,5 @@
 import { authStore } from "../core/auth.js";
 import { TEXT } from "../constants/text.js";
-import { router } from "../core/router.js";
 import { toast } from "../utils/toast.js";
 
 export function initTopbar() {
@@ -15,14 +14,11 @@ export function initTopbar() {
     "profile-meta",
     `${profile.branchName ?? TEXT.roles.headquarters}${TEXT.topbar.profileMetaSeparator}${roleLabel(profile.role)}`
   );
-  setElement("btn-my-profile", TEXT.common.myProfile);
   setElement("btn-change-password", TEXT.common.changePassword);
   setElement("btn-logout2", TEXT.common.logout);
 
   const sidebarLogoutLabel = document.querySelector("#btn-logout span");
   if (sidebarLogoutLabel) sidebarLogoutLabel.textContent = TEXT.common.logout;
-
-  applyProfileMenuPolicy();
 
   document.getElementById("btn-profile-menu")?.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -32,11 +28,6 @@ export function initTopbar() {
 
   ["btn-logout", "btn-logout2"].forEach((id) => {
     document.getElementById(id)?.addEventListener("click", handleLogout);
-  });
-
-  document.getElementById("btn-my-profile")?.addEventListener("click", () => {
-    closeDropdown("profile-menu");
-    router.push("my-profile");
   });
 
   document.getElementById("btn-change-password")?.addEventListener("click", () => {
@@ -73,14 +64,6 @@ export function setBreadcrumbItems(items) {
     ${index > 0 ? '<span class="breadcrumb__sep">/</span>' : ""}
     <span class="breadcrumb__item">${item}</span>
   `).join("");
-}
-
-function applyProfileMenuPolicy() {
-  if (!authStore.isSuperAdmin()) return;
-
-  document.getElementById("btn-my-profile")?.remove();
-  document.getElementById("btn-change-password")?.remove();
-  document.querySelectorAll("#profile-menu .dropdown__divider").forEach((divider) => divider.remove());
 }
 
 function setElement(id, text) {

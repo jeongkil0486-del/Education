@@ -19,6 +19,23 @@ export const ROLES = Object.freeze({
   EMPLOYEE:     "employee",      // ④ 직원
 });
 
+export const PORTAL_ROLES = Object.freeze([
+  ROLES.SUPER_ADMIN,
+  ROLES.HQ_ADMIN,
+  ROLES.INSTRUCTOR,
+]);
+
+export function isPortalRole(role) {
+  return PORTAL_ROLES.includes(role);
+}
+
+function employeeLoginDisabledError() {
+  return Object.assign(
+    new Error("직원 계정은 로그인 대상이 아닙니다."),
+    { code: "auth/employee-login-disabled" }
+  );
+}
+
 /* ── Auth Store ──────────────────────────────────────────── */
 class AuthStore {
   #user   = null;   // raw Firebase user
@@ -80,15 +97,23 @@ class AuthStore {
   async signInWithEmpNo(empNo, password) {
     const email = this.#authEmailFromEmpNo(empNo);
     const cred = await signInWithEmailAndPassword(auth, email, password);
-    await this.loadUser(cred.user.uid);
-    return this.#profile;
+    const profile = await this.loadUser(cred.user.uid);
+    if (!isPortalRole(profile.role)) {
+      await this.signOut();
+      throw employeeLoginDisabledError();
+    }
+    return profile;
   }
 
   async signIn(email, password) {
     // 기존 코드 호환용. 신규 로그인 화면에서는 signInWithEmpNo를 사용한다.
     const cred = await signInWithEmailAndPassword(auth, email, password);
-    await this.loadUser(cred.user.uid);
-    return this.#profile;
+    const profile = await this.loadUser(cred.user.uid);
+    if (!isPortalRole(profile.role)) {
+      await this.signOut();
+      throw employeeLoginDisabledError();
+    }
+    return profile;
   }
 
   async signOut() {

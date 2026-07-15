@@ -73,22 +73,6 @@ const NAV_CONFIG = {
       ],
     },
   ],
-  [ROLES.EMPLOYEE]: [
-    {
-      group: TEXT.nav.groups.learning,
-      items: [
-        { path: "dashboard", label: TEXT.routes.dashboard, icon: iconGrid() },
-        { path: "my-trainings", label: TEXT.routes.myTrainings, icon: iconBook() },
-        { path: "my-history", label: TEXT.routes.myHistory, icon: iconHistory() },
-      ],
-    },
-    {
-      group: TEXT.nav.groups.info,
-      items: [
-        { path: "announcements", label: TEXT.routes.announcements, icon: iconBell() },
-      ],
-    },
-  ],
 };
 
 export function initNav() {
