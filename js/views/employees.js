@@ -19,6 +19,7 @@ import {
   buildSelectableTrainingItems,
   normalizeTrainingType,
 } from "../services/training-service.js";
+import { normalizeNotificationSettings } from "../services/notification-settings-service.js";
 import {
   bulkImportManualTrainingHistories,
   updateEmployeeManagementProfile,
@@ -28,7 +29,7 @@ import {
   getEducationCycleConfig,
   listInstructorBranchHistories,
 } from "../core/admin-api.js";
-import { manualTrainingHistoriesDB, sessionCompletionsDB, educationCycleConfigsDB } from "../core/db.js";
+import { manualTrainingHistoriesDB, sessionCompletionsDB, educationCycleConfigsDB, settingsDB } from "../core/db.js";
 import { modal } from "../utils/modal.js";
 import { toast } from "../utils/toast.js";
 import { authStore, ROLES } from "../core/auth.js";
@@ -36,6 +37,9 @@ import { authStore, ROLES } from "../core/auth.js";
 /* ─── 상수 ─────────────────────────────────────────────── */
 const CY = new Date().getFullYear();
 const PY = CY - 1;
+const LEDGER_ALL_BRANCHES_VALUE = "__all_branches__";
+const LEDGER_DEADLINE_UPCOMING_VALUE = "__deadline_upcoming__";
+const LEDGER_DEADLINE_OVERDUE_VALUE = "__deadline_overdue__";
 
 /* ─── 모듈 상태 ─────────────────────────────────────────── */
 let viewState = { company: null, branches: [], employees: [], items: [] };
@@ -48,6 +52,7 @@ let ledgerSearch  = "";
 let ledgerSort    = { key: "", direction: "none" }; // none | asc | desc
 let selectedUids  = new Set();
 let currentLedgerMeta = null;   // { branchId, branchLabel, trainingVal, trainingMeta, cycleMonths }
+let deadlineLedgerCache = null; // { deadlineData, settings }
 
 async function refreshViewState() {
   const [references, items] = await Promise.all([
@@ -63,6 +68,7 @@ async function refreshViewState() {
       String(a.name ?? "").localeCompare(String(b.name ?? ""), "ko")),
     items,
   };
+  deadlineLedgerCache = null;
 }
 
 function getSelectedBranch() {
@@ -173,6 +179,7 @@ export async function render(container) {
             <label class="form-label form-label--required">지점 선택</label>
             <select class="form-control" id="ledger-branch">
               <option value="">-- 지점을 선택하세요 --</option>
+              ${isHQAdmin ? `<option value="${LEDGER_ALL_BRANCHES_VALUE}">전체 지점</option>` : ""}
               ${viewState.branches.map((b) =>
                 `<option value="${b.id}">${esc(b.name ?? b.code ?? b.id)}</option>`
               ).join("")}
@@ -185,6 +192,8 @@ export async function render(container) {
               ${trainingOptions.map((o) =>
                 `<option value="${esc(o.value)}">${esc(o.label)}</option>`
               ).join("")}
+              <option value="${LEDGER_DEADLINE_UPCOMING_VALUE}">기한 임박</option>
+              <option value="${LEDGER_DEADLINE_OVERDUE_VALUE}">기한 초과</option>
             </select>
           </div>
           <button class="btn btn--primary" id="btn-ledger-search" disabled>
@@ -294,6 +303,12 @@ function buildTrainingOptions(items) {
 
 function parseTrainingValue(val) {
   if (!val) return null;
+  if (val === LEDGER_DEADLINE_UPCOMING_VALUE) {
+    return { value: val, label: "기한 임박", deadlineMode: "upcoming" };
+  }
+  if (val === LEDGER_DEADLINE_OVERDUE_VALUE) {
+    return { value: val, label: "기한 초과", deadlineMode: "overdue" };
+  }
   const allOpts = buildTrainingOptions(viewState.items);
   return allOpts.find((o) => o.value === val) ?? null;
 }
@@ -307,14 +322,56 @@ async function runLedgerQuery() {
   if (!branchId || !trainingVal) { toast.warning("지점과 교육을 모두 선택하세요."); return; }
 
   const btn = document.getElementById("btn-ledger-search");
-  if (btn) { btn.disabled = true; btn.textContent = "조회 중..."; }
+  const deadlineQuery = trainingVal === LEDGER_DEADLINE_UPCOMING_VALUE || trainingVal === LEDGER_DEADLINE_OVERDUE_VALUE;
+  if (btn) { btn.disabled = true; btn.textContent = deadlineQuery ? "교육기한 대상 확인 중..." : "조회 중..."; }
 
   try {
     const trainingMeta = parseTrainingValue(trainingVal);
     const branch       = viewState.branches.find((b) => b.id === branchId);
-    const branchLabel  = branch?.name ?? branch?.code ?? branchId;
+    const branchLabel  = branchId === LEDGER_ALL_BRANCHES_VALUE
+      ? "전체 지점"
+      : branch?.name ?? branch?.code ?? branchId;
     const trainingLabel = trainingMeta?.label ?? trainingVal;
     const effectiveCompanyId = getEffectiveCompanyId(trainingMeta, branch);
+
+    if (trainingMeta?.deadlineMode) {
+      const deadlineResult = await buildDeadlineLedgerRows(branchId, trainingMeta.deadlineMode);
+      ledgerRows = deadlineResult.rows;
+      currentLedgerMeta = {
+        branchId,
+        branchLabel,
+        trainingVal,
+        trainingMeta,
+        deadlineMode: trainingMeta.deadlineMode,
+        upcomingDays: deadlineResult.upcomingDays,
+        calculationUnavailable: deadlineResult.calculationUnavailable,
+        companyId: effectiveCompanyId,
+      };
+
+      document.getElementById("ledger-title").textContent = `${branchLabel} · ${trainingLabel}`;
+      document.getElementById("ledger-subtitle").textContent = trainingMeta.deadlineMode === "upcoming"
+        ? `모든 표준 교육 · D-${deadlineResult.upcomingDays} 이내`
+        : "모든 표준 교육 · 기한 초과";
+
+      selectedUids.clear();
+      document.getElementById("ledger-empty-guide").style.display = "none";
+      document.getElementById("ledger-result").style.display = "block";
+      const summary = document.getElementById("ledger-summary");
+      if (summary) summary.style.display = "none";
+      const resetButton = document.getElementById("btn-reset-history");
+      if (resetButton) resetButton.style.display = "none";
+      ledgerFilter = "all";
+      ledgerSearch = "";
+      ledgerSort = { key: "", direction: "none" };
+      const search = document.getElementById("ledger-search");
+      if (search) {
+        search.value = "";
+        search.placeholder = "이름·사번·교육항목 검색";
+      }
+      renderLedgerTable();
+      updateResetBtn();
+      return;
+    }
 
     // 재교육 주기 설정 조회
     let cycleMonths = 0;
@@ -334,7 +391,9 @@ async function runLedgerQuery() {
 
     currentLedgerMeta = { branchId, branchLabel, trainingVal, trainingMeta, cycleMonths, defaultDuration, companyId: effectiveCompanyId };
 
-    const branchEmployees = viewState.employees.filter((e) => matchesBranch(e, branchId));
+    const branchEmployees = branchId === LEDGER_ALL_BRANCHES_VALUE
+      ? viewState.employees
+      : viewState.employees.filter((e) => matchesBranch(e, branchId));
     const scopedHistories = authStore.role === ROLES.INSTRUCTOR
       ? await listInstructorBranchHistories()
       : null;
@@ -375,11 +434,18 @@ async function runLedgerQuery() {
     selectedUids.clear();
     document.getElementById("ledger-empty-guide").style.display = "none";
     document.getElementById("ledger-result").style.display = "block";
+    const summary = document.getElementById("ledger-summary");
+    if (summary) summary.style.display = "grid";
+    const resetButton = document.getElementById("btn-reset-history");
+    if (resetButton) resetButton.style.display = "";
     ledgerFilter = "all";
     ledgerSearch = "";
     ledgerSort = { key: "", direction: "none" };
     const srch = document.getElementById("ledger-search");
-    if (srch) srch.value = "";
+    if (srch) {
+      srch.value = "";
+      srch.placeholder = "이름·사번 검색";
+    }
 
     renderLedgerSummary();
     renderLedgerTable();
@@ -486,6 +552,82 @@ export async function loadEmployeeDeadlineDashboardRows() {
     branches: references.branches ?? [],
     employees: references.employees ?? [],
     rows,
+  };
+}
+
+async function buildDeadlineLedgerRows(branchId, mode) {
+  if (!deadlineLedgerCache) {
+    const [deadlineData, rawSettings] = await Promise.all([
+      loadEmployeeDeadlineDashboardRows(),
+      settingsDB.getNotifications().catch(() => ({})),
+    ]);
+    deadlineLedgerCache = {
+      deadlineData,
+      settings: normalizeNotificationSettings(rawSettings ?? {}),
+    };
+  }
+  const { deadlineData, settings } = deadlineLedgerCache;
+  const upcomingBuckets = settings.deadlineBuckets.filter((bucket) =>
+    bucket?.enabled !== false && bucket?.type === "withinDays" && Number(bucket?.days) > 0
+  );
+  const ascendingUpcomingBuckets = [...upcomingBuckets].sort((a, b) => Number(a.days) - Number(b.days));
+  const upcomingDays = Math.max(0, ...upcomingBuckets.map((bucket) => Number(bucket.days)));
+  const branchNames = new Map((deadlineData.branches ?? []).map((branch) => [
+    String(branch.id ?? branch.branchId ?? ""),
+    branch.name ?? branch.code ?? branch.id ?? "-",
+  ]));
+  const allBranches = branchId === LEDGER_ALL_BRANCHES_VALUE;
+  const scopedRows = (deadlineData.rows ?? []).filter((row) => {
+    const rowBranchId = String(row.branchId ?? row._emp?.branchId ?? "");
+    return allBranches || rowBranchId === String(branchId);
+  });
+  const calculableRows = scopedRows.filter((row) =>
+    row.daysRemaining !== null
+    && row.daysRemaining !== undefined
+    && row.daysRemaining !== ""
+    && Number.isFinite(Number(row.daysRemaining))
+  );
+  const matchingRows = calculableRows.filter((row) => {
+    if (mode === "overdue") return Number(row.daysRemaining) < 0;
+    if (settings.showExpiringSoon === false || upcomingDays <= 0) return false;
+    return Number(row.daysRemaining) >= 0 && Number(row.daysRemaining) <= upcomingDays;
+  });
+
+  const unique = new Map();
+  for (const row of matchingRows) {
+    const employeeUid = String(row.employeeUid ?? row.uid ?? "").trim();
+    const trainingKey = String(row.trainingKey ?? "").trim();
+    const nextDueKey = ledgerDateValue(row.nextDueDate) ?? String(row.nextDueDate ?? "");
+    if (!employeeUid || !trainingKey || !nextDueKey) continue;
+    const key = `${employeeUid}::${trainingKey}::${nextDueKey}`;
+    const branchKey = String(row.branchId ?? row._emp?.branchId ?? "");
+    const normalized = {
+      ...row,
+      uid: employeeUid,
+      name: row.employeeName ?? row.name ?? "-",
+      empNo: row.empNo ?? row._emp?.empNo ?? "-",
+      branchId: branchKey,
+      branchName: row.branchName || row._emp?.branchName || branchNames.get(branchKey) || "-",
+      trainingItemName: row.trainingItemName ?? trainingKey,
+      baseTrainingDate: row.baseTrainingDate ?? row._cycleBaseDate ?? row.lastDate ?? null,
+      deadlineStatusLabel: mode === "overdue"
+        ? "기한 초과"
+        : ascendingUpcomingBuckets.find((bucket) => Number(row.daysRemaining) <= Number(bucket.days))?.label ?? "기한 임박",
+    };
+    const existing = unique.get(key);
+    if (!existing || Number(normalized.daysRemaining) < Number(existing.daysRemaining)) unique.set(key, normalized);
+  }
+
+  const rows = [...unique.values()].sort((a, b) =>
+    Number(a.daysRemaining) - Number(b.daysRemaining)
+    || String(a.branchName ?? "").localeCompare(String(b.branchName ?? ""), "ko", { numeric: true })
+    || String(a.name ?? "").localeCompare(String(b.name ?? ""), "ko", { numeric: true })
+    || String(a.trainingItemName ?? "").localeCompare(String(b.trainingItemName ?? ""), "ko", { numeric: true })
+  );
+  return {
+    rows,
+    upcomingDays,
+    calculationUnavailable: scopedRows.length > 0 && calculableRows.length === 0,
   };
 }
 
@@ -1008,6 +1150,10 @@ function renderLedgerSummary() {
 function renderLedgerTable() {
   const el = document.getElementById("ledger-table");
   if (!el) return;
+  if (currentLedgerMeta?.deadlineMode) {
+    renderDeadlineLedgerTable(el, currentLedgerMeta.deadlineMode);
+    return;
+  }
   const isHQAdmin = authStore.role === ROLES.HQ_ADMIN;
   const canManageEmployee = isHQAdmin || authStore.role === ROLES.INSTRUCTOR;
 
@@ -1157,6 +1303,63 @@ function renderLedgerTable() {
       router.push("history-cards", { uid: row.dataset.uid });
     });
   });
+}
+
+function renderDeadlineLedgerTable(el, mode) {
+  let rows = ledgerRows;
+  if (ledgerSearch) {
+    rows = rows.filter((row) => [
+      row.name,
+      row.empNo,
+      row.trainingItemName,
+      row.branchName,
+    ].some((value) => String(value ?? "").toLowerCase().includes(ledgerSearch)));
+  }
+
+  if (!rows.length) {
+    const message = currentLedgerMeta?.calculationUnavailable
+      ? "교육주기 설정 또는 유효한 기준 교육일이 없어 기한을 계산할 수 없습니다."
+      : mode === "overdue"
+        ? "선택한 지점에 기한을 초과한 교육항목이 없습니다."
+        : "선택한 지점에 기한이 임박한 교육항목이 없습니다.";
+    el.innerHTML = `<div class="empty-state" style="padding:var(--space-10)"><div class="empty-state__title" style="font-size:var(--text-sm)">${message}</div></div>`;
+    return;
+  }
+
+  el.innerHTML = `
+    <table class="data-table" style="min-width:900px">
+      <thead><tr>
+        <th>지점</th><th>성명</th><th>사번</th><th>교육항목</th>
+        <th>기준 교육일</th><th>다음 예정일</th><th>남은 일수</th><th>상태</th>
+      </tr></thead>
+      <tbody>${rows.map((row) => {
+        const overdue = Number(row.daysRemaining) < 0;
+        const daysLabel = overdue
+          ? `${Math.abs(Number(row.daysRemaining))}일 초과`
+          : Number(row.daysRemaining) === 0 ? "D-day" : `D-${Number(row.daysRemaining)}`;
+        const tone = overdue ? "danger" : "warning";
+        return `<tr data-uid="${esc(row.uid)}" title="더블클릭: 이력카드" style="cursor:pointer">
+          <td style="font-size:var(--text-xs)">${esc(row.branchName)}</td>
+          <td style="font-weight:var(--weight-medium)">${esc(row.name)}</td>
+          <td style="font-family:monospace;font-size:var(--text-xs)">${esc(row.empNo)}</td>
+          <td style="font-size:var(--text-xs)">${esc(row.trainingItemName)}</td>
+          <td style="font-size:var(--text-xs)">${esc(formatLedgerDisplayDate(row.baseTrainingDate))}</td>
+          <td style="font-size:var(--text-xs)">${esc(formatLedgerDisplayDate(row.nextDueDate))}</td>
+          <td style="font-size:var(--text-xs);font-weight:var(--weight-semibold)">${esc(daysLabel)}</td>
+          <td><span class="chip chip--${tone}" style="font-size:var(--text-xs)">${esc(row.deadlineStatusLabel || (overdue ? "기한 초과" : "기한 임박"))}</span></td>
+        </tr>`;
+      }).join("")}</tbody>
+    </table>`;
+
+  el.querySelectorAll("tbody tr[data-uid]").forEach((row) => {
+    row.addEventListener("dblclick", () => router.push("history-cards", { uid: row.dataset.uid }));
+  });
+}
+
+function formatLedgerDisplayDate(value) {
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value.trim())) return value.trim();
+  const timestamp = ledgerDateValue(value);
+  return timestamp === null ? "-" : formatDateYMD(timestamp);
 }
 
 function sortableLedgerHeader(key, label) {
@@ -1325,6 +1528,7 @@ async function openResetConfirmModal() {
             modal.close();
             selectedUids.clear();
             updateResetBtn();
+            deadlineLedgerCache = null;
             await runLedgerQuery();
           } catch (err) {
             console.error("[employees] reset failed", err);
@@ -1475,6 +1679,7 @@ async function openEditEmployeeModal(row) {
             });
             toast.success("교육이력이 수정되었습니다.");
             modal.close();
+            deadlineLedgerCache = null;
             await runLedgerQuery();
           } catch (err) {
             console.error("[employees] replace histories failed", err);
