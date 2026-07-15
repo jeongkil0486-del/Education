@@ -88,7 +88,7 @@ export async function render(container, params = {}) {
     : null;
   container.innerHTML = '<div class="empty-state" style="padding:var(--space-16)">교육자료를 확인하는 중입니다.</div>';
   try {
-    const materials = await listMaterials();
+    const materials = await listMaterials({ maxAgeMs: 30_000 });
     const pdfMaterials = materials.filter(isSlideshowPdf);
     if (!materialId) {
       renderMaterialPicker(container, pdfMaterials);

@@ -3,6 +3,7 @@ import { authStore } from "../core/auth.js";
 import { materialsDB } from "../core/db.js";
 
 const { functions } = window.__firebase;
+let materialListCache = { uid: "", loadedAt: 0, items: null };
 
 export const MATERIAL_TYPES = ["job", "legal", "external", "online", "other"];
 
@@ -196,7 +197,17 @@ export async function uploadMaterial(values, file, opts = {}) {
   return materialId;
 }
 
-export async function listMaterials() {
+export async function listMaterials(options = {}) {
+  const maxAgeMs = Math.max(0, Number(options.maxAgeMs) || 0);
+  if (
+    maxAgeMs > 0
+    && materialListCache.uid === authStore.uid
+    && Array.isArray(materialListCache.items)
+    && Date.now() - materialListCache.loadedAt <= maxAgeMs
+  ) {
+    console.info("[material-service] listMaterials cache hit", { count: materialListCache.items.length });
+    return materialListCache.items;
+  }
   const fn = httpsCallable(functions, "listMaterials");
   console.info("[material-service] listMaterials request", { uid: authStore.uid, role: authStore.role, companyId: authStore.companyId, branchId: authStore.branchId });
   const result = await fn({});
@@ -214,7 +225,7 @@ export async function listMaterials() {
       : null,
   });
 
-  return items
+  const normalizedItems = items
     .map((item) => {
       const trainingType = normalizeMaterialType(item.trainingType);
       return {
@@ -225,6 +236,8 @@ export async function listMaterials() {
       };
     })
     .sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0));
+  materialListCache = { uid: authStore.uid, loadedAt: Date.now(), items: normalizedItems };
+  return normalizedItems;
 }
 
 export async function deleteMaterial(id) {
