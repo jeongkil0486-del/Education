@@ -9,8 +9,6 @@
 import { authStore } from "../core/auth.js";
 import { TEXT }      from "../constants/text.js";
 
-let stopLoginGridWave = null;
-
 /** 사번 → Firebase 이메일 변환 (고정 도메인: @tas.local) */
 function empNoToEmail(empNo) {
   return `${empNo.trim().toLowerCase()}@tas.local`;
@@ -106,34 +104,34 @@ export function showLogin(container) {
     </div>
 
     <div class="login-art">
-      <div class="login-art__grid"></div>
-      <canvas class="login-art__grid-wave" aria-hidden="true"></canvas>
+      <div class="login-art__pattern" aria-hidden="true"></div>
+      <div class="login-art__orbit login-art__orbit--one" aria-hidden="true"></div>
+      <div class="login-art__orbit login-art__orbit--two" aria-hidden="true"></div>
+      <div class="login-art__particles" aria-hidden="true"><span></span><span></span><span></span></div>
+      <div class="login-art__sweep" aria-hidden="true"></div>
       <h2 class="login-art__headline">
-        <span class="login-art__eyebrow login-art__shine" data-shine-text="Trinity Air Service">Trinity Air Service</span>
-        <span class="login-art__title login-art__shine" data-shine-text="${TEXT.brand.serviceName}">${TEXT.brand.serviceName}</span>
+        <span class="login-art__eyebrow">Trinity Air Service</span>
+        <span class="login-art__title">${TEXT.brand.serviceName}</span>
       </h2>
-      <p class="login-art__sub login-art__shine" data-shine-text="교육 운영 및 이력 관리 통합 플랫폼">
+      <p class="login-art__sub">
         교육 운영 및 이력 관리 통합 플랫폼
       </p>
       <div class="login-art__stats">
         <div class="login-art__stat">
-          <div class="login-art__stat-value login-art__shine" data-shine-text="통합">통합</div>
-          <div class="login-art__stat-label login-art__shine" data-shine-text="교육 운영">교육 운영</div>
+          <div class="login-art__stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 7h8M7 12h10M9 17h6M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/></svg></div>
+          <div><div class="login-art__stat-value">통합</div><div class="login-art__stat-label">교육 운영</div></div>
         </div>
         <div class="login-art__stat">
-          <div class="login-art__stat-value login-art__shine" data-shine-text="체계">체계</div>
-          <div class="login-art__stat-label login-art__shine" data-shine-text="이력 관리">이력 관리</div>
+          <div class="login-art__stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 4h12v4H6V4Zm-2 8h7v8H4v-8Zm11 0h5v8h-5v-8ZM9 8v4m6-4v4"/></svg></div>
+          <div><div class="login-art__stat-value">체계</div><div class="login-art__stat-label">이력 관리</div></div>
         </div>
         <div class="login-art__stat">
-          <div class="login-art__stat-value login-art__shine" data-shine-text="보안">보안</div>
-          <div class="login-art__stat-label login-art__shine" data-shine-text="권한 관리">권한 관리</div>
+          <div class="login-art__stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.6 2.8 8.3 7 10 4.2-1.7 7-5.4 7-10V6l-7-3Zm-3 9 2 2 4-4"/></svg></div>
+          <div><div class="login-art__stat-value">보안</div><div class="login-art__stat-label">권한 관리</div></div>
         </div>
       </div>
     </div>
   `;
-
-  stopLoginGridWave?.();
-  stopLoginGridWave = startLoginGridWave(container.querySelector(".login-art__grid-wave"));
 
   // Event: submit on Enter (any input field)
   document.querySelectorAll("#login-empno, #login-password").forEach(input => {
@@ -151,143 +149,6 @@ export function showLogin(container) {
     pw.type = pw.type === "password" ? "text" : "password";
   });
 
-}
-
-function startLoginGridWave(canvas) {
-  const art = canvas?.closest(".login-art");
-  const context = canvas?.getContext?.("2d");
-  if (!art || !context) return () => {};
-
-  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-  const mobile = window.matchMedia("(max-width: 768px)");
-  const gridSize = 40;
-  const cycleMs = 10_000;
-  const waveDelayMs = 500;
-  const waveDurationMs = 3_600;
-  const amplitude = 12;
-  const sigma = 72;
-  const frequency = 0.085;
-  const frameInterval = 1000 / 30;
-  let width = 0;
-  let height = 0;
-  let pixelRatio = 1;
-  let animationFrame = 0;
-  let lastFrameAt = 0;
-  let startedAt = performance.now();
-  let highlighted = false;
-  let destroyed = false;
-
-  const resize = () => {
-    const rect = canvas.getBoundingClientRect();
-    width = Math.max(0, Math.round(rect.width));
-    height = Math.max(0, Math.round(rect.height));
-    pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
-    canvas.width = Math.max(1, Math.round(width * pixelRatio));
-    canvas.height = Math.max(1, Math.round(height * pixelRatio));
-    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-  };
-
-  const wavePoint = (x, y, center, active) => {
-    if (!active) return { x, y };
-    const travel = x - y * 0.35;
-    const distance = travel - center;
-    const falloff = Math.exp(-(distance * distance) / (2 * sigma * sigma));
-    const offset = Math.sin(distance * frequency) * amplitude * falloff;
-    return { x: x + offset * 0.35, y: y + offset };
-  };
-
-  const drawGrid = (timestamp) => {
-    if (destroyed || !canvas.isConnected) {
-      cleanup();
-      return;
-    }
-    animationFrame = requestAnimationFrame(drawGrid);
-    if (timestamp - lastFrameAt < frameInterval || !width || !height) return;
-    lastFrameAt = timestamp;
-
-    const cycleTime = (timestamp - startedAt) % cycleMs;
-    const progress = (cycleTime - waveDelayMs) / waveDurationMs;
-    const active = progress >= 0 && progress <= 1;
-    const travelMin = -height * 0.35 - sigma * 2;
-    const travelMax = width + sigma * 2;
-    const center = travelMin + (travelMax - travelMin) * Math.min(1, Math.max(0, progress));
-    const shouldHighlight = active && progress >= 0.16 && progress <= 0.98;
-    if (highlighted !== shouldHighlight) {
-      highlighted = shouldHighlight;
-      art.classList.toggle("is-wave-highlight", highlighted);
-    }
-
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-    context.strokeStyle = "rgba(255, 255, 255, 0.055)";
-    context.lineWidth = 1;
-
-    const segment = 10;
-    for (let x = 0; x <= width + gridSize; x += gridSize) {
-      context.beginPath();
-      for (let y = -segment; y <= height + segment; y += segment) {
-        const point = wavePoint(x, y, center, active);
-        if (y === -segment) context.moveTo(point.x, point.y);
-        else context.lineTo(point.x, point.y);
-      }
-      context.stroke();
-    }
-    for (let y = 0; y <= height + gridSize; y += gridSize) {
-      context.beginPath();
-      for (let x = -segment; x <= width + segment; x += segment) {
-        const point = wavePoint(x, y, center, active);
-        if (x === -segment) context.moveTo(point.x, point.y);
-        else context.lineTo(point.x, point.y);
-      }
-      context.stroke();
-    }
-  };
-
-  const stop = () => {
-    if (animationFrame) cancelAnimationFrame(animationFrame);
-    animationFrame = 0;
-    highlighted = false;
-    art.classList.remove("is-wave-highlight");
-  };
-
-  const start = () => {
-    if (destroyed || animationFrame || document.hidden || reducedMotion.matches || mobile.matches) return;
-    art.classList.add("has-grid-wave");
-    canvas.hidden = false;
-    resize();
-    startedAt = performance.now();
-    animationFrame = requestAnimationFrame(drawGrid);
-  };
-
-  const syncMotionPolicy = () => {
-    stop();
-    const enabled = !document.hidden && !reducedMotion.matches && !mobile.matches;
-    art.classList.toggle("has-grid-wave", enabled);
-    canvas.hidden = !enabled;
-    if (enabled) start();
-  };
-
-  const resizeObserver = new ResizeObserver(resize);
-  const onVisibilityChange = () => syncMotionPolicy();
-  resizeObserver.observe(art);
-  reducedMotion.addEventListener("change", syncMotionPolicy);
-  mobile.addEventListener("change", syncMotionPolicy);
-  document.addEventListener("visibilitychange", onVisibilityChange);
-  syncMotionPolicy();
-
-  function cleanup() {
-    if (destroyed) return;
-    destroyed = true;
-    stop();
-    resizeObserver.disconnect();
-    reducedMotion.removeEventListener("change", syncMotionPolicy);
-    mobile.removeEventListener("change", syncMotionPolicy);
-    document.removeEventListener("visibilitychange", onVisibilityChange);
-    art.classList.remove("has-grid-wave");
-  }
-
-  return cleanup;
 }
 
 async function attemptLogin() {
