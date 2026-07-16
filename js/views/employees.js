@@ -1652,7 +1652,6 @@ async function createLedgerPdf(rows, sortKey, direction) {
   const { jsPDF, html2canvas } = await loadLedgerPdfLibraries();
   await document.fonts?.ready;
   const isDeadline = Boolean(currentLedgerMeta?.deadlineMode);
-  const chunks = chunkLedgerPdfRows(rows, isDeadline);
   const sortOption = LEDGER_PDF_SORT_OPTIONS[sortKey] ?? LEDGER_PDF_SORT_OPTIONS.joinDate;
   const directionLabel = sortOption.directions.find(([value]) => value === direction)?.[1] ?? "";
   const sortLabel = `${sortOption.label} ${directionLabel}`.trim();
@@ -1667,6 +1666,9 @@ async function createLedgerPdf(rows, sortKey, direction) {
   document.body.appendChild(staging);
 
   try {
+    const chunks = measureLedgerPdfRowChunks(rows, {
+      staging, isDeadline, branchLabel, trainingLabel, sortLabel, generatedLabel,
+    });
     for (let index = 0; index < chunks.length; index += 1) {
       const page = buildLedgerPdfPage({
         rows: chunks[index], isDeadline, branchLabel, trainingLabel, sortLabel,
@@ -1690,11 +1692,43 @@ async function createLedgerPdf(rows, sortKey, direction) {
   }
 }
 
-function chunkLedgerPdfRows(rows, isDeadline) {
+function measureLedgerPdfRowChunks(rows, { staging, isDeadline, branchLabel, trainingLabel, sortLabel, generatedLabel }) {
+  if (!rows.length) return [[]];
+  const measurementPage = buildLedgerPdfPage({
+    rows, isDeadline, branchLabel, trainingLabel, sortLabel, generatedLabel,
+    totalCount: rows.length, pageNumber: 1, pageCount: 1,
+  });
+  staging.replaceChildren(measurementPage);
+  const body = measurementPage.querySelector(".ledger-pdf-table tbody");
+  const renderedRows = [...(body?.rows ?? [])];
+  const footer = measurementPage.querySelector(".ledger-pdf-footer");
+  if (!body || !footer || renderedRows.length !== rows.length) return chunkLedgerPdfRowsFallback(rows, isDeadline);
+
+  const bodyTop = body.getBoundingClientRect().top;
+  const footerTop = footer.getBoundingClientRect().top;
+  const availableBodyHeight = Math.max(1, footerTop - bodyTop - 8);
   const chunks = [];
   let chunk = [];
   let usedHeight = 0;
-  const maxHeight = 545;
+  rows.forEach((row, index) => {
+    const rowHeight = Math.ceil(renderedRows[index].getBoundingClientRect().height) + 1;
+    if (chunk.length && usedHeight + rowHeight > availableBodyHeight) {
+      chunks.push(chunk);
+      chunk = [];
+      usedHeight = 0;
+    }
+    chunk.push(row);
+    usedHeight += rowHeight;
+  });
+  if (chunk.length) chunks.push(chunk);
+  return chunks;
+}
+
+function chunkLedgerPdfRowsFallback(rows, isDeadline) {
+  const chunks = [];
+  let chunk = [];
+  let usedHeight = 0;
+  const maxHeight = 525;
   for (const row of rows) {
     const height = estimateLedgerPdfRowHeight(row, isDeadline);
     if (chunk.length && usedHeight + height > maxHeight) {
@@ -1726,6 +1760,7 @@ function buildLedgerPdfPage({ rows, isDeadline, branchLabel, trainingLabel, sort
       .ledger-pdf-brand{font-size:12px;font-weight:700;color:#1f5fae;letter-spacing:.2px}.ledger-pdf-title{font-size:24px;font-weight:800;margin-top:4px}.ledger-pdf-meta{text-align:right;font-size:11px;line-height:1.65;color:#475569}
       .ledger-pdf-table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:10px}.ledger-pdf-table th{background:#eaf2fb;color:#163b66;font-weight:700;border:1px solid #9db4cc;padding:0;white-space:nowrap;text-align:center;vertical-align:middle}
       .ledger-pdf-table td{border:1px solid #c9d4df;padding:0;vertical-align:middle;text-align:center;line-height:1;overflow-wrap:anywhere}.ledger-pdf-table tbody tr:nth-child(even){background:#f8fafc}
+      .ledger-pdf-table tr{break-inside:avoid;page-break-inside:avoid}
       .ledger-pdf-table th,.ledger-pdf-table td{display:table-cell!important;text-align:center!important;vertical-align:middle!important}
       .ledger-pdf-cell{display:flex;min-height:30px;padding:5px 4px;align-items:center;justify-content:center;line-height:1.15;text-align:center;transform:translateY(-1px)}
       .ledger-pdf-table th .ledger-pdf-cell{padding:7px 4px;line-height:1;transform:translateY(0)}.ledger-pdf-table td:first-child{font-weight:700}.ledger-pdf-note{white-space:normal}.ledger-pdf-dates{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;white-space:nowrap}.ledger-pdf-status{font-weight:700}
