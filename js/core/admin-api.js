@@ -251,7 +251,6 @@ export async function getEducationCycleConfig(payload) {
   return null;
 }
 
-
 /* ─── 기존 교육이력 Excel 가져오기 ──────────────────────── */
 const importHistoryExcelDataCallable = httpsCallable(functions, "importHistoryExcelData");
 
