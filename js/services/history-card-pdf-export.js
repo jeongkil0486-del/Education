@@ -1,9 +1,9 @@
 const PDF_BRAND = "Trinity Air Service";
 const PDF_TITLE = "개인 교육이력카드";
-const HTML2CANVAS_URL = "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js";
 const PDFLIB_URL = "https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js";
-const PAGE_WIDTH = 794;
-const PAGE_HEIGHT = 1123;
+const FONTKIT_URL = "https://cdn.jsdelivr.net/npm/@pdf-lib/fontkit@1.1.1/dist/fontkit.umd.min.js";
+const PDF_FONT_REGULAR_URL = "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/nanumgothic/NanumGothic-Regular.ttf";
+const PDF_FONT_BOLD_URL = "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/nanumgothic/NanumGothic-Bold.ttf";
 const PDF_PAGE_WIDTH = 595.28;
 const PDF_PAGE_HEIGHT = 841.89;
 
@@ -24,98 +24,40 @@ const OPTIONAL_DETAIL_FIELDS = Object.freeze([
 ]);
 
 let pdfLibrariesPromise = null;
+let pdfFontBytesPromise = null;
 
 export async function createEmployeeHistoryCardPdf({ employee, rows = [], download = true }) {
   if (!employee) throw new Error("다운로드할 직원을 선택해 주세요.");
 
   const records = rows.filter(Boolean).map((row, index) => toPdfRecord(row, index));
   const report = buildReportModel(records);
-  const { html2canvas, PDFDocument } = await loadPdfLibraries();
+  const [{ PDFDocument, rgb, fontkit }, fontBytes] = await Promise.all([
+    loadPdfLibraries(),
+    loadPdfFontBytes(),
+  ]);
   const pdf = await PDFDocument.create();
+  pdf.registerFontkit(fontkit);
   pdf.setAuthor(PDF_BRAND);
   pdf.setCreator(PDF_BRAND);
   pdf.setProducer(PDF_BRAND);
-  const staging = document.createElement("div");
-  staging.setAttribute("aria-hidden", "true");
-  Object.assign(staging.style, {
-    position: "absolute",
-    left: "0",
-    top: "0",
-    width: `${PAGE_WIDTH}px`,
-    minHeight: `${PAGE_HEIGHT}px`,
-    background: "#ffffff",
-    pointerEvents: "none",
-    zIndex: "2147483647",
-  });
-  const reportStyle = document.createElement("style");
-  reportStyle.textContent = pdfStyles();
-  staging.appendChild(reportStyle);
-  document.body.appendChild(staging);
+  // pdf-lib/fontkit의 CJK 서브셋은 일부 PDF 뷰어에서 글리프 누락을 일으킬 수 있어
+  // 정적 TTF 전체를 임베딩한다. 표와 텍스트는 여전히 벡터 객체로 유지된다.
+  const regularFont = await pdf.embedFont(fontBytes.regular, { subset: false });
+  const boldFont = await pdf.embedFont(fontBytes.bold, { subset: false });
+  const pageCount = renderVectorReport({ pdf, regularFont, boldFont, rgb, employee, report });
 
-  try {
-    if (document.fonts?.ready) await document.fonts.ready;
-    const detailPages = paginateDetailPages(report.categories, staging, employee);
-    const pageModels = [{ type: "cover" }, ...detailPages.map((sections) => ({ type: "detail", sections }))];
-
-    for (let index = 0; index < pageModels.length; index += 1) {
-      staging.querySelectorAll(".history-card-pdf-page").forEach((page) => page.remove());
-      const page = buildPdfPage({
-        employee,
-        report,
-        pageModel: pageModels[index],
-        pageNumber: index + 1,
-        pageCount: pageModels.length,
-      });
-      staging.appendChild(page);
-      await waitForPaint();
-
-      const canvas = await html2canvas(page, {
-        backgroundColor: "#ffffff",
-        scale: 0.75,
-        logging: false,
-        useCORS: true,
-        width: PAGE_WIDTH,
-        height: PAGE_HEIGHT,
-        windowWidth: PAGE_WIDTH,
-        windowHeight: PAGE_HEIGHT,
-      });
-      const opaqueCanvas = document.createElement("canvas");
-      opaqueCanvas.width = canvas.width;
-      opaqueCanvas.height = canvas.height;
-      const opaqueContext = opaqueCanvas.getContext("2d");
-      opaqueContext.fillStyle = "#ffffff";
-      opaqueContext.fillRect(0, 0, opaqueCanvas.width, opaqueCanvas.height);
-      opaqueContext.drawImage(canvas, 0, 0);
-
-      const pageImage = await pdf.embedJpg(opaqueCanvas.toDataURL("image/jpeg", 0.95));
-      const pdfPage = pdf.addPage([PDF_PAGE_WIDTH, PDF_PAGE_HEIGHT]);
-      pdfPage.drawImage(pageImage, {
-        x: 0,
-        y: 0,
-        width: PDF_PAGE_WIDTH,
-        height: PDF_PAGE_HEIGHT,
-      });
-      canvas.width = 1;
-      canvas.height = 1;
-      opaqueCanvas.width = 1;
-      opaqueCanvas.height = 1;
-    }
-
-    const fileName = buildPdfFileName(employee);
-    const pdfBytes = await pdf.save({ useObjectStreams: false });
-    const blob = new Blob([pdfBytes], { type: "application/pdf" });
-    if (download) downloadBlob(blob, fileName);
-    return {
-      mode: "session-group-report-pdf",
-      fileName,
-      rowCount: records.length,
-      sessionCount: report.sessionCount,
-      pageCount: pageModels.length,
-      blob: download ? undefined : blob,
-    };
-  } finally {
-    staging.remove();
-  }
+  const fileName = buildPdfFileName(employee);
+  const pdfBytes = await pdf.save({ useObjectStreams: false });
+  const blob = new Blob([pdfBytes], { type: "application/pdf" });
+  if (download) downloadBlob(blob, fileName);
+  return {
+    mode: "session-group-vector-pdf",
+    fileName,
+    rowCount: records.length,
+    sessionCount: report.sessionCount,
+    pageCount,
+    blob: download ? undefined : blob,
+  };
 }
 
 function buildReportModel(records) {
@@ -276,6 +218,745 @@ function compareSessionGroups(left, right) {
   return right.completedSort - left.completedSort
     || right.periodSort - left.periodSort
     || left.title.localeCompare(right.title, "ko", { numeric: true, sensitivity: "base" });
+}
+
+const VECTOR_LAYOUT = Object.freeze({
+  marginX: 26,
+  contentTop: 76,
+  contentBottom: 812,
+  sectionHeadingHeight: 22,
+  sectionHeadingGap: 5,
+  groupGap: 8,
+});
+
+function renderVectorReport({ pdf, regularFont, boldFont, rgb, employee, report }) {
+  const theme = createVectorTheme(rgb);
+  const context = { regularFont, boldFont, theme };
+  const pages = [];
+  const coverPage = pdf.addPage([PDF_PAGE_WIDTH, PDF_PAGE_HEIGHT]);
+  pages.push(coverPage);
+  drawCoverPage(coverPage, context, employee, report);
+
+  const state = createDetailPageState(pdf, pages);
+  if (!report.categories.length) {
+    drawSectionHeading(state.page, context, "교육 이력 상세", state.cursor);
+    state.cursor += VECTOR_LAYOUT.sectionHeadingHeight + VECTOR_LAYOUT.sectionHeadingGap;
+    drawTextInBox(state.page, "표시할 상세 교육이력이 없습니다.", {
+      x: VECTOR_LAYOUT.marginX,
+      top: state.cursor,
+      width: contentWidth(),
+      height: 64,
+      font: regularFont,
+      size: 9,
+      color: theme.muted,
+      align: "center",
+    });
+  } else {
+    drawDetailPages(pdf, pages, state, context, report.categories);
+  }
+
+  const printedAt = formatPrintDate(new Date());
+  pages.forEach((page, index) => {
+    drawPageChrome(page, context, employee, printedAt, index + 1, pages.length, index === 0);
+  });
+  return pages.length;
+}
+
+function createVectorTheme(rgb) {
+  const fromHex = (hex) => {
+    const value = Number.parseInt(hex.replace("#", ""), 16);
+    return rgb(((value >> 16) & 255) / 255, ((value >> 8) & 255) / 255, (value & 255) / 255);
+  };
+  return {
+    navy: fromHex("#123f78"),
+    blue: fromHex("#1554a0"),
+    dark: fromHex("#172033"),
+    text: fromHex("#273449"),
+    muted: fromHex("#718096"),
+    border: fromHex("#bac7d6"),
+    lightBorder: fromHex("#d6dee8"),
+    labelFill: fromHex("#eef3f9"),
+    headingFill: fromHex("#e7f0fa"),
+    alternateFill: fromHex("#f8fafc"),
+    green: fromHex("#16813a"),
+    white: rgb(1, 1, 1),
+  };
+}
+
+function contentWidth() {
+  return PDF_PAGE_WIDTH - VECTOR_LAYOUT.marginX * 2;
+}
+
+function drawCoverPage(page, context, employee, report) {
+  let top = VECTOR_LAYOUT.contentTop + 5;
+  drawSectionHeading(page, context, "1. 인적사항", top);
+  top += VECTOR_LAYOUT.sectionHeadingHeight + 7;
+
+  const profileFields = [
+    ["성명", employee.name],
+    ["사번", employee.empNo],
+    ["생년월일", firstValue(employee.birthDate, employee.birth, employee.birthday), true],
+    ["입사일", firstValue(employee.hireDate, employee.joinDate, employee.employmentDate, employee.joinedAt), true],
+    ["입사구분", firstText(employee.entryType, employee.employmentType, employee.careerType)],
+    ["직급/직책", firstText(employee.position, employee.jobTitle, employee.title, employee.rank)],
+    ["사내 자격", firstText(employee.internalLicense, employee.internalQualification, employee.internalQualifications)],
+    ["사외 자격", firstText(employee.externalLicense, employee.externalQualification, employee.externalQualifications)],
+  ];
+  const halfWidth = contentWidth() / 2;
+  for (let index = 0; index < profileFields.length; index += 2) {
+    const left = profileFields[index];
+    const right = profileFields[index + 1];
+    const leftValue = left[2] ? formatDateValue(left[1]) : profileValue(left[1]);
+    const rightValue = right[2] ? formatDateValue(right[1]) : profileValue(right[1]);
+    const rowHeight = Math.max(
+      32,
+      measureTextBlock(context.regularFont, leftValue, 8.8, halfWidth - 82) + 9,
+      measureTextBlock(context.regularFont, rightValue, 8.8, halfWidth - 82) + 9,
+    );
+    drawLabeledValueCell(page, context, left[0], leftValue, VECTOR_LAYOUT.marginX, top, halfWidth, rowHeight, 70);
+    drawLabeledValueCell(page, context, right[0], rightValue, VECTOR_LAYOUT.marginX + halfWidth, top, halfWidth, rowHeight, 70);
+    top += rowHeight;
+  }
+
+  top += 15;
+  drawSectionHeading(page, context, "2. 교육 이력 요약", top, `총 ${report.records.length}건 · ${report.sessionCount}개 세션`);
+  top += VECTOR_LAYOUT.sectionHeadingHeight + 7;
+  drawSummaryTable(page, context, report, top);
+}
+
+function drawSummaryTable(page, context, report, top) {
+  const columns = [
+    ["교육구분", 0.2],
+    ["이수 건수", 0.16],
+    ["최근 수료일", 0.22],
+    ["최근 결과", 0.19],
+    ["최근 초기/보수", 0.23],
+  ];
+  const tableWidth = contentWidth();
+  const headerHeight = 25;
+  let x = VECTOR_LAYOUT.marginX;
+  columns.forEach(([label, ratio]) => {
+    const width = tableWidth * ratio;
+    drawTableCell(page, label, {
+      x,
+      top,
+      width,
+      height: headerHeight,
+      font: context.boldFont,
+      size: 8.7,
+      color: context.theme.white,
+      fill: context.theme.blue,
+      border: context.theme.blue,
+      align: "center",
+    });
+    x += width;
+  });
+
+  const rows = report.categories.length
+    ? report.categories.map((categoryInfo) => [
+        categoryInfo.label,
+        `${categoryInfo.count}건`,
+        categoryInfo.latestCompletedAt,
+        categoryInfo.latestResult,
+        categoryInfo.latestStage,
+      ])
+    : [["-", "0건", "-", "-", "-"]];
+  rows.forEach((row, rowIndex) => {
+    const rowTop = top + headerHeight + rowIndex * 25;
+    x = VECTOR_LAYOUT.marginX;
+    row.forEach((value, columnIndex) => {
+      const width = tableWidth * columns[columnIndex][1];
+      drawTableCell(page, value, {
+        x,
+        top: rowTop,
+        width,
+        height: 25,
+        font: context.regularFont,
+        size: 8.8,
+        color: context.theme.text,
+        fill: rowIndex % 2 ? context.theme.alternateFill : context.theme.white,
+        border: context.theme.border,
+        align: "center",
+      });
+      x += width;
+    });
+  });
+}
+
+function createDetailPageState(pdf, pages) {
+  const page = pdf.addPage([PDF_PAGE_WIDTH, PDF_PAGE_HEIGHT]);
+  pages.push(page);
+  return {
+    page,
+    cursor: VECTOR_LAYOUT.contentTop,
+    categoryKey: null,
+  };
+}
+
+function resetDetailPageState(pdf, pages, state) {
+  const page = pdf.addPage([PDF_PAGE_WIDTH, PDF_PAGE_HEIGHT]);
+  pages.push(page);
+  state.page = page;
+  state.cursor = VECTOR_LAYOUT.contentTop;
+  state.categoryKey = null;
+}
+
+function drawDetailPages(pdf, pages, state, context, categories) {
+  categories.forEach((categoryInfo) => {
+    categoryInfo.sessions.forEach((group) => {
+      const headingSpace = state.categoryKey === categoryInfo.key
+        ? 0
+        : VECTOR_LAYOUT.sectionHeadingHeight + VECTOR_LAYOUT.sectionHeadingGap;
+      const fullHeight = measureSessionGroup(context, group, group.items, false, 0).height;
+      const remaining = VECTOR_LAYOUT.contentBottom - state.cursor;
+      const freshCapacity = VECTOR_LAYOUT.contentBottom
+        - VECTOR_LAYOUT.contentTop
+        - VECTOR_LAYOUT.sectionHeadingHeight
+        - VECTOR_LAYOUT.sectionHeadingGap;
+
+      if (headingSpace + fullHeight > remaining && fullHeight <= freshCapacity) {
+        resetDetailPageState(pdf, pages, state);
+      }
+
+      ensureCategoryHeading(state, context, categoryInfo);
+      if (fullHeight <= VECTOR_LAYOUT.contentBottom - state.cursor) {
+        drawSessionGroup(state.page, context, group, group.items, state.cursor, false, 0);
+        state.cursor += fullHeight + VECTOR_LAYOUT.groupGap;
+        return;
+      }
+
+      let itemOffset = 0;
+      const items = group.items.length ? group.items : [null];
+      while (itemOffset < items.length) {
+        const availableHeight = VECTOR_LAYOUT.contentBottom - state.cursor;
+        let takeCount = countItemsThatFit(context, group, items, itemOffset, availableHeight);
+        if (takeCount === 0) {
+          resetDetailPageState(pdf, pages, state);
+          ensureCategoryHeading(state, context, categoryInfo);
+          takeCount = countItemsThatFit(
+            context,
+            group,
+            items,
+            itemOffset,
+            VECTOR_LAYOUT.contentBottom - state.cursor,
+          );
+        }
+        if (takeCount === 0) takeCount = Math.min(2, items.length - itemOffset);
+        const fragmentItems = items.slice(itemOffset, itemOffset + takeCount).filter(Boolean);
+        const continued = itemOffset > 0;
+        const fragmentLayout = measureSessionGroup(context, group, fragmentItems, continued, itemOffset);
+        drawSessionGroup(state.page, context, group, fragmentItems, state.cursor, continued, itemOffset);
+        state.cursor += fragmentLayout.height + VECTOR_LAYOUT.groupGap;
+        itemOffset += takeCount;
+        if (itemOffset < items.length) {
+          resetDetailPageState(pdf, pages, state);
+          ensureCategoryHeading(state, context, categoryInfo);
+        }
+      }
+    });
+  });
+}
+
+function ensureCategoryHeading(state, context, categoryInfo) {
+  if (state.categoryKey === categoryInfo.key) return;
+  drawSectionHeading(state.page, context, `${categoryInfo.label} 상세`, state.cursor);
+  state.cursor += VECTOR_LAYOUT.sectionHeadingHeight + VECTOR_LAYOUT.sectionHeadingGap;
+  state.categoryKey = categoryInfo.key;
+}
+
+function countItemsThatFit(context, group, items, offset, maxHeight) {
+  const fixedHeight = measureSessionGroup(context, group, [], offset > 0, offset, false).height;
+  let height = fixedHeight;
+  let count = 0;
+  for (let index = offset; index < items.length; index += 2) {
+    const pair = items.slice(index, index + 2).filter(Boolean);
+    const rowHeight = measureItemRow(context, pair, contentWidth()).height;
+    if (count > 0 && height + rowHeight > maxHeight) break;
+    if (count === 0 && height + rowHeight > maxHeight) return 0;
+    height += rowHeight;
+    count += pair.length || 1;
+  }
+  return count;
+}
+
+function measureSessionGroup(context, group, items, continued, itemOffset, includeEmpty = true) {
+  const title = `${group.categoryLabel} · ${group.title}${continued ? " (계속)" : ""}`;
+  const titleHeight = Math.max(24, measureTextBlock(context.boldFont, title, 11, contentWidth() - 14) + 7);
+  const metaRows = buildSessionMetaRows(group).map((row) => ({
+    cells: row,
+    height: measureMetaRow(context, row, contentWidth()),
+  }));
+  const itemRows = [];
+  for (let index = 0; index < items.length; index += 2) {
+    const pair = items.slice(index, index + 2);
+    itemRows.push({ items: pair, height: measureItemRow(context, pair, contentWidth()).height });
+  }
+  if (!itemRows.length && includeEmpty) itemRows.push({ items: [], height: 24 });
+  const footerHeight = 13;
+  return {
+    title,
+    titleHeight,
+    metaRows,
+    itemRows,
+    itemOffset,
+    footerHeight,
+    height: titleHeight
+      + metaRows.reduce((sum, row) => sum + row.height, 0)
+      + itemRows.reduce((sum, row) => sum + row.height, 0)
+      + footerHeight,
+  };
+}
+
+function buildSessionMetaRows(group) {
+  const rows = [
+    [
+      { label: "교육기간", value: group.period },
+      { label: "수료일자", value: group.completedAt },
+      { label: "강사", value: group.instructor },
+      { label: "교육시간", value: group.hours },
+    ],
+    [
+      { label: "결과", value: group.result, accent: true },
+      { label: "구분", value: group.stage },
+      { label: "비고", value: group.note, span: 2 },
+    ],
+  ];
+  const optional = OPTIONAL_DETAIL_FIELDS
+    .filter(([field]) => group.commonDetails[field])
+    .map(([field, label]) => ({ label, value: group.commonDetails[field], span: 2 }));
+  for (let index = 0; index < optional.length; index += 2) rows.push(optional.slice(index, index + 2));
+  return rows;
+}
+
+function measureMetaRow(context, cells, width) {
+  const logicalWidth = width / 4;
+  return Math.max(23, ...cells.map((cell) => {
+    const cellWidth = logicalWidth * (cell.span || 1);
+    const labelWidth = cell.span === 2 ? 43 : 35;
+    return measureTextBlock(context.regularFont, cell.value, 8.5, cellWidth - labelWidth - 7) + 7;
+  }));
+}
+
+function measureItemRow(context, items, width) {
+  const halfWidth = width / 2;
+  return {
+    height: Math.max(22, ...items.map((item) => measureItemCell(context, item, halfWidth))),
+  };
+}
+
+function measureItemCell(context, item, width) {
+  if (!item) return 22;
+  const contentWidthValue = width - 27;
+  const nameLines = wrapPdfText(context.boldFont, item.name || "-", 8.8, contentWidthValue - 7);
+  let height = nameLines.length * 10.2;
+  const detailLines = itemDetailLines(item);
+  detailLines.forEach((line) => {
+    height += wrapPdfText(context.regularFont, line, 7.2, contentWidthValue - 7).length * 8.5;
+  });
+  return Math.max(22, height + 7);
+}
+
+function itemDetailLines(item) {
+  const lines = OPTIONAL_DETAIL_FIELDS
+    .filter(([field]) => item.details?.[field])
+    .map(([field, label]) => `${label} ${item.details[field]}`);
+  if (item.note && item.note !== "-") lines.push(`비고 ${item.note}`);
+  return lines;
+}
+
+function drawSessionGroup(page, context, group, items, top, continued, itemOffset) {
+  const layout = measureSessionGroup(context, group, items, continued, itemOffset);
+  let cursor = top;
+  drawRectTop(page, {
+    x: VECTOR_LAYOUT.marginX,
+    top: cursor,
+    width: contentWidth(),
+    height: layout.titleHeight,
+    fill: context.theme.headingFill,
+    border: context.theme.border,
+  });
+  drawTextInBox(page, layout.title, {
+    x: VECTOR_LAYOUT.marginX + 7,
+    top: cursor,
+    width: contentWidth() - 14,
+    height: layout.titleHeight,
+    font: context.boldFont,
+    size: 11,
+    color: context.theme.navy,
+  });
+  cursor += layout.titleHeight;
+
+  layout.metaRows.forEach((row) => {
+    drawMetaRow(page, context, row.cells, cursor, row.height);
+    cursor += row.height;
+  });
+
+  if (!layout.itemRows.length) {
+    drawTableCell(page, "교육과정명이 없습니다.", {
+      x: VECTOR_LAYOUT.marginX,
+      top: cursor,
+      width: contentWidth(),
+      height: 24,
+      font: context.regularFont,
+      size: 8.5,
+      color: context.theme.muted,
+      fill: context.theme.white,
+      border: context.theme.lightBorder,
+      align: "center",
+    });
+    cursor += 24;
+  } else {
+    layout.itemRows.forEach((row, rowIndex) => {
+      drawItemRow(page, context, row.items, cursor, row.height, itemOffset + rowIndex * 2);
+      cursor += row.height;
+    });
+  }
+
+  drawRectTop(page, {
+    x: VECTOR_LAYOUT.marginX,
+    top: cursor,
+    width: contentWidth(),
+    height: layout.footerHeight,
+    fill: context.theme.white,
+    border: context.theme.border,
+  });
+  const itemEnd = itemOffset + items.length;
+  const footerText = group.items.length
+    ? `원본 교육이력 ${group.sourceRecordCount}건 · 교육과정 ${Math.min(itemOffset + 1, itemEnd)}-${itemEnd} / ${group.items.length}`
+    : `원본 교육이력 ${group.sourceRecordCount}건`;
+  drawTextInBox(page, footerText, {
+    x: VECTOR_LAYOUT.marginX + 5,
+    top: cursor,
+    width: contentWidth() - 10,
+    height: layout.footerHeight,
+    font: context.regularFont,
+    size: 6.8,
+    color: context.theme.muted,
+    align: "right",
+  });
+  drawRectTop(page, {
+    x: VECTOR_LAYOUT.marginX,
+    top,
+    width: contentWidth(),
+    height: layout.height,
+    border: context.theme.border,
+    borderWidth: 0.8,
+  });
+  return layout.height;
+}
+
+function drawMetaRow(page, context, cells, top, height) {
+  const logicalWidth = contentWidth() / 4;
+  let logicalIndex = 0;
+  cells.forEach((cell) => {
+    const span = cell.span || 1;
+    const width = logicalWidth * span;
+    drawLabeledValueCell(
+      page,
+      context,
+      cell.label,
+      cell.value,
+      VECTOR_LAYOUT.marginX + logicalIndex * logicalWidth,
+      top,
+      width,
+      height,
+      span === 2 ? 43 : 35,
+      cell.accent,
+    );
+    logicalIndex += span;
+  });
+}
+
+function drawItemRow(page, context, items, top, height, itemOffset) {
+  const halfWidth = contentWidth() / 2;
+  [0, 1].forEach((column) => {
+    const x = VECTOR_LAYOUT.marginX + halfWidth * column;
+    const item = items[column];
+    drawRectTop(page, {
+      x,
+      top,
+      width: halfWidth,
+      height,
+      fill: Math.floor(itemOffset / 2) % 2 ? context.theme.alternateFill : context.theme.white,
+      border: context.theme.lightBorder,
+      borderWidth: 0.55,
+    });
+    if (!item) return;
+    const numberWidth = 20;
+    drawTextInBox(page, String(itemOffset + column + 1), {
+      x,
+      top,
+      width: numberWidth,
+      height,
+      font: context.regularFont,
+      size: 7.2,
+      color: context.theme.muted,
+      align: "center",
+    });
+    drawLineTop(page, x + numberWidth, top, x + numberWidth, top + height, context.theme.lightBorder, 0.55);
+    drawItemContent(page, context, item, x + numberWidth + 4, top, halfWidth - numberWidth - 8, height);
+  });
+}
+
+function drawItemContent(page, context, item, x, top, width, height) {
+  const lines = [];
+  wrapPdfText(context.boldFont, item.name || "-", 8.8, width).forEach((text) => {
+    lines.push({ text, font: context.boldFont, size: 8.8, lineHeight: 10.2, color: context.theme.dark });
+  });
+  itemDetailLines(item).forEach((detail) => {
+    wrapPdfText(context.regularFont, detail, 7.2, width).forEach((text) => {
+      lines.push({ text, font: context.regularFont, size: 7.2, lineHeight: 8.5, color: context.theme.muted });
+    });
+  });
+  drawMixedLinesInBox(page, lines, { x, top, width, height, align: "left" });
+}
+
+function drawLabeledValueCell(page, context, label, value, x, top, width, height, labelWidth, accent = false) {
+  drawTableCell(page, label, {
+    x,
+    top,
+    width: labelWidth,
+    height,
+    font: context.boldFont,
+    size: 7.5,
+    color: context.theme.text,
+    fill: context.theme.labelFill,
+    border: context.theme.lightBorder,
+    align: "center",
+  });
+  drawTableCell(page, value || "-", {
+    x: x + labelWidth,
+    top,
+    width: width - labelWidth,
+    height,
+    font: accent ? context.boldFont : context.regularFont,
+    size: accent ? 8.8 : 8.5,
+    color: accent ? context.theme.green : context.theme.text,
+    fill: context.theme.white,
+    border: context.theme.lightBorder,
+    align: "left",
+  });
+}
+
+function drawSectionHeading(page, context, label, top, summary = "") {
+  drawRectTop(page, {
+    x: VECTOR_LAYOUT.marginX,
+    top,
+    width: 5,
+    height: VECTOR_LAYOUT.sectionHeadingHeight,
+    fill: context.theme.blue,
+  });
+  drawTextInBox(page, label, {
+    x: VECTOR_LAYOUT.marginX + 10,
+    top,
+    width: contentWidth() - 10,
+    height: VECTOR_LAYOUT.sectionHeadingHeight,
+    font: context.boldFont,
+    size: 11.5,
+    color: context.theme.navy,
+  });
+  if (summary) {
+    drawTextInBox(page, summary, {
+      x: VECTOR_LAYOUT.marginX + contentWidth() * 0.55,
+      top,
+      width: contentWidth() * 0.45,
+      height: VECTOR_LAYOUT.sectionHeadingHeight,
+      font: context.regularFont,
+      size: 7.5,
+      color: context.theme.muted,
+      align: "right",
+    });
+  }
+}
+
+function drawPageChrome(page, context, employee, printedAt, pageNumber, pageCount, cover) {
+  drawTextInBox(page, PDF_BRAND, {
+    x: VECTOR_LAYOUT.marginX,
+    top: 21,
+    width: 165,
+    height: 25,
+    font: context.boldFont,
+    size: cover ? 13.5 : 12,
+    color: context.theme.navy,
+  });
+  drawTextInBox(page, PDF_TITLE, {
+    x: 170,
+    top: 18,
+    width: 250,
+    height: 31,
+    font: context.boldFont,
+    size: cover ? 19 : 15.5,
+    color: context.theme.dark,
+    align: "center",
+  });
+  drawTextInBox(page, `출력일시  ${printedAt}\n대상자    ${profileValue(employee.name)} (${profileValue(employee.empNo)})\n페이지    ${pageNumber} / ${pageCount}`, {
+    x: 440,
+    top: 14,
+    width: PDF_PAGE_WIDTH - 440 - VECTOR_LAYOUT.marginX,
+    height: 39,
+    font: context.regularFont,
+    size: 6.1,
+    lineHeight: 8.2,
+    color: context.theme.text,
+  });
+  drawLineTop(page, VECTOR_LAYOUT.marginX, 58, PDF_PAGE_WIDTH - VECTOR_LAYOUT.marginX, 58, context.theme.blue, 1.8);
+  drawLineTop(page, VECTOR_LAYOUT.marginX, 818, PDF_PAGE_WIDTH - VECTOR_LAYOUT.marginX, 818, context.theme.lightBorder, 0.6);
+  drawTextInBox(page, PDF_BRAND, {
+    x: VECTOR_LAYOUT.marginX,
+    top: 819,
+    width: 160,
+    height: 13,
+    font: context.regularFont,
+    size: 5.8,
+    color: context.theme.muted,
+  });
+  drawTextInBox(page, `${PDF_TITLE} · ${pageNumber} / ${pageCount}`, {
+    x: PDF_PAGE_WIDTH - 210 - VECTOR_LAYOUT.marginX,
+    top: 819,
+    width: 210,
+    height: 13,
+    font: context.regularFont,
+    size: 5.8,
+    color: context.theme.muted,
+    align: "right",
+  });
+}
+
+function drawTableCell(page, value, options) {
+  drawRectTop(page, {
+    x: options.x,
+    top: options.top,
+    width: options.width,
+    height: options.height,
+    fill: options.fill,
+    border: options.border,
+    borderWidth: options.borderWidth ?? 0.6,
+  });
+  drawTextInBox(page, value, options);
+}
+
+function drawRectTop(page, { x, top, width, height, fill, border, borderWidth = 0 }) {
+  const options = {
+    x,
+    y: PDF_PAGE_HEIGHT - top - height,
+    width,
+    height,
+  };
+  if (fill) options.color = fill;
+  if (border) {
+    options.borderColor = border;
+    options.borderWidth = borderWidth || 0.6;
+  }
+  page.drawRectangle(options);
+}
+
+function drawLineTop(page, x1, top1, x2, top2, color, thickness = 0.6) {
+  page.drawLine({
+    start: { x: x1, y: PDF_PAGE_HEIGHT - top1 },
+    end: { x: x2, y: PDF_PAGE_HEIGHT - top2 },
+    color,
+    thickness,
+  });
+}
+
+function drawTextInBox(page, value, {
+  x,
+  top,
+  width,
+  height,
+  font,
+  size,
+  color,
+  align = "left",
+  padding = 3,
+  lineHeight = size * 1.22,
+}) {
+  const lines = wrapPdfText(font, value, size, Math.max(1, width - padding * 2));
+  const ascent = font.heightAtSize(size, { descender: false });
+  const fullHeight = font.heightAtSize(size, { descender: true });
+  const blockHeight = fullHeight + Math.max(0, lines.length - 1) * lineHeight;
+  const boxBottom = PDF_PAGE_HEIGHT - top - height;
+  const blockTop = boxBottom + (height + blockHeight) / 2;
+  const firstBaseline = blockTop - ascent;
+  lines.forEach((line, index) => {
+    const textWidth = font.widthOfTextAtSize(line, size);
+    let textX = x + padding;
+    if (align === "center") textX = x + (width - textWidth) / 2;
+    if (align === "right") textX = x + width - padding - textWidth;
+    page.drawText(line, {
+      x: textX,
+      y: firstBaseline - index * lineHeight,
+      size,
+      font,
+      color,
+    });
+  });
+}
+
+function drawMixedLinesInBox(page, lines, { x, top, width, height, align = "left" }) {
+  if (!lines.length) return;
+  const blockHeight = lines.reduce((sum, line) => sum + line.lineHeight, 0);
+  const boxBottom = PDF_PAGE_HEIGHT - top - height;
+  let lineTop = boxBottom + (height + blockHeight) / 2;
+  lines.forEach((line) => {
+    const ascent = line.font.heightAtSize(line.size, { descender: false });
+    const textWidth = line.font.widthOfTextAtSize(line.text, line.size);
+    let textX = x;
+    if (align === "center") textX = x + (width - textWidth) / 2;
+    if (align === "right") textX = x + width - textWidth;
+    page.drawText(line.text, {
+      x: textX,
+      y: lineTop - ascent,
+      size: line.size,
+      font: line.font,
+      color: line.color,
+    });
+    lineTop -= line.lineHeight;
+  });
+}
+
+function measureTextBlock(font, value, size, maxWidth, lineHeight = size * 1.22) {
+  const lines = wrapPdfText(font, value, size, Math.max(1, maxWidth));
+  return font.heightAtSize(size, { descender: true }) + Math.max(0, lines.length - 1) * lineHeight;
+}
+
+function wrapPdfText(font, value, size, maxWidth) {
+  const normalized = normalizePdfText(value || "-");
+  const output = [];
+  normalized.split("\n").forEach((paragraph) => {
+    if (!paragraph) {
+      output.push("");
+      return;
+    }
+    let line = "";
+    let lastBreak = -1;
+    for (const character of paragraph) {
+      const candidate = line + character;
+      if (line && font.widthOfTextAtSize(candidate, size) > maxWidth) {
+        if (lastBreak > 0) {
+          output.push(line.slice(0, lastBreak).trimEnd());
+          line = `${line.slice(lastBreak).trimStart()}${character}`;
+        } else {
+          output.push(line);
+          line = character;
+        }
+        lastBreak = /\s/.test(line) ? line.length - 1 : -1;
+      } else {
+        line = candidate;
+        if (/\s/.test(character)) lastBreak = line.length - 1;
+      }
+    }
+    output.push(line || "-");
+  });
+  return output.length ? output : ["-"];
+}
+
+function normalizePdfText(value) {
+  return String(value ?? "-")
+    .replace(/[\u2010-\u2015]/g, "-")
+    .replace(/\u00a0/g, " ")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "")
+    .trim() || "-";
 }
 
 function paginateDetailPages(categories, staging, employee) {
@@ -656,18 +1337,36 @@ function waitForPaint() {
 function loadPdfLibraries() {
   if (pdfLibrariesPromise) return pdfLibrariesPromise;
   pdfLibrariesPromise = Promise.all([
-    loadScript(HTML2CANVAS_URL, () => window.html2canvas),
     loadScript(PDFLIB_URL, () => window.PDFLib?.PDFDocument),
+    loadScript(FONTKIT_URL, () => window.fontkit),
   ]).then(() => {
-    const html2canvas = window.html2canvas;
-    const PDFDocument = window.PDFLib?.PDFDocument;
-    if (!html2canvas || !PDFDocument) throw new Error("PDF 생성 도구를 불러오지 못했습니다.");
-    return { html2canvas, PDFDocument };
+    const { PDFDocument, rgb } = window.PDFLib || {};
+    const fontkit = window.fontkit;
+    if (!PDFDocument || !rgb || !fontkit) throw new Error("PDF 생성 도구를 불러오지 못했습니다.");
+    return { PDFDocument, rgb, fontkit };
   }).catch((error) => {
     pdfLibrariesPromise = null;
     throw error;
   });
   return pdfLibrariesPromise;
+}
+
+function loadPdfFontBytes() {
+  if (pdfFontBytesPromise) return pdfFontBytesPromise;
+  pdfFontBytesPromise = Promise.all([
+    fetchPdfFont(PDF_FONT_REGULAR_URL),
+    fetchPdfFont(PDF_FONT_BOLD_URL),
+  ]).then(([regular, bold]) => ({ regular, bold })).catch((error) => {
+    pdfFontBytesPromise = null;
+    throw error;
+  });
+  return pdfFontBytesPromise;
+}
+
+async function fetchPdfFont(url) {
+  const response = await fetch(url, { cache: "force-cache" });
+  if (!response.ok) throw new Error(`PDF 글꼴을 불러오지 못했습니다. (${response.status})`);
+  return response.arrayBuffer();
 }
 
 function loadScript(src, ready) {
