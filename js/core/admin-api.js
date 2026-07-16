@@ -98,7 +98,7 @@ export async function bulkDeleteEmployeeAccounts({ uids }) {
       await deleteEmployeeCallable({ uid });
       succeeded.push({ uid });
     } catch (err) {
-      console.error("[admin-api] bulkDeleteEmployeeAccounts uid error", uid, err?.code, err?.message);
+      console.error("[admin-api] bulkDeleteEmployeeAccounts failed", err?.code, err?.message);
       failed.push({ uid, message: err?.message ?? "삭제 실패" });
     }
   }
@@ -128,7 +128,7 @@ export async function bulkDeleteManagedAccounts({ uids }) {
       await deleteManagedAccountCallable({ uid });
       succeeded.push({ uid });
     } catch (err) {
-      console.error("[admin-api] bulkDeleteManagedAccounts uid error", uid, err?.code, err?.message);
+      console.error("[admin-api] bulkDeleteManagedAccounts failed", err?.code, err?.message);
       failed.push({ uid, message: err?.message ?? "삭제 실패" });
     }
   }

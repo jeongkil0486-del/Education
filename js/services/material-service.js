@@ -204,11 +204,9 @@ export async function listMaterials(options = {}) {
     && Array.isArray(materialListCache.items)
     && Date.now() - materialListCache.loadedAt <= maxAgeMs
   ) {
-    console.info("[material-service] listMaterials cache hit", { count: materialListCache.items.length });
     return materialListCache.items;
   }
   const fn = httpsCallable(functions, "listMaterials");
-  console.info("[material-service] listMaterials request", { uid: authStore.uid, role: authStore.role, companyId: authStore.companyId, branchId: authStore.branchId });
   const result = await fn({});
   const items = Array.isArray(result.data?.materials)
     ? result.data.materials
@@ -217,13 +215,6 @@ export async function listMaterials(options = {}) {
       : Array.isArray(result.data?.rows)
         ? result.data.rows
         : Array.isArray(result.data) ? result.data : [];
-  console.info("[material-service] listMaterials response", {
-    count: items.length,
-    sample: items[0]
-      ? { id: items[0].id, title: items[0].title, fileType: items[0].fileType, hasFile: Boolean(items[0].r2Key || items[0].url) }
-      : null,
-  });
-
   const normalizedItems = items
     .map((item) => {
       const trainingType = normalizeMaterialType(item.trainingType);

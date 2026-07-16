@@ -422,17 +422,6 @@ async function runLedgerQuery() {
         ? branchEmployees.filter((employee) => !instructorHistories.some((history) => historyBelongsToEmployee(history, employee)))
         : branchEmployees;
     ledgerRows = aggregateLedger(ledgerEmployees, relevant, trainingMeta, cycleMonths);
-    logLedgerMatchDiagnostics({
-      trainingMeta,
-      selectedTrainingKey,
-      allHistories,
-      relevant,
-      branchEmployees,
-      ledgerEmployees,
-      ledgerRows,
-      cycleConfigLookupKeys: educationCycleLookupKeys(trainingMeta),
-      resolvedCycleConfig,
-    });
 
     document.getElementById("ledger-title").textContent = `${branchLabel} · ${trainingLabel}`;
     document.getElementById("ledger-subtitle").textContent = `기준연도: ${CY}년${cycleMonths ? ` · 재교육 주기: ${cycleMonths}개월` : " · 재교육 주기: 미설정"}`;
@@ -794,126 +783,6 @@ function filterByTraining(histories, meta) {
     if (recordKey === selectedKey || recordKeys.has(selectedKey)) return true;
     if (meta.itemId && history.itemId && String(history.itemId) === String(meta.itemId)) return true;
     return false;
-  });
-}
-
-function logLedgerMatchDiagnostics({
-  trainingMeta,
-  selectedTrainingKey,
-  allHistories,
-  relevant,
-  branchEmployees,
-  ledgerEmployees,
-  ledgerRows,
-  cycleConfigLookupKeys,
-  resolvedCycleConfig,
-}) {
-  const perEmployeeMatchedCount = branchEmployees
-    .map((employee) => {
-      const uid = String(employee.id ?? employee.uid ?? "");
-      const matchedCount = relevant.filter((history) => historyBelongsToEmployee(history, employee)).length;
-      return { uid, empNo: employee.empNo ?? employee.employeeNo ?? "", name: employee.name ?? "", matchedCount };
-    })
-    .sort((a, b) => b.matchedCount - a.matchedCount)
-    .slice(0, 10);
-
-  const diagnosticKeys = [
-    LEDGER_JOB_DUTY_KEY,
-    LEDGER_JOB_INSTRUCTOR_KEY,
-    "job_wb",
-    "job_operations",
-    "legal_sms",
-    "legal_security",
-    "legal_dangerous_goods",
-  ];
-  const options = buildTrainingOptions(viewState.items);
-  const keySamples = Object.fromEntries(diagnosticKeys.map((key) => {
-    const meta = options.find((option) => canonicalLedgerMetaKey(option) === key);
-    const matches = meta ? filterByTraining(allHistories, meta) : [];
-    return [key, {
-      selectedValue: meta?.value ?? "",
-      matchedCount: matches.length,
-      matchedKeys: [...new Set(matches.slice(0, 5).flatMap((history) => [...ledgerRecordKeys(history)]))],
-    }];
-  }));
-  const rowsWithHistory = (ledgerRows ?? []).filter((row) => row.hasHistory);
-  const recurrentRows = rowsWithHistory.filter((row) => row._hasRecurrent);
-  const initialOnlyRows = rowsWithHistory.filter((row) => row._initialOnly);
-  const cycleConfiguredRows = rowsWithHistory.filter((row) => row.cycleMonths > 0 && row._cycleBaseDate);
-  const failedDueRows = cycleConfiguredRows.filter((row) => !row.nextDueDate);
-
-  console.info("[employees] ledger match diagnostics", {
-    selectedTrainingItem: trainingMeta,
-    selectedCanonicalKey: selectedTrainingKey,
-    selectedSubjectCode: trainingMeta?.subjectCode ?? "",
-    selectedSubjectName: trainingMeta?.subjectName ?? "",
-    allEmployeesCount: branchEmployees.length,
-    allHistoryRowsCount: allHistories.length,
-    matchedHistoryRowsCount: relevant.length,
-    matchedHistoryRowsSample: relevant.slice(0, 10).map((row) => ({
-      id: row?.id ?? row?.historyId ?? "",
-      source: row?._source ?? row?.source ?? "manual",
-      employeeUid: historyEmployeeUid(row),
-      trainingType: row?.trainingType ?? "",
-      stage: row?.stage ?? "",
-      trainingStage: row?.trainingStage ?? "",
-      subType: row?.subType ?? "",
-      courseStage: row?.courseStage ?? "",
-      isInitial: row?.isInitial ?? null,
-      resolvedStage: ledgerRecordStage(row),
-      courseName: row?.courseName ?? row?.title ?? "",
-      subjectName: row?.subjectName ?? "",
-      canonicalKey: canonicalLedgerRecordKey(row),
-      educationYear: row?.educationYear ?? null,
-      educationStage: row?.educationStage ?? "",
-      completedAt: row?.completedAt ?? null,
-      startDate: row?.startDate ?? null,
-      endDate: row?.endDate ?? null,
-    })),
-    perEmployeeMatchedCount,
-    finalRenderedCount: ledgerEmployees.length,
-    aggregateCounts: {
-      employees: ledgerEmployees.length,
-      matchedHistoryZero: ledgerEmployees.length - rowsWithHistory.length,
-      initialOnly: initialOnlyRows.length,
-      recurrent: recurrentRows.length,
-      cycleConfigFound: cycleConfiguredRows.length,
-      nextDueDateCalculated: cycleConfiguredRows.filter((row) => row.nextDueDate).length,
-      eligibleWithConfigButNoDue: failedDueRows.length,
-    },
-    eligibleWithConfigButNoDue: failedDueRows.map((row) => ({
-      name: row.name,
-      empNo: row.empNo,
-      uid: row.uid,
-      canonicalKey: selectedTrainingKey,
-      matchedRows: relevant.filter((history) => historyBelongsToEmployee(history, row._emp)).length,
-      latestRecurrentDate: row._latestRecurrentDate,
-      cycleBaseDate: row._cycleBaseDate,
-      latestHistoryStage: ledgerRecordStage(row._latestHistory),
-      cycleMonths: row.cycleMonths,
-      reason: row._dueReason,
-    })),
-    cycleConfigLookupKeys,
-    resolvedCycleConfig: resolvedCycleConfig ? {
-      cycleMonths: resolvedCycleConfig.cycleMonths ?? 0,
-      defaultDuration: resolvedCycleConfig.defaultDuration ?? 0,
-    } : null,
-    displayedYearValues: (ledgerRows ?? []).filter((row) => row.hasHistory).slice(0, 10).map((row) => ({
-      employeeUid: row.uid,
-      empNo: row.empNo,
-      computedYearValues: { [PY]: row.prevDates, [CY]: row.currDates },
-      computedInitialDate: row.initialDate,
-      computedLatestDate: row.lastDate,
-      latestRecurrentDate: row._latestRecurrentDate,
-      cycleBaseDate: row._cycleBaseDate,
-      latestHistoryStage: ledgerRecordStage(row._latestHistory),
-      nextDueDate: row.nextDueDate,
-      remainingDays: row.daysRemaining,
-      status: row.dueStatusLabel,
-      note: row.note,
-      reason: row._dueReason,
-    })),
-    keySamples,
   });
 }
 
@@ -2138,19 +2007,7 @@ async function openCycleConfigModal() {
               cycleMonths:  val,
               defaultDuration,
             };
-            console.info("[employees] saveEducationCycleConfig request", {
-              selectedEducation: trainingMeta,
-              currentUser: {
-                uid: authStore.uid,
-                role: authStore.role,
-                companyId: authStore.companyId,
-                branchId: authStore.branchId,
-              },
-              candidateCompanyIds: [...new Set(viewState.branches.map((item) => item?.companyId).filter(Boolean))],
-              payload,
-            });
-            const result = await saveEducationCycleConfig(payload);
-            console.info("[employees] saveEducationCycleConfig response", result);
+            await saveEducationCycleConfig(payload);
             toast.success(`재교육 주기와 기본 교육시간이 저장되었습니다.`);
             modal.close();
             await refreshViewState();
@@ -2161,8 +2018,6 @@ async function openCycleConfigModal() {
             console.error("[employees] saveEducationCycleConfig failed", {
               code: err?.code,
               message: err?.message,
-              details: err?.details,
-              error: err,
             });
             toast.error(err?.message || "저장에 실패했습니다.");
             modal.setLoading("저장", false);
@@ -2189,7 +2044,7 @@ async function openCycleConfigModal() {
       if (!currentCycle && trainingMeta.itemId) {
         currentCycle = Number(viewState.items.find((item) => item.id === trainingMeta.itemId)?.cycleMonths ?? 0) || 0;
       }
-    } catch (error) { console.warn("[employees] cycle config lookup failed", error); }
+    } catch (error) { console.warn("[employees] cycle config lookup failed", error?.message); }
     if (label) label.textContent = currentCycle ? `${currentCycle}개월` : "미설정";
     if (input) input.value = String(currentCycle);
     if (durationInput) durationInput.value = String(currentDuration);
@@ -2507,7 +2362,6 @@ async function parseHistoryUploadFileInline(event) {
       const year = match[1] ? Number(match[1]) : 2000 + Number(match[2]);
       return year >= 2000 && year <= 2100 ? { year, index } : null;
     }).filter(Boolean);
-    console.info("[ledger-upload] detectedYears", yearColumns.map(({ year }) => year));
     const col = {
       name:     headers.indexOf("성명"),
       empNo:    headers.indexOf("사번"),
@@ -2565,10 +2419,6 @@ async function parseHistoryUploadFileInline(event) {
     const invalid    = nonSkipped.filter((r) => r._errors.length);
     const valid      = nonSkipped.filter((r) => !r._errors.length);
     const skippedCnt = pendingHistoryRows.filter((r) => r._skip).length;
-    console.info("[ledger-upload] preview yearValues", pendingHistoryRows.slice(0, 3).map((row) => ({
-      empNo: row.empNo,
-      yearValues: row.yearDates,
-    })));
 
     previewEl.innerHTML = `
       <div style="margin-bottom:var(--space-2)">
@@ -2671,11 +2521,6 @@ async function submitHistoryUploadInline() {
   }
 
   if (!historyEntries.length) { toast.warning("업로드할 날짜가 없습니다."); return; }
-  console.info("[ledger-upload] payload yearValues", historyEntries.slice(0, 6).map((entry) => ({
-    empNo: entry.empNo,
-    educationYear: entry.educationYear,
-    completedAt: entry.completedAt,
-  })));
   if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = "업로드 중..."; }
   if (resultEl)  resultEl.textContent = "";
 
@@ -2688,7 +2533,6 @@ async function submitHistoryUploadInline() {
         branchName: getSelectedBranch()?.name ?? "",
       },
     });
-    console.info("[ledger-upload] savedYearValues", result?.savedYearValues ?? []);
     const msg = `✅ 등록 ${result.succeededCount ?? 0}건 · 중복 ${result.skippedCount ?? 0}건 · 실패 ${result.failedCount ?? 0}건`;
     if (resultEl) resultEl.innerHTML = `<span style="color:var(--color-success,#16a34a)">${esc(msg)}</span>`;
     toast.success(msg);

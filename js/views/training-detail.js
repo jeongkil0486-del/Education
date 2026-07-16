@@ -41,7 +41,7 @@ async function loadDetail(container, trainingId) {
     state = { detail, selectedIds: new Set() };
     renderDetail(container);
   } catch (err) {
-    console.error("[training-detail] loadDetail failed", err?.code, err?.message, err);
+    console.error("[training-detail] loadDetail failed", err?.code, err?.message);
     toast.error("교육 상세 정보를 불러오지 못했습니다.");
   }
 }
@@ -154,7 +154,7 @@ function bindEvents(container) {
         toast.success("배정이 해제되었습니다.");
         await loadDetail(document.getElementById("page-content"), training.id);
       } catch (err) {
-        console.error("[training-detail] unassign failed", err?.code, err?.message, err);
+        console.error("[training-detail] unassign failed", err?.code, err?.message);
         toast.error("배정 해제 중 오류가 발생했습니다.");
       }
     });
@@ -263,7 +263,7 @@ async function handleAssign(trainingId) {
   // trainingId 방어: 파라미터가 undefined면 state에서 재추출
   const safeTrainingId = trainingId ?? state.detail?.training?.id ?? state.detail?.training?.trainingId;
   if (!safeTrainingId) {
-    console.error("[training-detail] handleAssign: trainingId를 확인할 수 없습니다.", { trainingId, stateTraining: state.detail?.training });
+    console.error("[training-detail] handleAssign: trainingId를 확인할 수 없습니다.");
     toast.error("교육 ID를 확인할 수 없습니다. 페이지를 새로고침 해주세요.");
     return;
   }
@@ -280,15 +280,13 @@ async function handleAssign(trainingId) {
   if (btn) { btn.disabled = true; btn.textContent = "배정 중…"; }
 
   try {
-    console.log("[training-detail] assigning uids:", newIds, "to trainingId:", safeTrainingId);
     // training 객체에 id가 있는지 보장
     const trainingObj = { ...state.detail.training, id: safeTrainingId };
     await assignEmployees(trainingObj, newIds, state.detail.references);
     toast.success(`${newIds.length}명에게 교육이 배정되었습니다.`);
     await loadDetail(document.getElementById("page-content"), safeTrainingId);
   } catch (err) {
-    console.error("[training-detail] assign failed",
-      { trainingId: safeTrainingId, selectedUids: newIds, code: err?.code, message: err?.message }, err);
+    console.error("[training-detail] assign failed", { code: err?.code, message: err?.message });
     toast.error(`교육 배정 중 오류: ${err?.message ?? "알 수 없는 오류"}`);
     if (btn) { btn.disabled = false; btn.textContent = "선택 직원 배정"; }
   }
@@ -439,7 +437,7 @@ function openEditModal(training) {
           modal.close();
           await loadDetail(document.getElementById("page-content"), training.id);
         } catch (err) {
-          console.error("[training-detail] update failed", err?.code, err?.message, err);
+          console.error("[training-detail] update failed", err?.code, err?.message);
           toast.error("교육 수정 중 오류가 발생했습니다.");
           modal.setLoading(label, false);
         }
@@ -469,7 +467,7 @@ function confirmComplete(trainingId, title) {
           if (err?.message === "NO_ASSIGNMENTS") {
             toast.error("배정된 직원이 없습니다. 직원을 먼저 배정해 주세요.");
           } else {
-            console.error("[training-detail] complete failed", err?.code, err?.message, err);
+            console.error("[training-detail] complete failed", err?.code, err?.message);
             toast.error("완료 처리 중 오류가 발생했습니다.");
           }
           modal.setLoading("완료", false);
@@ -488,7 +486,7 @@ function confirmClose(trainingId, title) {
       {label:"종료",variant:"primary",onClick:async()=>{
         modal.setLoading("종료",true);
         try{await closeTraining(trainingId);toast.success("교육이 종료 처리되었습니다.");modal.close();await loadDetail(document.getElementById("page-content"),trainingId);}
-        catch(err){console.error("[training-detail] close",err?.code,err?.message,err);toast.error("오류가 발생했습니다.");modal.setLoading("종료",false);}
+        catch(err){console.error("[training-detail] close",err?.code,err?.message);toast.error("오류가 발생했습니다.");modal.setLoading("종료",false);}
       }},
     ],
   });

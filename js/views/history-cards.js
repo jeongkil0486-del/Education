@@ -438,7 +438,6 @@ function openEmployeeProfileModal() {
         const field = (id) => modalRoot?.querySelector(`#${id}`);
         const nameInput = field("profile-name");
         const name = String(nameInput?.value ?? "").trim();
-        console.info("[history-cards] profile save", { uid: employee.uid ?? employee.id, inputId: nameInput?.id ?? "", rawName: nameInput?.value ?? "", name });
         if (!name) { toast.warning("성명을 입력해 주세요."); return; }
         modal.setLoading("저장", true);
         try {
@@ -1360,19 +1359,12 @@ function openImportExcelModal() {
           }
           modal.setLoading("저장", true);
           try {
-            console.info("[history-cards] import payload", {
-              parsedCount: analyzed.rows.length,
-              validCount: payload.length,
-              selectedEmployeeUid: S.selectedEmployeeId,
-              records: payload,
-            });
             const result = await importHistoryExcelData({
               rows: payload,
               mode,
               targetEmployeeUid: S.selectedEmployeeId || "",
               profile: analyzed.empInfo ?? {},
             });
-            console.info("[history-cards] import result", result);
 
             // 상세 결과 구성
             const totalSaved = (result.createdCount ?? 0) + (result.updatedCount ?? 0);

@@ -40,7 +40,7 @@ function preparePdfRuntime() {
 function createPerformanceTracker(params) {
   const launchAt = Number(window.__slideshowLaunchAt) || performance.now();
   delete window.__slideshowLaunchAt;
-  const enabled = params.perf === "1" || /(^localhost$|^127\.|\.vercel\.app$)/.test(window.location.hostname);
+  const enabled = params.perf === "1";
   const marks = { launch: launchAt };
   return {
     mark(name) { marks[name] = performance.now(); },

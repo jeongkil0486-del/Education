@@ -1074,12 +1074,6 @@ export function renderDetailedPreview(container, preview) {
     const previousDirection = sortState.column === key ? sortState.direction : null;
     const nextDirection = previousDirection === null ? "asc" : previousDirection === "asc" ? "desc" : null;
     sortState = { column: nextDirection ? key : null, direction: nextDirection };
-    console.info("[excel-preview-sort] header clicked", {
-      column: key,
-      previousDirection,
-      nextDirection,
-      rowCount: rows.length,
-    });
     renderTable();
   };
 
@@ -1237,31 +1231,6 @@ export async function analyzeExcel(file) {
     }
   }
 
-  console.info("[excel-import-engine] parser diagnostics", parserDiagnostics);
-  console.info("[excel-import-engine] recurrent trace samples", allRows
-    .filter((row) => row.trainingType === "job" && row.initialOrRecurrent === "recurrent")
-    .slice(0, 10)
-    .map((row) => ({
-      sourceSheetName: row.sourceSheetName,
-      sourceRowNumber: row.sourceRowNumber,
-      sourceBlockStartRow: row.sourceBlockStartRow,
-      sourceBlockEndRow: row.sourceBlockEndRow,
-      rawCourseName: row.rawCourseName,
-      rawStage: row.rawStage,
-      rawPeriod: row.rawPeriod,
-      rawCompletedAt: row.rawCompletedAt,
-      courseName: row.courseName,
-      subjectName: row.subjectName,
-      trainingType: row.trainingType,
-      initialOrRecurrent: row.initialOrRecurrent,
-      instructor: row.instructor,
-      hours: row.hours,
-      startDate: row.startDate,
-      endDate: row.endDate,
-      result: row.result,
-      completedAt: row.completedAt,
-      importTraceId: row.importTraceId,
-    })));
   return { empInfo, rows: allRows, parsersUsed, parserDiagnostics, fileName: file.name };
 }
 
@@ -1274,22 +1243,6 @@ export function validateAndPreview(rows, lookups) {
     duplicate: validated.filter((r) => r._status === STATUS.DUPLICATE).length,
     error:     validated.filter((r) => r._status === STATUS.ERROR).length,
   };
-  console.info("[excel-import-engine] recurrent preview trace", validated
-    .filter((row) => row.trainingType === "job" && row.initialOrRecurrent === "recurrent")
-    .slice(0, 10)
-    .map((row) => ({
-      sourceSheetName: row.sourceSheetName,
-      sourceRowNumber: row.sourceRowNumber,
-      sourceBlockStartRow: row.sourceBlockStartRow,
-      sourceBlockEndRow: row.sourceBlockEndRow,
-      courseName: row.courseName,
-      subjectName: row.subjectName,
-      trainingType: row.trainingType,
-      subType: row.initialOrRecurrent,
-      validatorStatus: row._status,
-      validatorDetail: row._statusDetail,
-      importTraceId: row.importTraceId,
-    })));
   return { summary, rows: validated };
 }
 

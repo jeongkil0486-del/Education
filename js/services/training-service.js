@@ -549,14 +549,14 @@ export async function assignEmployees(training, employeeIds, references = null) 
   const trainingId = training?.id ?? training?.trainingId;
   if (!trainingId) {
     const error = new Error("assignEmployees: trainingId is required.");
-    console.error("[training-service] assignEmployees error", { training, employeeIds }, error.message);
+    console.error("[training-service] assignEmployees error", error.message);
     throw error;
   }
 
   const refs = references ?? await loadTrainingReferences();
   const selectedUsers = refs.employees.filter((employee) => employeeIds.includes(employee.id ?? employee.uid));
   if (!selectedUsers.length) {
-    console.warn("[training-service] assignEmployees: no matched employees", { employeeIds });
+    console.warn("[training-service] assignEmployees: no matched employees");
     return;
   }
 
@@ -570,8 +570,7 @@ export async function assignEmployees(training, employeeIds, references = null) 
   } catch (err) {
     console.error(
       "[training-service] assignUsers failed",
-      { trainingId, employeeIds, code: err?.code, message: err?.message },
-      err
+      { code: err?.code, message: err?.message }
     );
     throw err;
   }

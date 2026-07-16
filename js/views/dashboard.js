@@ -42,7 +42,6 @@ let managementDashboardState = {
 async function renderManagementDashboard(container, role) {
   container.innerHTML = skeletonAdminDashboard();
   const isInstructor = role === ROLES.INSTRUCTOR;
-  const dashboardStartedAt = performance.now();
   const [deadlineLoad, settingsLoad, announcementLoad, materialLoad] = await Promise.all([
     loadDashboardResource("employee-deadlines", () => loadEmployeeDeadlineDashboardRows(), { rows: [], branches: [], employees: [] }),
     loadDashboardResource("notification-settings", () => settingsDB.getNotifications(), {}),
@@ -156,19 +155,6 @@ async function renderManagementDashboard(container, role) {
   });
   container.querySelectorAll('[data-dashboard-action="soon"], [data-dashboard-action="overdue"]').forEach((card) => {
     card.addEventListener("click", () => openDeadlineDashboardModal(card.dataset.dashboardAction));
-  });
-  console.info("[dashboard] management dashboard ready", {
-    role,
-    employeeCount: deadlineLoad.error ? null : (deadlineData.employees ?? []).length,
-    announcementCount: announcementLoad.error ? null : publishedAnnouncements.length,
-    materialCount: materialLoad.error ? null : materials.length,
-    deadlineCount: uniqueDeadlineRows.length,
-    durationMs: Math.round(performance.now() - dashboardStartedAt),
-    resources: [deadlineLoad, settingsLoad, announcementLoad, materialLoad].map(({ label, durationMs, error }) => ({
-      label,
-      durationMs,
-      ok: !error,
-    })),
   });
 }
 
@@ -779,7 +765,6 @@ function skeletonAdminDashboard() {
 
 /** DB 호출 실패 시 fallback 반환 — 화면이 죽지 않음 */
 async function loadDashboardResource(label, loader, fallback) {
-  const startedAt = performance.now();
   let timeoutId = null;
   try {
     const timeout = new Promise((_, reject) => {
@@ -789,7 +774,6 @@ async function loadDashboardResource(label, loader, fallback) {
       label,
       value: await Promise.race([loader(), timeout]),
       error: null,
-      durationMs: Math.round(performance.now() - startedAt),
     };
   } catch (error) {
     console.warn(`[dashboard] ${label} load failed:`, error?.message ?? error);
@@ -797,7 +781,6 @@ async function loadDashboardResource(label, loader, fallback) {
       label,
       value: fallback,
       error,
-      durationMs: Math.round(performance.now() - startedAt),
     };
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
