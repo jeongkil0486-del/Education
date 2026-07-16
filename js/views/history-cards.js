@@ -1827,12 +1827,23 @@ function openResetAllHistoryModal() {
 ────────────────────────────────────────────────────────── */
 async function handleDownload() {
   if (!S.selectedEmployee) { toast.warning("먼저 직원을 선택해 주세요."); return; }
+  const button = document.getElementById("btn-download-card");
+  const originalLabel = button?.textContent || "다운로드";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "PDF 생성 중...";
+  }
   try {
     const result = await exportEmployeeHistoryCard({ employee: S.selectedEmployee, rows: S.rows });
     toast.success(`${result.fileName} 다운로드가 시작되었습니다.`);
   } catch (err) {
     console.error("[history-cards] export failed", err);
     toast.error("이력카드 다운로드 중 오류가 발생했습니다.");
+  } finally {
+    if (button?.isConnected) {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
   }
 }
 
