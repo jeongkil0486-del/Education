@@ -4,6 +4,7 @@
  */
 
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { onValue, ref } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 import { router }   from "./router.js";
 import { authStore, isPortalRole } from "./auth.js";
 import { initNav }   from "../modules/nav.js";
@@ -12,10 +13,13 @@ import { initTopbar } from "../modules/topbar.js";
 import { showLogin } from "../views/login.js";
 import { toast }     from "../utils/toast.js";
 
-const { auth } = window.__firebase;
+const { auth, db } = window.__firebase;
+let stopPasswordResetWatch = null;
 
 export function boot() {
   onAuthStateChanged(auth, async (firebaseUser) => {
+    stopPasswordResetWatch?.();
+    stopPasswordResetWatch = null;
     hideSplash();
 
     if (!firebaseUser) {
@@ -31,17 +35,42 @@ export function boot() {
         showLoginScreen();
         return;
       }
+      if (["hq_admin", "instructor"].includes(authStore.role) && authStore.profile.mustChangePassword === true) {
+        showApp();
+        const { openRequiredPasswordChangeModal } = await import("../modules/change-password.js");
+        openRequiredPasswordChangeModal();
+        return;
+      }
       showApp();
       initTopbar();
       initNav();
       initNotifications();
       router.init();
+      if (["hq_admin", "instructor"].includes(authStore.role)) {
+        watchForPasswordReset(firebaseUser.uid);
+      }
     } catch (err) {
       console.error("[boot] Failed to load user profile", err);
       toast.error("사용자 정보를 불러오지 못했습니다. 다시 로그인하세요.");
       await auth.signOut();
       showLoginScreen();
     }
+  });
+}
+
+function watchForPasswordReset(uid) {
+  stopPasswordResetWatch = onValue(ref(db, `users/${uid}/mustChangePassword`), async (snapshot) => {
+    if (
+      snapshot.val() !== true ||
+      !["hq_admin", "instructor"].includes(authStore.role) ||
+      authStore.profile.mustChangePassword === true
+    ) return;
+    stopPasswordResetWatch?.();
+    stopPasswordResetWatch = null;
+    toast.warning("비밀번호가 초기화되어 로그아웃되었습니다. 임시 비밀번호로 다시 로그인해 주세요.");
+    await authStore.signOut();
+  }, (error) => {
+    console.warn("[boot] password reset watch failed", error?.code, error?.message);
   });
 }
 

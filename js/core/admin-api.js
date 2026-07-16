@@ -5,6 +5,8 @@ const { functions } = window.__firebase;
 const createEmployeesCallable      = httpsCallable(functions, "createEmployeeAccounts");
 const createManagedAccountCallable = httpsCallable(functions, "createManagedAccount");
 const updateManagedAccountCallable = httpsCallable(functions, "updateManagedAccount");
+const resetAccountPasswordCallable = httpsCallable(functions, "resetAccountPassword");
+const completeRequiredPasswordChangeCallable = httpsCallable(functions, "completeRequiredPasswordChange");
 const deleteEmployeeCallable       = httpsCallable(functions, "deleteEmployeeAccount");
 const deleteManagedAccountCallable = httpsCallable(functions, "deleteManagedAccount");
 const deleteEmployeeHistoryCallable = httpsCallable(functions, "deleteEmployeeHistory");
@@ -38,6 +40,16 @@ export async function createManagedAccount(payload) {
 
 export async function updateManagedAccount(payload) {
   const result = await updateManagedAccountCallable(payload);
+  return result.data;
+}
+
+export async function resetAccountPassword(payload) {
+  const result = await resetAccountPasswordCallable(payload);
+  return result.data;
+}
+
+export async function completeRequiredPasswordChange(payload) {
+  const result = await completeRequiredPasswordChangeCallable(payload);
   return result.data;
 }
 

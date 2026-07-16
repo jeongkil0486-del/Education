@@ -4,7 +4,13 @@
  */
 
 import { branchesDB, usersDB } from "../../core/db.js";
-import { createManagedAccount, deleteManagedAccount, bulkDeleteManagedAccounts, updateManagedAccount } from "../../core/admin-api.js";
+import {
+  bulkDeleteManagedAccounts,
+  createManagedAccount,
+  deleteManagedAccount,
+  resetAccountPassword,
+  updateManagedAccount,
+} from "../../core/admin-api.js";
 import { modal } from "../../utils/modal.js";
 import { toast } from "../../utils/toast.js";
 import { formatDate } from "../../utils/date.js";
@@ -176,7 +182,7 @@ function renderTable(list) {
           <th>소속 지점</th>
           <th>상태</th>
           <th>등록일</th>
-          <th style="width:120px"></th>
+          <th style="width:280px">작업</th>
         </tr>
       </thead>
       <tbody>
@@ -217,16 +223,14 @@ function renderTable(list) {
               <td>${formatDate(user?.createdAt)}</td>
               <td class="cell--actions">
                 <div style="display:flex;gap:4px;justify-content:flex-end">
-                  <button class="btn btn--ghost btn--sm btn-role" data-id="${uid}" data-role="${user?.role}" title="권한 변경">
-                    권한
+                  <button class="btn btn--ghost btn--sm btn-role" data-id="${uid}" data-role="${user?.role}" title="계정 수정">
+                    수정
                   </button>
-                  <button class="btn btn--ghost btn--sm btn-reset-pw" data-id="${uid}" title="비밀번호 초기화 안내">
-                    PW
+                  <button class="btn btn--ghost btn--sm btn-reset-pw" data-id="${uid}" title="비밀번호 초기화">
+                    비밀번호 초기화
                   </button>
                   <button class="btn btn--ghost btn--sm btn-delete" data-id="${uid}" data-name="${escAttr(user?.name)}" title="계정 삭제" style="color:var(--color-danger)" ${!isSelectable ? "disabled" : ""}>
-                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                      <path d="M2 3h10M5 3V2h4v1M4 3v8a1 1 0 001 1h4a1 1 0 001-1V3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
-                    </svg>
+                    삭제
                   </button>
                 </div>
               </td>
@@ -512,20 +516,82 @@ function openRoleModal(uid, currentRole) {
   toggleAssignedBranchSection(roleEl?.value, "edit");
 }
 
-function confirmResetPw() {
+function confirmResetPw(uid) {
+  const account = accountList.find((user) => accountKey(user) === uid);
+  if (!account || !MANAGEABLE_ROLES.includes(account.role)) {
+    toast.error("비밀번호를 초기화할 수 없는 계정입니다.");
+    return;
+  }
+
   modal.open({
-    title: "비밀번호 초기화 안내",
-    size: "sm",
+    title: "비밀번호 초기화",
+    size: "md",
     body: `
-      <p style="font-size:var(--text-sm);color:var(--gray-600)">
-        비밀번호 초기화는 현재 Firebase Console의 Authentication 메뉴에서 처리하고 있습니다.<br/><br/>
-        추후 필요하면 Cloud Function 기반 초기화 기능으로 확장할 수 있습니다.
-      </p>
+      <div style="display:flex;flex-direction:column;gap:var(--space-4)">
+        <div style="background:var(--gray-50);border:1px solid var(--gray-200);border-radius:var(--radius-md);padding:var(--space-3);font-size:var(--text-sm);line-height:1.8">
+          <div><strong>${esc(account.name || "-")}</strong> ${ROLE_LABELS[account.role] || esc(account.role)}의 비밀번호를 초기화합니다.</div>
+          <div>아이디: <span class="cell--mono">${esc(account.empNo || uid)}</span></div>
+          <div>역할: ${esc(ROLE_LABELS[account.role] || account.role)}</div>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label form-label--required" for="reset-account-password">새 임시 비밀번호</label>
+          <input class="form-control" id="reset-account-password" type="password" autocomplete="new-password" maxlength="128" />
+          <div class="form-hint">8자 이상이며 영문·숫자·특수문자 중 두 종류 이상을 사용해 주세요.</div>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label form-label--required" for="reset-account-password-confirm">새 임시 비밀번호 확인</label>
+          <input class="form-control" id="reset-account-password-confirm" type="password" autocomplete="new-password" maxlength="128" />
+        </div>
+        <div class="alert-banner alert-banner--warning" style="margin:0">
+          초기화하면 기존 로그인 세션이 폐기됩니다. 대상 사용자는 임시 비밀번호로 로그인한 뒤 다른 메뉴를 이용하기 전에 새 비밀번호로 변경해야 합니다.
+        </div>
+      </div>
     `,
     actions: [
-      { label: "확인", variant: "primary", onClick: () => modal.close() },
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      { label: "초기화", variant: "danger", onClick: () => submitPasswordReset(account) },
     ],
   });
+
+  ["reset-account-password", "reset-account-password-confirm"].forEach((id) => {
+    document.getElementById(id)?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") submitPasswordReset(account);
+    });
+  });
+}
+
+async function submitPasswordReset(account) {
+  const password = document.getElementById("reset-account-password")?.value?.trim() ?? "";
+  const confirmation = document.getElementById("reset-account-password-confirm")?.value?.trim() ?? "";
+  const validationMessage = validateTemporaryPassword(password, confirmation);
+  if (validationMessage) {
+    toast.error(validationMessage);
+    return;
+  }
+
+  modal.setLoading("초기화", true);
+  try {
+    await resetAccountPassword({ uid: accountKey(account), newPassword: password });
+    modal.close();
+    toast.success(`${account.name || "대상 계정"}의 비밀번호가 초기화되었습니다.`);
+    await loadList();
+  } catch (error) {
+    console.error("[accounts] password reset failed", error?.code, error?.message);
+    toast.error(error?.message || "비밀번호 초기화 중 오류가 발생했습니다.");
+    modal.setLoading("초기화", false);
+  }
+}
+
+function validateTemporaryPassword(password, confirmation) {
+  if (!password) return "새 임시 비밀번호를 입력해 주세요.";
+  if (password.length < 8) return "새 임시 비밀번호는 최소 8자 이상이어야 합니다.";
+  if (password !== confirmation) return "새 임시 비밀번호가 일치하지 않습니다.";
+  if (/^(.)\1+$/.test(password) || ["password", "password1", "12345678", "qwerty123"].includes(password.toLowerCase())) {
+    return "너무 단순한 비밀번호는 사용할 수 없습니다.";
+  }
+  const categoryCount = [/[a-z]/i, /\d/, /[^a-z0-9]/i].filter((pattern) => pattern.test(password)).length;
+  if (categoryCount < 2) return "영문·숫자·특수문자 중 두 종류 이상을 사용해 주세요.";
+  return "";
 }
 
 function confirmDelete(uid, name) {

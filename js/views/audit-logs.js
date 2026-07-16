@@ -11,6 +11,8 @@ const ACTION_LABELS = {
   DELETE_TRAINING_HISTORY: "교육이력 삭제",
   UPDATE_EMPLOYEE_PROFILE: "직원 인적사항 수정",
   IMPORT_EMPLOYEE_LEDGER: "직원관리대장 업로드",
+  RESET_ACCOUNT_PASSWORD: "계정 비밀번호 초기화",
+  COMPLETE_REQUIRED_PASSWORD_CHANGE: "초기화 비밀번호 변경 완료",
 };
 
 const FIELD_LABELS = {

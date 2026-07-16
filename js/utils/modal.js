@@ -1,9 +1,10 @@
 import { TEXT } from "../constants/text.js";
 
 let onCloseHandler = null;
+let backdropClickHandler = null;
 
 export const modal = {
-  open({ title, body, size = "md", actions = [], onClose }) {
+  open({ title, body, size = "md", actions = [], onClose, dismissible = true }) {
     onCloseHandler = onClose ?? null;
 
     const actionsHtml = actions.map((action) => `
@@ -20,11 +21,11 @@ export const modal = {
       <div class="modal modal--${size}" role="dialog" aria-modal="true" aria-label="${title}">
         <div class="modal__header">
           <h2 class="modal__title">${title}</h2>
-          <button class="modal__close" id="modal-close-btn" aria-label="${TEXT.common.close}">
+          ${dismissible ? `<button class="modal__close" id="modal-close-btn" aria-label="${TEXT.common.close}">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
               <path d="M12 4L4 12M4 4l8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
             </svg>
-          </button>
+          </button>` : ""}
         </div>
         <div class="modal__body">${body}</div>
         ${actions.length ? `<div class="modal__footer">${actionsHtml}</div>` : ""}
@@ -39,11 +40,14 @@ export const modal = {
       if (action?.onClick) button.addEventListener("click", action.onClick);
     });
 
+    if (backdropClickHandler) backdrop.removeEventListener("click", backdropClickHandler);
+    backdropClickHandler = dismissible ? () => modal.close() : null;
+    if (backdropClickHandler) backdrop.addEventListener("click", backdropClickHandler);
+
     document.getElementById("modal-close-btn")?.addEventListener("click", () => modal.close());
-    backdrop.addEventListener("click", () => modal.close(), { once: true });
 
     const escHandler = (event) => {
-      if (event.key === "Escape") modal.close();
+      if (dismissible && event.key === "Escape") modal.close();
     };
     document.addEventListener("keydown", escHandler);
     container._escHandler = escHandler;
@@ -56,6 +60,11 @@ export const modal = {
     document.getElementById("modal-backdrop")?.classList.add("hidden");
 
     const container = document.getElementById("modal-container");
+    const backdrop = document.getElementById("modal-backdrop");
+    if (backdrop && backdropClickHandler) {
+      backdrop.removeEventListener("click", backdropClickHandler);
+      backdropClickHandler = null;
+    }
     if (container?._escHandler) {
       document.removeEventListener("keydown", container._escHandler);
       delete container._escHandler;

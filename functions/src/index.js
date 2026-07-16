@@ -858,6 +858,149 @@ exports.updateManagedAccount = onCall(OPTS, async (request) => {
   };
 });
 
+exports.resetAccountPassword = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await getUserProfile(request.auth.uid);
+  if (!actor || actor.role !== "super_admin") {
+    throw new HttpsError("permission-denied", "슈퍼관리자만 비밀번호를 초기화할 수 있습니다.");
+  }
+
+  const targetUid = normalizeText(request.data?.uid);
+  const { password, error } = validateManagedPassword(request.data?.newPassword);
+  if (!targetUid) throw new HttpsError("invalid-argument", "대상 계정 UID가 필요합니다.");
+  if (targetUid === request.auth.uid) {
+    throw new HttpsError("failed-precondition", "본인 또는 슈퍼관리자 계정의 비밀번호는 초기화할 수 없습니다.");
+  }
+  if (error) throw new HttpsError("invalid-argument", error);
+
+  const target = await getUserProfile(targetUid);
+  if (!target) throw new HttpsError("not-found", "대상 계정을 찾을 수 없습니다.");
+  if (!["hq_admin", "instructor"].includes(target.role)) {
+    throw new HttpsError("failed-precondition", "본사 교육관리자와 강사 계정만 초기화할 수 있습니다.");
+  }
+
+  try {
+    await auth.getUser(targetUid);
+    await auth.updateUser(targetUid, { password });
+    await auth.revokeRefreshTokens(targetUid);
+
+    const resetAt = Date.now();
+    await db.ref(`users/${targetUid}`).update({
+      mustChangePassword: true,
+      passwordResetAt: resetAt,
+      passwordResetBy: actor.uid,
+      updatedAt: admin.database.ServerValue.TIMESTAMP,
+    });
+
+    const auditLog = await writeAuditLogSafe({
+      companyId: target.companyId || await resolveActorCompanyId(actor),
+      actor,
+      action: "RESET_ACCOUNT_PASSWORD",
+      category: "ACCOUNT",
+      target: {
+        type: "ACCOUNT",
+        uid: targetUid,
+        name: target.name,
+        empNo: target.empNo,
+        branchId: target.branchId,
+        branchName: target.branchName,
+      },
+      summary: `${target.name || target.empNo || targetUid} 계정의 비밀번호를 초기화했습니다.`,
+      metadata: { targetRole: target.role, refreshTokensRevoked: true },
+    });
+
+    return {
+      uid: targetUid,
+      role: target.role,
+      mustChangePassword: true,
+      refreshTokensRevoked: true,
+      auditLogCreated: !!auditLog,
+      message: "비밀번호가 초기화되었습니다.",
+    };
+  } catch (err) {
+    if (err instanceof HttpsError) throw err;
+    if (err?.code === "auth/user-not-found") {
+      throw new HttpsError("not-found", "Firebase Authentication 계정을 찾을 수 없습니다.");
+    }
+    logger.error("resetAccountPassword error", {
+      actorUid: actor.uid,
+      targetUid,
+      code: err?.code,
+      message: err?.message,
+    });
+    throw new HttpsError("internal", "비밀번호 초기화 중 오류가 발생했습니다.");
+  }
+});
+
+exports.completeRequiredPasswordChange = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await getUserProfile(request.auth.uid);
+  if (!actor || !["hq_admin", "instructor"].includes(actor.role)) {
+    throw new HttpsError("permission-denied", "비밀번호를 변경할 수 없는 계정입니다.");
+  }
+  if (actor.mustChangePassword !== true) {
+    throw new HttpsError("failed-precondition", "강제 비밀번호 변경 대상이 아닙니다.");
+  }
+
+  const passwordResetAt = Number(actor.passwordResetAt) || 0;
+  const authenticatedAt = Number(request.auth.token?.auth_time) * 1000 || 0;
+  if (!passwordResetAt || authenticatedAt + 1000 < passwordResetAt) {
+    throw new HttpsError(
+      "unauthenticated",
+      "임시 비밀번호로 다시 로그인한 후 새 비밀번호를 설정해 주세요."
+    );
+  }
+
+  const { password, error } = validateManagedPassword(request.data?.newPassword);
+  if (error) throw new HttpsError("invalid-argument", error);
+
+  try {
+    await auth.updateUser(actor.uid, { password });
+    await auth.revokeRefreshTokens(actor.uid);
+    const changedAt = Date.now();
+    await db.ref(`users/${actor.uid}`).update({
+      mustChangePassword: false,
+      passwordChangedAt: changedAt,
+      passwordChangedBy: actor.uid,
+      updatedAt: admin.database.ServerValue.TIMESTAMP,
+    });
+
+    const auditLog = await writeAuditLogSafe({
+      companyId: actor.companyId || await resolveActorCompanyId(actor),
+      actor,
+      action: "COMPLETE_REQUIRED_PASSWORD_CHANGE",
+      category: "ACCOUNT",
+      target: {
+        type: "ACCOUNT",
+        uid: actor.uid,
+        name: actor.name,
+        empNo: actor.empNo,
+        branchId: actor.branchId,
+        branchName: actor.branchName,
+      },
+      summary: `${actor.name || actor.empNo || actor.uid} 계정이 초기화된 비밀번호를 변경했습니다.`,
+      metadata: { refreshTokensRevoked: true },
+    });
+
+    return {
+      uid: actor.uid,
+      mustChangePassword: false,
+      refreshTokensRevoked: true,
+      auditLogCreated: !!auditLog,
+      signInRequired: true,
+      message: "비밀번호가 변경되었습니다. 새 비밀번호로 다시 로그인해 주세요.",
+    };
+  } catch (err) {
+    if (err instanceof HttpsError) throw err;
+    logger.error("completeRequiredPasswordChange error", {
+      actorUid: actor.uid,
+      code: err?.code,
+      message: err?.message,
+    });
+    throw new HttpsError("internal", "비밀번호 변경 중 오류가 발생했습니다.");
+  }
+});
+
 exports.deleteEmployeeAccount = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
   await ensureSuperAdmin(request.auth.uid);
@@ -2923,6 +3066,21 @@ function normalizeEmpNo(value) {
 
 function normalizeText(value) {
   return String(value ?? "").trim();
+}
+
+function validateManagedPassword(value) {
+  const password = String(value ?? "").trim();
+  if (!password) return { password, error: "새 비밀번호를 입력해 주세요." };
+  if (password.length < 8) return { password, error: "비밀번호는 최소 8자 이상이어야 합니다." };
+  if (password.length > 128) return { password, error: "비밀번호는 최대 128자까지 입력할 수 있습니다." };
+  if (/^(.)\1+$/.test(password) || ["password", "password1", "12345678", "qwerty123"].includes(password.toLowerCase())) {
+    return { password, error: "너무 단순한 비밀번호는 사용할 수 없습니다." };
+  }
+  const categoryCount = [/[a-z]/i, /\d/, /[^a-z0-9]/i].filter((pattern) => pattern.test(password)).length;
+  if (categoryCount < 2) {
+    return { password, error: "영문·숫자·특수문자 중 두 종류 이상을 사용해 주세요." };
+  }
+  return { password, error: "" };
 }
 
 function normalizeStringArray(value) {
