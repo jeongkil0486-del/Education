@@ -4,7 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#0f1923" />
-  <title>TAS WT — Web Training</title>
+  <title>TAS Education Lab</title>
+
+  <!-- Browser favicon -->
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
 
   <!-- PWA -->
   <link rel="manifest" href="manifest.json" />
@@ -31,7 +36,7 @@
     <div id="splash" class="splash">
       <div class="splash__logo">
         <span class="splash__mark">TAS</span>
-        <span class="splash__sub">Web Training</span>
+        <span class="splash__sub">TAS Education Lab</span>
       </div>
       <div class="splash__spinner"></div>
     </div>
@@ -47,7 +52,7 @@
         <div class="sidebar__header">
           <div class="sidebar__brand">
             <span class="sidebar__brand-mark">TAS</span>
-            <span class="sidebar__brand-label">Web Training</span>
+            <span class="sidebar__brand-label">TAS Education Lab</span>
           </div>
           <button id="sidebar-toggle" class="sidebar__toggle" aria-label="사이드바 접기">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -93,7 +98,7 @@
           </div>
           <div class="topbar__right">
             <!-- Notification bell -->
-            <button class="topbar__icon-btn" id="btn-notifications" aria-label="알림">
+            <button class="topbar__icon-btn hidden" id="btn-notifications" aria-label="알림">
               <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
                 <path d="M10 2a6 6 0 00-6 6v3l-1.5 2.5h15L16 11V8a6 6 0 00-6-6zM8.5 17.5a1.5 1.5 0 003 0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
@@ -122,7 +127,6 @@
                 <div class="dropdown__user-meta" id="profile-meta">–</div>
               </div>
               <hr class="dropdown__divider" />
-              <button class="dropdown__item" id="btn-my-profile">내 정보</button>
               <button class="dropdown__item" id="btn-change-password">비밀번호 변경</button>
               <hr class="dropdown__divider" />
               <button class="dropdown__item dropdown__item--danger" id="btn-logout2">로그아웃</button>
@@ -159,25 +163,29 @@
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
     import { getAuth }       from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
     import { getDatabase }   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+    import { getFunctions }  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-functions.js";
+    import { getAnalytics, isSupported } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-analytics.js";
 
-    // ── Firebase config ─────────────────────────────
-    // TODO: Replace with your Firebase project config
+    // ── Firebase config: TAS Education Lab 전용 프로젝트 ──
     const firebaseConfig = {
-      apiKey:            "YOUR_API_KEY",
-      authDomain:        "YOUR_PROJECT.firebaseapp.com",
-      databaseURL:       "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
-      projectId:         "YOUR_PROJECT_ID",
-      storageBucket:     "YOUR_PROJECT.appspot.com",
-      messagingSenderId: "YOUR_SENDER_ID",
-      appId:             "YOUR_APP_ID",
+      apiKey:            "AIzaSyBFdKcSP39UiA_AG1iu8jEviZwGTDwPiFE",
+      authDomain:        "education-c6c2e.firebaseapp.com",
+      databaseURL:       "https://education-c6c2e-default-rtdb.firebaseio.com",
+      projectId:         "education-c6c2e",
+      storageBucket:     "education-c6c2e.firebasestorage.app",
+      messagingSenderId: "60535249400",
+      appId:             "1:60535249400:web:1fb11bfed9564cc01e5e0d",
+      measurementId:     "G-YB5N2XF8E5",
     };
 
     const firebaseApp = initializeApp(firebaseConfig);
     const auth        = getAuth(firebaseApp);
     const db          = getDatabase(firebaseApp);
+    const functions   = getFunctions(firebaseApp);
+    const analytics   = await isSupported().then(ok => ok ? getAnalytics(firebaseApp) : null).catch(() => null);
 
     // Make globally accessible for modules
-    window.__firebase = { app: firebaseApp, auth, db };
+    window.__firebase = { app: firebaseApp, auth, db, functions, analytics };
 
     // Bootstrap app after Firebase is ready
     const { boot } = await import("./js/core/app.js");

@@ -1,52 +1,48 @@
-/**
- * TAS WT — Toast Utility
- * Lightweight, auto-dismissing notification toasts.
- */
+import { TEXT } from "../constants/text.js";
 
 const DEFAULT_DURATION = 3500;
 
 export const toast = {
-  success: (msg, dur) => show(msg, "success", dur),
-  error:   (msg, dur) => show(msg, "error",   dur),
-  warning: (msg, dur) => show(msg, "warning", dur),
-  info:    (msg, dur) => show(msg, "info",    dur),
+  success: (message, duration) => show(message, "success", duration),
+  error: (message, duration) => show(message, "error", duration),
+  warning: (message, duration) => show(message, "warning", duration),
+  info: (message, duration) => show(message, "info", duration),
 };
 
 function show(message, type = "info", duration = DEFAULT_DURATION) {
   const container = document.getElementById("toast-container");
   if (!container) return;
 
-  const el = document.createElement("div");
-  el.className = `toast toast--${type}`;
+  const element = document.createElement("div");
+  element.className = `toast toast--${type}`;
 
   const icon = {
-    success: "✓",
-    error:   "✕",
-    warning: "⚠",
-    info:    "ℹ",
-  }[type] ?? "ℹ";
+    success: "OK",
+    error: "!",
+    warning: "!!",
+    info: "i",
+  }[type] ?? "i";
 
-  el.innerHTML = `
+  element.innerHTML = `
     <span style="font-size:var(--text-sm);flex-shrink:0;opacity:.8">${icon}</span>
     <span style="flex:1;line-height:var(--leading-normal)">${message}</span>
     <button
       style="opacity:.5;font-size:var(--text-xs);padding:0 var(--space-1);flex-shrink:0"
-      aria-label="닫기"
-    >✕</button>
+      aria-label="${TEXT.common.closeToast}"
+    >&times;</button>
   `;
 
-  el.querySelector("button").addEventListener("click", () => dismiss(el));
-  container.appendChild(el);
+  element.querySelector("button")?.addEventListener("click", () => dismiss(element));
+  container.appendChild(element);
 
-  // Auto dismiss
-  const timer = setTimeout(() => dismiss(el), duration);
-  el._timer = timer;
+  const timer = setTimeout(() => dismiss(element), duration);
+  element._timer = timer;
 }
 
-function dismiss(el) {
-  clearTimeout(el._timer);
-  el.style.opacity = "0";
-  el.style.transform = "translateY(4px)";
-  el.style.transition = "opacity 0.2s, transform 0.2s";
-  setTimeout(() => el.remove(), 220);
+function dismiss(element) {
+  clearTimeout(element._timer);
+  element.style.opacity = "0";
+  element.style.transform = "translateY(4px)";
+  element.style.transition = "opacity 0.2s, transform 0.2s";
+  setTimeout(() => element.remove(), 220);
 }

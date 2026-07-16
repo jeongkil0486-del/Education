@@ -1,4 +1,4 @@
-# TAS WT — Web Training Platform
+# TAS Learning Hub — Training Management Platform
 
 기업용 교육 관리 플랫폼 (LMS)
 

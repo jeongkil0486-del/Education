@@ -1,59 +1,74 @@
-/**
- * TAS WT — Trainings View (HQ Admin)
- * List, create, edit, delete trainings.
- * Each training can be assigned to users and tracked.
- */
+import { modal } from "../utils/modal.js";
+import { toast } from "../utils/toast.js";
+import { formatDate } from "../utils/date.js";
+import { router } from "../core/router.js";
+import { settingsDB } from "../core/db.js";
+import {
+  TRAINING_STATUS_LABELS,
+  TRAINING_TYPES,
+  TRAINING_TYPE_LABELS,
+  buildStatusChip,
+  closeTraining,
+  completeTraining,
+  computeTrainingStatus,
+  deleteTraining,
+  listManagedTrainings,
+  loadTrainingReferences,
+} from "../services/training-service.js";
+import {
+  getVisibleDeadlineBuckets,
+  normalizeNotificationSettings,
+  bucketIncludesTraining,
+} from "../services/notification-settings-service.js";
 
-import { authStore }    from "../core/auth.js";
-import { trainingsDB }  from "../core/db.js";
-import { modal }        from "../utils/modal.js";
-import { toast }        from "../utils/toast.js";
-import { formatDate, isOverdue, daysFromNow } from "../utils/date.js";
-import { router }       from "../core/router.js";
-
-let _allTrainings = [];
+let activeStatFilter = null;
+let state = {
+  references: null,
+  trainings: [],
+  notificationSettings: null,
+};
 
 export async function render(container) {
   container.innerHTML = `
     <div class="section-header">
       <div>
         <div class="section-title">교육 관리</div>
-        <div class="section-subtitle">교육을 등록하고 대상자를 지정하세요</div>
-      </div>
-      <button class="btn btn--primary" id="btn-create-training">
-        <svg class="btn__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
-          <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-        </svg>
-        교육 등록
-      </button>
-    </div>
-
-    <!-- Filter bar -->
-    <div class="filter-bar">
-      <div class="filter-bar__search input-group" style="flex:1;max-width:320px">
-        <svg class="input-group__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
-          <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.25"/>
-          <path d="M11 11l3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
-        </svg>
-        <input class="form-control" type="search" id="search-trainings" placeholder="교육명 검색…" />
-      </div>
-      <div class="filter-bar__selects">
-        <select class="form-control" id="filter-status" style="min-width:120px">
-          <option value="">전체 상태</option>
-          <option value="active">진행중</option>
-          <option value="upcoming">예정</option>
-          <option value="overdue">기한 초과</option>
-          <option value="closed">종료</option>
-        </select>
-      </div>
-      <div class="filter-bar__actions">
-        <button class="btn btn--secondary btn--sm" id="btn-export">
-          엑셀 다운로드
-        </button>
+        <div class="section-subtitle">강사가 등록한 교육 목록을 조회하고 운영 현황을 관리합니다.</div>
       </div>
     </div>
 
-    <!-- Table -->
+    <div class="dashboard-grid dashboard-grid--compact" id="training-stats" style="margin-bottom:var(--space-5)"></div>
+
+    <div class="card" style="margin-bottom:var(--space-5)">
+      <div class="card__body" style="padding:var(--space-4)">
+        <div style="display:flex;gap:var(--space-3);margin-bottom:var(--space-3)">
+          <div class="input-group" style="flex:2;min-width:200px">
+            <svg class="input-group__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.25"/>
+              <path d="M11 11l3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+            </svg>
+            <input class="form-control" id="search-trainings" type="search" placeholder="교육명으로 검색" />
+          </div>
+          <select class="form-control" id="filter-instructor" style="flex:1;min-width:140px">
+            <option value="">전체 강사</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:var(--space-3);flex-wrap:wrap">
+          <select class="form-control" id="filter-status" style="flex:1;min-width:110px">
+            <option value="">전체 상태</option>
+            ${Object.entries(TRAINING_STATUS_LABELS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}
+          </select>
+          <select class="form-control" id="filter-type" style="flex:1;min-width:110px">
+            <option value="">전체 유형</option>
+            ${TRAINING_TYPES.map((t) => `<option value="${t}">${TRAINING_TYPE_LABELS[t]}</option>`).join("")}
+          </select>
+          <select class="form-control" id="filter-branch" style="flex:1;min-width:130px">
+            <option value="">전체 지점</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
     <div class="table-wrap" id="trainings-table-wrap">
       <div style="display:flex;align-items:center;justify-content:center;padding:var(--space-12)">
         <div class="splash__spinner" style="border-color:var(--gray-200);border-top-color:var(--brand-400)"></div>
@@ -61,28 +76,118 @@ export async function render(container) {
     </div>
   `;
 
-  document.getElementById("btn-create-training")?.addEventListener("click", openCreateModal);
-  document.getElementById("search-trainings")?.addEventListener("input", e => filterTable(e.target.value));
-  document.getElementById("filter-status")?.addEventListener("change", e => filterTable(null, e.target.value));
-  document.getElementById("btn-export")?.addEventListener("click", exportToExcel);
+  document.getElementById("search-trainings")?.addEventListener("input", renderTable);
+  document.getElementById("filter-instructor")?.addEventListener("change", renderTable);
+  document.getElementById("filter-status")?.addEventListener("change", renderTable);
+  document.getElementById("filter-type")?.addEventListener("change", renderTable);
+  document.getElementById("filter-branch")?.addEventListener("change", renderTable);
 
-  await loadTrainings();
+  await loadData();
 }
 
-async function loadTrainings() {
-  _allTrainings = await trainingsDB.list(authStore.companyId);
-  renderTable(_allTrainings);
+async function loadData() {
+  try {
+    const [references, trainings, notifications] = await Promise.all([
+      loadTrainingReferences(),
+      listManagedTrainings(),
+      settingsDB.getNotifications().catch(() => null),
+    ]);
+
+    state = {
+      references,
+      trainings,
+      notificationSettings: normalizeNotificationSettings(notifications ?? {}),
+    };
+    if (!getVisibleDeadlineBuckets(state.notificationSettings).some((b) => b.key === activeStatFilter)) {
+      activeStatFilter = null;
+    }
+
+    fillInstructorFilter();
+    fillBranchFilter();
+    renderStats();
+    renderTable();
+  } catch (err) {
+    console.error("[trainings] load failed", err?.message, err);
+    toast.error("교육 데이터를 불러오지 못했습니다.");
+  }
 }
 
-function renderTable(trainings) {
+function fillInstructorFilter() {
+  const select = document.getElementById("filter-instructor");
+  if (!select) return;
+  const byId   = new Map();
+  const byName = new Map();
+  state.trainings.forEach((t) => {
+    if (t.instructorId && t.instructorName) { if (!byId.has(t.instructorId)) byId.set(t.instructorId, t.instructorName); }
+    else if (t.instructorName) { byName.set(t.instructorName, true); }
+  });
+  const optById   = Array.from(byId.entries()).map(([uid, name]) => `<option value="${uid}">${esc(name)}</option>`);
+  const optByName = Array.from(byName.keys()).filter((n) => ![...byId.values()].includes(n)).map((n) => `<option value="${esc(n)}">${esc(n)}</option>`);
+  select.innerHTML = `<option value="">전체 강사</option>${optById.join("")}${optByName.join("")}`;
+}
+
+function fillBranchFilter() {
+  const select = document.getElementById("filter-branch");
+  if (!select) return;
+  const branches = state.references?.branches ?? [];
+  select.innerHTML = `<option value="">전체 지점</option>${
+    branches.map((b) => `<option value="${b.id}">${esc(b.name ?? b.code ?? b.id)}</option>`).join("")
+  }`;
+}
+
+function renderStats() {
+  const wrap = document.getElementById("training-stats");
+  if (!wrap) return;
+
+  const visibleBuckets = getVisibleDeadlineBuckets(state.notificationSettings);
+  wrap.innerHTML = visibleBuckets.map((bucket) => {
+    const count = state.trainings.filter((t) => bucketIncludesTraining(bucket, t)).length;
+    const sub   = bucket.type === "completed" ? "완료 처리된 교육"
+                : bucket.type === "overdue"   ? "수료기한이 지난 교육"
+                : `오늘부터 ${bucket.days}일 이내 마감`;
+    const tone  = bucket.type === "completed" ? "success"
+                : bucket.type === "overdue"   ? "danger"
+                : "warning";
+    return `
+      <div class="stat-card stat-card--clickable ${activeStatFilter === bucket.key ? "stat-card--active" : ""}" data-key="${bucket.key}" style="cursor:pointer">
+        <div class="stat-card__label">${esc(bucket.label)}</div>
+        <div class="stat-card__value ${tone ? `stat-card__value--${tone}` : ""}">${count}</div>
+        <div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:2px">${sub}</div>
+      </div>`;
+  }).join("");
+
+  wrap.querySelectorAll(".stat-card--clickable").forEach((card) => {
+    card.addEventListener("click", () => {
+      activeStatFilter = activeStatFilter === card.dataset.key ? null : card.dataset.key;
+      renderStats();
+      renderTable();
+    });
+  });
+}
+
+function renderTable() {
   const wrap = document.getElementById("trainings-table-wrap");
   if (!wrap) return;
 
-  if (!trainings.length) {
-    wrap.innerHTML = `<div class="empty-state" style="padding:var(--space-16)">
-      <div class="empty-state__title">등록된 교육이 없습니다</div>
-      <div>교육 등록 버튼으로 첫 교육을 추가하세요</div>
-    </div>`;
+  const search     = (document.getElementById("search-trainings")?.value ?? "").trim().toLowerCase();
+  const instructor = document.getElementById("filter-instructor")?.value ?? "";
+  const status     = document.getElementById("filter-status")?.value ?? "";
+  const type       = document.getElementById("filter-type")?.value ?? "";
+  const branch     = document.getElementById("filter-branch")?.value ?? "";
+  const activeBucket = state.notificationSettings?.deadlineBuckets?.find((b) => b.key === activeStatFilter) ?? null;
+
+  const filtered = state.trainings.filter((t) => {
+    if (activeBucket && !bucketIncludesTraining(activeBucket, t)) return false;
+    if (search && !String(t.title ?? "").toLowerCase().includes(search)) return false;
+    if (instructor && t.instructorId !== instructor && t.instructorName !== instructor) return false;
+    if (status && t.computedStatus !== status) return false;
+    if (type && t.trainingType !== type) return false;
+    if (branch && !t.branchIds?.includes(branch)) return false;
+    return true;
+  });
+
+  if (!filtered.length) {
+    wrap.innerHTML = `<div class="empty-state" style="padding:var(--space-16)"><div class="empty-state__title">조건에 맞는 교육이 없습니다.</div></div>`;
     return;
   }
 
@@ -91,301 +196,167 @@ function renderTable(trainings) {
       <thead>
         <tr>
           <th>교육명</th>
-          <th>대상</th>
-          <th>담당 강사</th>
-          <th>시작일</th>
+          <th>유형</th>
+          <th>회사/지점</th>
+          <th>교육기간</th>
           <th>수료기한</th>
+          <th>담당 강사</th>
           <th>상태</th>
-          <th>완료율</th>
-          <th style="width:80px"></th>
+          <th>생성일</th>
+          <th style="width:130px"></th>
         </tr>
       </thead>
       <tbody>
-        ${trainings.map(t => trainingRow(t)).join("")}
+        ${filtered.map((t) => {
+          const branchSummary = t.branchNames?.length ? t.branchNames.join(", ") : "전체 지점";
+          const isCompleted   = t.computedStatus === "completed";
+          const isClosed      = t.computedStatus === "closed";
+          return `
+            <tr data-id="${t.id}" style="cursor:pointer">
+              <td><div style="font-weight:var(--weight-semibold);color:var(--gray-800)">${esc(t.title)}</div></td>
+              <td>${esc(TRAINING_TYPE_LABELS[t.trainingType] ?? "기타")}</td>
+              <td>
+                <div>${esc(t.companyName || "–")}</div>
+                <div style="font-size:var(--text-xs);color:var(--gray-400)">${esc(branchSummary)}</div>
+              </td>
+              <td style="white-space:nowrap">${formatDate(t.startDate)} ~ ${formatDate(t.endDate)}</td>
+              <td style="white-space:nowrap">${formatDate(t.deadline)}</td>
+              <td>${esc(t.instructorName || "–")}</td>
+              <td>${buildStatusChip(t.computedStatus)}</td>
+              <td>${formatDate(t.createdAt)}</td>
+              <td class="cell--actions">
+                <div style="display:flex;gap:4px;justify-content:flex-end;flex-wrap:wrap">
+                  ${!isCompleted ? `<button class="btn btn--ghost btn--sm btn-complete" data-id="${t.id}" style="color:var(--color-success,#16a34a)" title="완료 처리">완료</button>` : ""}
+                  ${!isClosed && !isCompleted ? `<button class="btn btn--ghost btn--sm btn-close" data-id="${t.id}" title="종료 처리">종료</button>` : ""}
+                  <button class="btn btn--ghost btn--sm btn-del" data-id="${t.id}" style="color:var(--color-danger)" title="삭제">삭제</button>
+                </div>
+              </td>
+            </tr>`;
+        }).join("")}
       </tbody>
     </table>
   `;
 
-  // Row click → detail
-  wrap.querySelectorAll("tr[data-id]").forEach(row => {
-    row.addEventListener("click", e => {
-      if (e.target.closest(".cell--actions")) return;
-      router.push("training-detail", { id: row.dataset.id });
+  wrap.querySelectorAll("tr[data-id]").forEach((row) => {
+    row.addEventListener("click", (e) => {
+      if (!e.target.closest(".cell--actions")) router.push("training-detail", { id: row.dataset.id });
     });
   });
-
-  // Action buttons
-  wrap.querySelectorAll(".btn-edit").forEach(btn => {
-    btn.addEventListener("click", e => {
-      e.stopPropagation();
-      const t = _allTrainings.find(t => t.id === btn.dataset.id);
-      if (t) openEditModal(t);
-    });
+  wrap.querySelectorAll(".btn-complete").forEach((btn) => {
+    btn.addEventListener("click", (e) => { e.stopPropagation(); confirmComplete(btn.dataset.id); });
   });
-
-  wrap.querySelectorAll(".btn-delete").forEach(btn => {
-    btn.addEventListener("click", e => {
-      e.stopPropagation();
-      confirmDelete(btn.dataset.id);
-    });
+  wrap.querySelectorAll(".btn-close").forEach((btn) => {
+    btn.addEventListener("click", (e) => { e.stopPropagation(); confirmClose(btn.dataset.id); });
+  });
+  wrap.querySelectorAll(".btn-del").forEach((btn) => {
+    btn.addEventListener("click", (e) => { e.stopPropagation(); confirmDelete(btn.dataset.id); });
   });
 }
 
-function trainingRow(t) {
-  const now     = Date.now();
-  const overdue = t.deadline && t.deadline < now;
-  const upcoming = t.startDate && t.startDate > now;
-  const pct     = t.totalAssigned > 0
-    ? Math.round((t.totalCompleted / t.totalAssigned) * 100) : 0;
-
-  return `
-    <tr data-id="${t.id}" style="cursor:pointer">
-      <td style="font-weight:var(--weight-medium);color:var(--gray-800)">${t.title}</td>
-      <td style="font-size:var(--text-xs);color:var(--gray-500)">${targetLabel(t.target)}</td>
-      <td style="font-size:var(--text-sm)">${t.instructorName ?? "–"}</td>
-      <td>${formatDate(t.startDate)}</td>
-      <td style="color:${overdue ? "var(--color-danger)" : "inherit"}">${formatDate(t.deadline)}</td>
-      <td>${statusChip(t, now)}</td>
-      <td style="min-width:120px">
-        <div style="display:flex;align-items:center;gap:var(--space-2)">
-          <div class="progress" style="flex:1"><div class="progress__fill" style="width:${pct}%"></div></div>
-          <span style="font-size:var(--text-xs);color:var(--gray-400);min-width:32px;text-align:right">${pct}%</span>
-        </div>
-      </td>
-      <td class="cell--actions">
-        <div style="display:flex;gap:4px;justify-content:flex-end">
-          <button class="btn btn--ghost btn--sm btn-edit" data-id="${t.id}" title="수정">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <path d="M9 2l3 3-7 7H2V9l7-7z" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
-            </svg>
-          </button>
-          <button class="btn btn--ghost btn--sm btn-delete" data-id="${t.id}" title="삭제"
-            style="color:var(--color-danger)">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <path d="M2 3h10M5 3V2h4v1M4 3v8a1 1 0 001 1h4a1 1 0 001-1V3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
-            </svg>
-          </button>
-        </div>
-      </td>
-    </tr>
-  `;
-}
-
-function statusChip(t, now) {
-  if (t.status === "closed") return `<span class="chip chip--neutral">종료</span>`;
-  if (t.deadline && t.deadline < now) return `<span class="chip chip--danger">기한 초과</span>`;
-  if (t.startDate && t.startDate > now) return `<span class="chip chip--info">예정</span>`;
-  return `<span class="chip chip--success">진행중</span>`;
-}
-
-function targetLabel(target) {
-  if (!target || target === "all") return "전체";
-  if (target.branch)     return `지점: ${target.branch}`;
-  if (target.department) return `부서: ${target.department}`;
-  if (target.grade)      return `직급: ${target.grade}`;
-  return "개별 지정";
-}
-
-/* ── Filter ──────────────────────────────────────────────── */
-function filterTable(search, status) {
-  const s = search ?? document.getElementById("search-trainings")?.value ?? "";
-  const f = status ?? document.getElementById("filter-status")?.value ?? "";
-  const now = Date.now();
-
-  let filtered = _allTrainings;
-
-  if (s) {
-    const q = s.toLowerCase();
-    filtered = filtered.filter(t => t.title?.toLowerCase().includes(q));
-  }
-
-  if (f) {
-    filtered = filtered.filter(t => {
-      if (f === "active")   return t.startDate <= now && t.deadline >= now;
-      if (f === "upcoming") return t.startDate > now;
-      if (f === "overdue")  return t.deadline < now && t.status !== "closed";
-      if (f === "closed")   return t.status === "closed";
-      return true;
-    });
-  }
-
-  renderTable(filtered);
-}
-
-/* ── Create / Edit Modal ─────────────────────────────────── */
-function openCreateModal() {
-  openFormModal({ mode: "create" });
-}
-
-function openEditModal(training) {
-  openFormModal({ mode: "edit", training });
-}
-
-function openFormModal({ mode, training = {} }) {
-  const isEdit = mode === "edit";
+/* ── 완료 확인 팝업 ── */
+function confirmComplete(id) {
+  const t = state.trainings.find((item) => item.id === id);
+  if (!t) return;
 
   modal.open({
-    title: isEdit ? "교육 수정" : "교육 등록",
-    size: "lg",
-    body: trainingForm(training),
+    title: "교육 완료 처리",
+    size: "sm",
+    body: `
+      <p style="font-size:var(--text-sm);color:var(--gray-600)">
+        <strong>${esc(t.title)}</strong> 교육을 완료 처리하시겠습니까?<br/>
+        배정된 직원의 교육 이력카드에 자동으로 수료 기록이 생성됩니다.
+      </p>`,
     actions: [
-      { label: "취소",                variant: "secondary", onClick: () => modal.close() },
-      { label: isEdit ? "저장" : "등록", variant: "primary",   onClick: () => submitForm(training.id) },
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      {
+        label: "완료",
+        variant: "primary",
+        onClick: async () => {
+          modal.setLoading("완료", true);
+          try {
+            await completeTraining(id);
+            toast.success("교육을 완료 처리했습니다. 직원 이력카드에 수료 기록이 생성되었습니다.");
+            modal.close();
+            await loadData();
+          } catch (err) {
+            if (err?.message === "NO_ASSIGNMENTS") {
+              toast.error("배정된 직원이 없습니다. 직원을 먼저 배정해 주세요.");
+            } else {
+              console.error("[trainings] complete failed", err);
+              toast.error("완료 처리 중 오류가 발생했습니다.");
+            }
+            modal.setLoading("완료", false);
+          }
+        },
+      },
     ],
   });
-
-  // Date pickers, etc. initialized after DOM is ready
-  initFormListeners();
 }
 
-function trainingForm(t = {}) {
-  return `
-    <div style="display:flex;flex-direction:column;gap:var(--space-4)">
-      <div class="form-group">
-        <label class="form-label form-label--required">교육명</label>
-        <input class="form-control" id="f-title" type="text" value="${t.title ?? ""}" placeholder="예) 2024년 서비스교육" />
-      </div>
+/* ── 종료 확인 팝업 ── */
+function confirmClose(id) {
+  const t = state.trainings.find((item) => item.id === id);
+  if (!t) return;
 
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label form-label--required">시작일</label>
-          <input class="form-control" id="f-start" type="date" value="${tsToDateInput(t.startDate)}" />
-        </div>
-        <div class="form-group">
-          <label class="form-label form-label--required">종료일</label>
-          <input class="form-control" id="f-end" type="date" value="${tsToDateInput(t.endDate)}" />
-        </div>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label form-label--required">수료기한</label>
-        <input class="form-control" id="f-deadline" type="date" value="${tsToDateInput(t.deadline)}" />
-      </div>
-
-      <div class="form-group">
-        <label class="form-label">교육 대상</label>
-        <select class="form-control" id="f-target">
-          <option value="all" ${t.targetType === "all" ? "selected" : ""}>전체</option>
-          <option value="branch" ${t.targetType === "branch" ? "selected" : ""}>지점별</option>
-          <option value="department" ${t.targetType === "department" ? "selected" : ""}>부서별</option>
-          <option value="grade" ${t.targetType === "grade" ? "selected" : ""}>직급별</option>
-          <option value="individual" ${t.targetType === "individual" ? "selected" : ""}>개별 지정</option>
-        </select>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label">담당 강사</label>
-        <input class="form-control" id="f-instructor" type="text" value="${t.instructorName ?? ""}"
-          placeholder="강사 이름 또는 이메일 검색" />
-      </div>
-
-      <div class="form-group">
-        <label class="form-label">교육 설명</label>
-        <textarea class="form-control" id="f-description" rows="3" placeholder="교육 목표, 내용 요약 등을 입력하세요">${t.description ?? ""}</textarea>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label">교육자료</label>
-        <select class="form-control" id="f-material">
-          <option value="">교육자료를 선택하세요</option>
-        </select>
-        <div class="form-hint">교육자료 탭에서 먼저 자료를 업로드하세요</div>
-      </div>
-    </div>
-  `;
+  modal.open({
+    title: "교육 종료 처리",
+    size: "sm",
+    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)"><strong>${esc(t.title)}</strong> 교육을 종료 처리하시겠습니까?</p>`,
+    actions: [
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      {
+        label: "종료",
+        variant: "primary",
+        onClick: async () => {
+          modal.setLoading("종료", true);
+          try {
+            await closeTraining(id);
+            toast.success("교육을 종료 처리했습니다.");
+            modal.close();
+            await loadData();
+          } catch (err) {
+            console.error("[trainings] close", err?.message, err);
+            toast.error("오류가 발생했습니다.");
+            modal.setLoading("종료", false);
+          }
+        },
+      },
+    ],
+  });
 }
 
-function initFormListeners() {
-  // Could load material options dynamically here
-}
+/* ── 삭제 확인 팝업 ── */
+function confirmDelete(id) {
+  const t = state.trainings.find((item) => item.id === id);
+  if (!t) return;
 
-async function submitForm(existingId) {
-  const title      = document.getElementById("f-title")?.value?.trim();
-  const startDate  = dateInputToTs("f-start");
-  const endDate    = dateInputToTs("f-end");
-  const deadline   = dateInputToTs("f-deadline");
-  const targetType = document.getElementById("f-target")?.value;
-  const instructor = document.getElementById("f-instructor")?.value?.trim();
-  const description = document.getElementById("f-description")?.value?.trim();
-  const materialId = document.getElementById("f-material")?.value;
-
-  if (!title) { toast.error("교육명을 입력하세요."); return; }
-  if (!startDate || !endDate) { toast.error("시작일과 종료일을 입력하세요."); return; }
-  if (!deadline) { toast.error("수료기한을 입력하세요."); return; }
-
-  modal.setLoading("등록", true);
-  modal.setLoading("저장", true);
-
-  try {
-    const data = {
-      title, startDate, endDate, deadline,
-      targetType: targetType || "all",
-      instructorName: instructor,
-      description,
-      materialId: materialId || null,
-      companyId: authStore.companyId,
-      status: "active",
-    };
-
-    if (existingId) {
-      await trainingsDB.update(existingId, data);
-      toast.success("교육이 수정되었습니다.");
-    } else {
-      await trainingsDB.create(data);
-      toast.success("교육이 등록되었습니다.");
-    }
-
-    modal.close();
-    await loadTrainings();
-  } catch (err) {
-    console.error(err);
-    toast.error("저장 중 오류가 발생했습니다.");
-  } finally {
-    modal.setLoading("등록", false);
-    modal.setLoading("저장", false);
-  }
-}
-
-async function confirmDelete(id) {
-  const t = _allTrainings.find(t => t.id === id);
   modal.open({
     title: "교육 삭제",
     size: "sm",
-    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)">
-      <strong>"${t?.title ?? "이 교육"}"</strong>을(를) 삭제하시겠습니까?<br/>
-      관련 배정 및 수료 기록도 함께 삭제됩니다.
-    </p>`,
+    body: `<p style="font-size:var(--text-sm);color:var(--gray-600)"><strong>${esc(t.title)}</strong> 교육을 삭제하시겠습니까?</p>`,
     actions: [
-      { label: "취소",  variant: "secondary", onClick: () => modal.close() },
-      { label: "삭제",  variant: "danger",    onClick: async () => {
-        modal.setLoading("삭제", true);
-        try {
-          await trainingsDB.delete(id);
-          toast.success("삭제되었습니다.");
-          modal.close();
-          await loadTrainings();
-        } catch {
-          toast.error("삭제 중 오류가 발생했습니다.");
-          modal.setLoading("삭제", false);
-        }
-      }},
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      {
+        label: "삭제",
+        variant: "danger",
+        onClick: async () => {
+          modal.setLoading("삭제", true);
+          try {
+            await deleteTraining(id);
+            toast.success("삭제했습니다.");
+            modal.close();
+            await loadData();
+          } catch (err) {
+            console.error("[trainings] delete", err?.message, err);
+            toast.error("오류가 발생했습니다.");
+            modal.setLoading("삭제", false);
+          }
+        },
+      },
     ],
   });
 }
 
-/* ── Excel export placeholder ────────────────────────────── */
-function exportToExcel() {
-  // TODO: implement with SheetJS or Cloud Function
-  toast.info("엑셀 다운로드 기능은 곧 제공될 예정입니다.");
-}
-
-/* ── Date helpers ────────────────────────────────────────── */
-function tsToDateInput(ts) {
-  if (!ts) return "";
-  return new Date(ts).toISOString().slice(0, 10);
-}
-
-function dateInputToTs(id) {
-  const val = document.getElementById(id)?.value;
-  return val ? new Date(val).getTime() : null;
+function esc(v) {
+  return String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }

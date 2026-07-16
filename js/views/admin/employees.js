@@ -1,0 +1,841 @@
+import { branchesDB, companiesDB, usersDB } from "../../core/db.js";
+import { TEXT } from "../../constants/text.js";
+import { createEmployeeAccounts, deleteEmployeeAccount, bulkDeleteEmployeeAccounts } from "../../core/admin-api.js";
+import { modal } from "../../utils/modal.js";
+import { toast } from "../../utils/toast.js";
+import { formatDate } from "../../utils/date.js";
+import { authStore } from "../../core/auth.js";
+
+let employees = [];
+let companies = [];
+let branches = [];
+let pendingUploadRows = [];
+
+/** 현재 선택된 UID 집합 */
+let selectedUids = new Set();
+
+const t = TEXT.employeeAdmin;
+
+export async function render(container) {
+  container.innerHTML = `
+    <div class="section-header">
+      <div>
+        <div class="section-title">${t.title}</div>
+        <div class="section-subtitle">${t.subtitle}</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn--danger" id="btn-bulk-delete-employees" disabled style="display:none">
+          <svg class="btn__icon" width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M2 3h10M5 3V2h4v1M4 3v8a1 1 0 001 1h4a1 1 0 001-1V3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+          </svg>
+          선택 삭제 (<span id="bulk-delete-employee-count">0</span>)
+        </button>
+        <button class="btn btn--secondary" id="btn-download-template">${t.downloadTemplate}</button>
+        <button class="btn btn--primary" id="btn-upload-employees">${t.excelUpload}</button>
+      </div>
+    </div>
+
+    <div class="dashboard-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:var(--space-4)">
+      ${statCard(t.stats.employees, "employee-count")}
+      ${statCard(t.stats.active, "employee-active-count")}
+      ${statCard(t.stats.branches, "employee-branch-count")}
+    </div>
+
+    <div class="filter-bar">
+      <select class="form-control" id="employee-company-filter" style="max-width:220px">
+        <option value="">${t.allCompanies ?? "전체 회사"}</option>
+      </select>
+      <select class="form-control" id="employee-branch-filter" style="max-width:220px">
+        <option value="">${t.allBranches}</option>
+      </select>
+      <div class="input-group filter-bar__search">
+        <svg class="input-group__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.25"/>
+          <path d="M11 11l3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+        </svg>
+        <input class="form-control" type="search" id="employee-search" placeholder="${t.searchPlaceholder}" />
+      </div>
+    </div>
+
+    <div class="table-wrap" id="employee-table-wrap">
+      <div style="display:flex;align-items:center;justify-content:center;padding:var(--space-12)">
+        <div class="splash__spinner" style="border-color:var(--gray-200);border-top-color:var(--brand-400)"></div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById("btn-upload-employees")?.addEventListener("click", openUploadModal);
+  document.getElementById("btn-download-template")?.addEventListener("click", downloadTemplate);
+  document.getElementById("employee-company-filter")?.addEventListener("change", handleCompanyFilterChange);
+  document.getElementById("employee-branch-filter")?.addEventListener("change", applyFilters);
+  document.getElementById("employee-search")?.addEventListener("input", applyFilters);
+  document.getElementById("btn-bulk-delete-employees")?.addEventListener("click", confirmBulkDelete);
+
+  await loadData();
+}
+
+async function loadData() {
+  try {
+    const [allUsers, branchList, companyList] = await Promise.all([
+      usersDB.listAll().catch(() => []),
+      branchesDB.listAll().catch(() => []),
+      companiesDB.list().catch(() => []),
+    ]);
+    employees = allUsers
+      .filter((item) => item?.role === "employee")
+      .sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0));
+    branches = branchList;
+    companies = buildCompanies(companyList, branchList, employees);
+  } catch (err) {
+    console.error("[employees] load failed", err);
+    employees = [];
+    companies = [];
+    branches = [];
+  }
+
+  // 목록 새로고침 시 선택 초기화
+  selectedUids = new Set();
+  updateBulkDeleteButton();
+
+  fillCompanyFilter();
+  fillBranchFilter();
+  applyFilters();
+}
+
+function renderStats(list = employees) {
+  setText("employee-count", String(list.length));
+  setText("employee-active-count", String(list.filter((item) => item.active !== false && !item.disabled).length));
+  setText(
+    "employee-branch-count",
+    String(new Set(list.map((item) => employeeBranchKey(item)).filter(Boolean)).size)
+  );
+}
+
+function fillCompanyFilter() {
+  const select = document.getElementById("employee-company-filter");
+  if (!select) return;
+
+  const currentValue = select.value;
+  while (select.options.length > 1) select.remove(1);
+
+  companies
+    .slice()
+    .sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""), "ko"))
+    .forEach((company) => {
+      const option = document.createElement("option");
+      option.value = company.id;
+      option.textContent = company.name ?? company.id;
+      select.appendChild(option);
+    });
+
+  const hasSelectedCompany = Array.from(select.options).some((option) => option.value === currentValue);
+  select.value = hasSelectedCompany ? currentValue : "";
+}
+
+function fillBranchFilter() {
+  const select = document.getElementById("employee-branch-filter");
+  if (!select) return;
+
+  const selectedCompanyId = document.getElementById("employee-company-filter")?.value ?? "";
+  const currentValue = select.value;
+  while (select.options.length > 1) select.remove(1);
+
+  branches
+    .filter((branch) => !selectedCompanyId || branch.companyId === selectedCompanyId)
+    .slice()
+    .sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""), "ko"))
+    .forEach((branch) => {
+      const option = document.createElement("option");
+      option.value = branch.id;
+      option.textContent = branchLabel(branch);
+      select.appendChild(option);
+    });
+
+  const hasSelectedBranch = Array.from(select.options).some((option) => option.value === currentValue);
+  select.value = hasSelectedBranch ? currentValue : "";
+}
+
+function handleCompanyFilterChange() {
+  fillBranchFilter();
+  applyFilters();
+}
+
+function applyFilters() {
+  const companyId = document.getElementById("employee-company-filter")?.value ?? "";
+  const branchId = document.getElementById("employee-branch-filter")?.value ?? "";
+  const query = (document.getElementById("employee-search")?.value ?? "").trim().toLowerCase();
+
+  let filtered = employees.slice();
+
+  if (companyId) {
+    filtered = filtered.filter((item) => item.companyId === companyId);
+  }
+
+  if (branchId) {
+    const selectedBranch = branches.find((branch) => branch.id === branchId) ?? null;
+    filtered = filtered.filter((item) => matchesSelectedBranch(item, selectedBranch));
+  }
+
+  if (query) {
+    filtered = filtered.filter((item) => {
+      const haystack = [
+        item.empNo,
+        item.name,
+        item.branchName,
+        item.branchCode,
+        item.position,
+      ].join(" ").toLowerCase();
+      return haystack.includes(query);
+    });
+  }
+
+  renderStats(filtered);
+  renderTable(filtered);
+}
+
+function renderTable(list) {
+  const wrap = document.getElementById("employee-table-wrap");
+  if (!wrap) return;
+
+  if (!list.length) {
+    wrap.innerHTML = `
+      <div class="empty-state" style="padding:var(--space-16)">
+        <div class="empty-state__title">${t.emptyTitle}</div>
+        <div>${t.emptyDescription}</div>
+      </div>
+    `;
+    return;
+  }
+
+  const currentUid = authStore.uid;
+
+  // 현재 필터 결과에서 삭제 가능한 항목 (super_admin 및 자기 자신 제외 — 직원은 사실상 전원 가능)
+  const selectableUids = list.map((item) => item.id).filter((id) => id && id !== currentUid);
+  const allSelected = selectableUids.length > 0 && selectableUids.every((id) => selectedUids.has(id));
+
+  wrap.innerHTML = `
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width:40px;text-align:center">
+            <input
+              type="checkbox"
+              id="chk-all-employees"
+              title="전체 선택"
+              ${allSelected ? "checked" : ""}
+              ${selectableUids.length === 0 ? "disabled" : ""}
+              style="cursor:pointer;width:16px;height:16px"
+            />
+          </th>
+          <th>${t.table.empNo}</th>
+          <th>${t.table.name}</th>
+          <th>${t.table.branch}</th>
+          <th>${t.table.position}</th>
+          <th>${t.table.status}</th>
+          <th>${t.table.createdAt}</th>
+          <th style="width:96px"></th>
+        </tr>
+      </thead>
+      <tbody>
+        ${list.map((item) => {
+          const uid = item.id;
+          const isSelectable = uid && uid !== currentUid;
+          const isChecked = isSelectable && selectedUids.has(uid);
+          return `
+            <tr class="${isChecked ? "row--selected" : ""}">
+              <td style="text-align:center">
+                ${isSelectable ? `
+                  <input
+                    type="checkbox"
+                    class="chk-employee-row"
+                    data-id="${uid}"
+                    ${isChecked ? "checked" : ""}
+                    style="cursor:pointer;width:16px;height:16px"
+                  />
+                ` : `
+                  <input type="checkbox" disabled title="삭제 불가" style="width:16px;height:16px;opacity:0.3;cursor:not-allowed" />
+                `}
+              </td>
+              <td class="cell--mono">${esc(item.empNo)}</td>
+              <td style="font-weight:var(--weight-medium);color:var(--gray-800)">${esc(item.name)}</td>
+              <td>${esc(item.branchName ?? item.branchCode ?? "-")}</td>
+              <td>${esc(item.position ?? "-")}</td>
+              <td>
+                <span class="chip ${item.active === false || item.disabled ? "chip--danger" : "chip--success"}">
+                  ${item.active === false || item.disabled ? t.status.inactive : t.status.active}
+                </span>
+              </td>
+              <td>${formatDate(item.createdAt)}</td>
+              <td class="cell--actions">
+                <button
+                  class="btn btn--ghost btn--sm btn-delete-employee"
+                  data-id="${uid}"
+                  data-name="${attr(item.name)}"
+                  style="color:var(--color-danger)"
+                >
+                  ${TEXT.common.delete}
+                </button>
+              </td>
+            </tr>
+          `;
+        }).join("")}
+      </tbody>
+    </table>
+  `;
+
+  // 전체 선택 체크박스
+  document.getElementById("chk-all-employees")?.addEventListener("change", (e) => {
+    if (e.target.checked) {
+      selectableUids.forEach((id) => selectedUids.add(id));
+    } else {
+      selectableUids.forEach((id) => selectedUids.delete(id));
+    }
+    updateBulkDeleteButton();
+    refreshRowHighlights(list);
+  });
+
+  // 개별 체크박스
+  wrap.querySelectorAll(".chk-employee-row").forEach((chk) => {
+    chk.addEventListener("change", (e) => {
+      const uid = e.target.dataset.id;
+      if (e.target.checked) {
+        selectedUids.add(uid);
+      } else {
+        selectedUids.delete(uid);
+      }
+      updateBulkDeleteButton();
+      // 전체선택 체크박스 상태 동기화
+      const allNowSelected = selectableUids.every((id) => selectedUids.has(id));
+      const headerChk = document.getElementById("chk-all-employees");
+      if (headerChk) headerChk.checked = allNowSelected;
+    });
+  });
+
+  // 단일 삭제 버튼
+  wrap.querySelectorAll(".btn-delete-employee").forEach((button) => {
+    button.addEventListener("click", () => confirmDeleteEmployee(button.dataset.id, button.dataset.name));
+  });
+}
+
+/** 행 하이라이트만 다시 적용 (테이블 전체 재렌더 없이) */
+function refreshRowHighlights(list) {
+  const wrap = document.getElementById("employee-table-wrap");
+  if (!wrap) return;
+  wrap.querySelectorAll(".chk-employee-row").forEach((chk) => {
+    const row = chk.closest("tr");
+    if (!row) return;
+    if (selectedUids.has(chk.dataset.id)) {
+      row.classList.add("row--selected");
+    } else {
+      row.classList.remove("row--selected");
+    }
+  });
+}
+
+/** 선택 삭제 버튼 상태 업데이트 */
+function updateBulkDeleteButton() {
+  const btn = document.getElementById("btn-bulk-delete-employees");
+  const countEl = document.getElementById("bulk-delete-employee-count");
+  if (!btn) return;
+
+  const count = selectedUids.size;
+  if (countEl) countEl.textContent = String(count);
+
+  if (count > 0) {
+    btn.style.display = "";
+    btn.disabled = false;
+  } else {
+    btn.style.display = "none";
+    btn.disabled = true;
+  }
+}
+
+/** 다중 삭제 확인 모달 */
+function confirmBulkDelete() {
+  if (selectedUids.size === 0) return;
+
+  const targets = employees.filter((item) => selectedUids.has(item.id));
+  const displayList = targets.slice(0, 5);
+  const remaining = targets.length - displayList.length;
+
+  modal.open({
+    title: "선택 삭제",
+    size: "sm",
+    body: `
+      <p style="font-size:var(--text-sm);color:var(--gray-700);margin-bottom:var(--space-3)">
+        선택한 <strong>${targets.length}명</strong>의 직원을 삭제하시겠습니까?<br/>
+        <span style="font-size:var(--text-xs);color:var(--color-danger)">Firebase Authentication 계정과 DB 정보가 함께 삭제됩니다.</span>
+      </p>
+      <div style="background:var(--gray-50);border:1px solid var(--gray-200);border-radius:var(--radius-md);padding:var(--space-3);font-size:var(--text-sm);line-height:2">
+        ${displayList.map((item) => `<div>· ${esc(item.name)} (${esc(item.empNo)})</div>`).join("")}
+        ${remaining > 0 ? `<div style="color:var(--gray-500)">외 ${remaining}명 …</div>` : ""}
+      </div>
+    `,
+    actions: [
+      { label: TEXT.common.cancel, variant: "secondary", onClick: () => modal.close() },
+      {
+        label: "삭제",
+        variant: "danger",
+        onClick: async () => {
+          modal.setLoading("삭제", true);
+          try {
+            const uids = Array.from(selectedUids);
+            const result = await bulkDeleteEmployeeAccounts({ uids });
+            modal.close();
+            selectedUids = new Set();
+            await loadData();
+
+            if (result.failedCount > 0) {
+              toast.error(`${result.succeededCount}명 삭제 완료, ${result.failedCount}명 실패`);
+            } else {
+              toast.success(`${result.succeededCount}명이 삭제되었습니다.`);
+            }
+          } catch (err) {
+            console.error("[employees] bulk delete failed", err?.code, err?.message, err);
+            toast.error(err?.message ?? "삭제 중 오류가 발생했습니다.");
+            modal.setLoading("삭제", false);
+          }
+        },
+      },
+    ],
+  });
+}
+
+function openUploadModal() {
+  pendingUploadRows = [];
+
+  modal.open({
+    title: t.uploadModal.title,
+    size: "xl",
+    body: `
+      <div style="display:flex;flex-direction:column;gap:var(--space-4)">
+        <div class="card">
+          <div class="card__body" style="display:flex;flex-direction:column;gap:var(--space-4)">
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">${t.uploadModal.defaultBranch}</label>
+                <select class="form-control" id="upload-default-branch">
+                  <option value="">${t.uploadModal.useFileBranch}</option>
+                  ${branches.map((branch) => `
+                    <option value="${branch.id}">${esc(branchLabel(branch))}</option>
+                  `).join("")}
+                </select>
+                <div class="form-hint">${t.uploadModal.defaultBranchHint}</div>
+              </div>
+              <div class="form-group">
+                <label class="form-label form-label--required">${t.uploadModal.file}</label>
+                <input class="form-control" id="upload-file" type="file" accept=".xlsx,.xls,.csv" />
+                <div class="form-hint">${t.uploadModal.fileHint}</div>
+              </div>
+            </div>
+            <div style="font-size:var(--text-xs);color:var(--gray-500);line-height:1.7">
+              ${t.uploadModal.example}<br/>
+              ${t.uploadModal.branchExample}
+            </div>
+          </div>
+        </div>
+        <div id="upload-preview" class="card">
+          <div class="card__body" style="color:var(--gray-500)">
+            ${t.uploadModal.previewIdle}
+          </div>
+        </div>
+      </div>
+    `,
+    actions: [
+      { label: TEXT.common.close, variant: "secondary", onClick: () => modal.close() },
+      { label: t.uploadModal.action, variant: "primary", onClick: submitBulkUpload },
+    ],
+  });
+
+  document.getElementById("upload-file")?.addEventListener("change", handleFileSelection);
+  document.getElementById("upload-default-branch")?.addEventListener("change", () => {
+    if (pendingUploadRows.length) renderUploadPreview(pendingUploadRows);
+  });
+}
+
+async function handleFileSelection(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+
+  try {
+    pendingUploadRows = await parseWorkbook(file);
+    renderUploadPreview(pendingUploadRows);
+  } catch (err) {
+    console.error("[employees] parse failed", err);
+    pendingUploadRows = [];
+    toast.error(t.uploadModal.parseFailed);
+    renderUploadMessage(t.uploadModal.parseFailedDetail);
+  }
+}
+
+function renderUploadPreview(rows) {
+  const defaultBranchId = document.getElementById("upload-default-branch")?.value ?? "";
+  const preview = rows.map((row, index) => normalizeUploadRow(row, index, defaultBranchId));
+  const valid = preview.filter((row) => row.valid);
+  const invalid = preview.filter((row) => !row.valid);
+
+  const previewEl = document.getElementById("upload-preview");
+  if (!previewEl) return;
+
+  previewEl.innerHTML = `
+    <div class="card__header">
+      <div>
+        <div class="card__title">${t.uploadModal.previewTitle}</div>
+        <div class="card__subtitle">${t.uploadModal.validSummary(valid.length, invalid.length)}</div>
+      </div>
+    </div>
+    <div class="card__body" style="display:flex;flex-direction:column;gap:var(--space-4)">
+      ${invalid.length ? `
+        <div style="padding:var(--space-4);border-radius:var(--radius-md);background:var(--color-danger-bg);color:#7a1a1e;font-size:var(--text-xs);line-height:1.7">
+          ${invalid.map((row) => `${t.uploadModal.row} ${row.rowNumber}: ${esc(row.error)}`).join("<br/>")}
+        </div>
+      ` : `
+        <div style="padding:var(--space-4);border-radius:var(--radius-md);background:var(--brand-50);color:var(--brand-500);font-size:var(--text-xs)">
+          ${t.uploadModal.validationPassed}
+        </div>
+      `}
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>${t.uploadModal.row}</th>
+              <th>${t.table.empNo}</th>
+              <th>${t.table.name}</th>
+              <th>${t.table.branch}</th>
+              <th>${t.table.position}</th>
+              <th>${t.table.status}</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${preview.slice(0, 20).map((row) => `
+              <tr>
+                <td>${row.rowNumber}</td>
+                <td class="cell--mono">${esc(row.empNo ?? "")}</td>
+                <td>${esc(row.name ?? "")}</td>
+                <td>${esc(row.branchName ?? row.branchInput ?? "")}</td>
+                <td>${esc(row.position ?? "")}</td>
+                <td><span class="chip ${row.valid ? "chip--success" : "chip--danger"}">${row.valid ? t.uploadModal.ready : t.uploadModal.error}</span></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+      ${preview.length > 20 ? `<div class="form-hint">${t.uploadModal.previewOnly}</div>` : ""}
+    </div>
+  `;
+}
+
+function renderUploadMessage(message) {
+  const previewEl = document.getElementById("upload-preview");
+  if (!previewEl) return;
+
+  previewEl.innerHTML = `
+    <div class="card__body" style="color:var(--gray-500)">
+      ${message}
+    </div>
+  `;
+}
+
+async function submitBulkUpload() {
+  if (!pendingUploadRows.length) {
+    toast.error(t.uploadModal.noFile);
+    return;
+  }
+
+  const defaultBranchId = document.getElementById("upload-default-branch")?.value ?? "";
+  const normalized = pendingUploadRows.map((row, index) => normalizeUploadRow(row, index, defaultBranchId));
+  const invalid = normalized.filter((row) => !row.valid);
+
+  if (invalid.length) {
+    toast.error(t.uploadModal.invalidRows);
+    renderUploadPreview(pendingUploadRows);
+    return;
+  }
+
+  modal.setLoading(t.uploadModal.action, true);
+  try {
+    const payload = normalized.map((row) => ({
+      empNo: row.empNo,
+      name: row.name,
+      branchId: row.branchId,
+      branchCode: row.branchCode,
+      branchName: row.branchName,
+      position: row.position,
+    }));
+
+    const result = await createEmployeeAccounts({ employees: payload });
+    toast.success(t.uploadModal.createSuccess(result.createdCount, result.skippedCount));
+    modal.close();
+    resetFilters();
+    await loadData();
+    openUploadResultModal(result);
+  } catch (err) {
+    console.error("[employees] create failed", err);
+    toast.error(err?.message ?? t.uploadModal.createFailed);
+    modal.setLoading(t.uploadModal.action, false);
+  }
+}
+
+function openUploadResultModal(result) {
+  modal.open({
+    title: t.uploadModal.resultTitle,
+    size: "lg",
+    body: `
+      <div style="display:flex;flex-direction:column;gap:var(--space-4)">
+        <div class="dashboard-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:0">
+          ${inlineStat(t.uploadModal.created, result.createdCount)}
+          ${inlineStat(t.uploadModal.skipped, result.skippedCount)}
+          ${inlineStat(t.uploadModal.failed, result.failedCount)}
+        </div>
+        ${renderResultList(t.uploadModal.createdEmployees, result.created, "chip--success")}
+        ${renderResultList(t.uploadModal.skippedEmployees, result.skipped, "chip--warning")}
+        ${renderResultList(t.uploadModal.failedEmployees, result.failed, "chip--danger")}
+      </div>
+    `,
+    actions: [
+      { label: TEXT.common.close, variant: "primary", onClick: () => modal.close() },
+    ],
+  });
+}
+
+function renderResultList(title, items, chipClass) {
+  if (!items?.length) return "";
+  return `
+    <div class="card">
+      <div class="card__header">
+        <div class="card__title">${title}</div>
+      </div>
+      <div class="card__body" style="display:flex;flex-direction:column;gap:var(--space-2)">
+        ${items.slice(0, 30).map((item) => `
+          <div style="display:flex;justify-content:space-between;gap:var(--space-3);font-size:var(--text-sm)">
+            <span>${esc(item.empNo ?? item.uid ?? "-")} ${t.branchLabelSeparator} ${esc(item.name ?? "")}</span>
+            <span class="chip ${chipClass}">${esc(item.message ?? t.uploadModal.done)}</span>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function confirmDeleteEmployee(uid, name) {
+  modal.open({
+    title: t.deleteModal.title,
+    size: "sm",
+    body: `
+      <p style="font-size:var(--text-sm);color:var(--gray-600);line-height:1.7">
+        ${t.deleteModal.description(`<strong>${esc(name)}</strong>`)}
+      </p>
+    `,
+    actions: [
+      { label: TEXT.common.cancel, variant: "secondary", onClick: () => modal.close() },
+      {
+        label: TEXT.common.delete,
+        variant: "danger",
+        onClick: async () => {
+          modal.setLoading(TEXT.common.delete, true);
+          try {
+            await deleteEmployeeAccount({ uid });
+            toast.success(t.deleteModal.success);
+            modal.close();
+            await loadData();
+          } catch (err) {
+            console.error("[employees] delete failed", err);
+            toast.error(err?.message ?? t.deleteModal.failed);
+            modal.setLoading(TEXT.common.delete, false);
+          }
+        },
+      },
+    ],
+  });
+}
+
+async function parseWorkbook(file) {
+  const XLSX = await import("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm");
+  const buffer = await file.arrayBuffer();
+  const workbook = XLSX.read(buffer, { type: "array" });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  return XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
+}
+
+function normalizeUploadRow(sourceRow, index, defaultBranchId) {
+  const row = lowerCaseKeys(sourceRow);
+  const empNo = normalizeEmpNo(readField(row, ["employee number", "empno", "emp no", "employee_no", "id", "사번"]));
+  const name = String(readField(row, ["name", "이름", "성명"])).trim();
+  const branchInput = String(readField(row, ["branch", "branchcode", "branch code", "지점", "지점코드"])).trim();
+  const position = String(readField(row, ["position", "title", "직급", "직책"])).trim();
+  const branch = resolveBranch(branchInput, defaultBranchId);
+
+  if (!empNo) {
+      return { rowNumber: index + 2, valid: false, error: t.uploadModal.missingEmpNo };
+  }
+  if (!name) {
+    return { rowNumber: index + 2, empNo, valid: false, error: t.uploadModal.missingName };
+  }
+  if (!branch) {
+    return {
+      rowNumber: index + 2,
+      empNo,
+      name,
+      branchInput,
+      valid: false,
+      error: t.uploadModal.branchNotMatched,
+    };
+  }
+
+  return {
+    rowNumber: index + 2,
+    empNo,
+    name,
+    position,
+    branchInput,
+    branchId: branch.id,
+    branchCode: branch.code ?? "",
+    branchName: branch.name ?? "",
+    valid: true,
+  };
+}
+
+function resolveBranch(branchInput, defaultBranchId) {
+  const normalizedInput = normalizeKey(branchInput);
+  if (normalizedInput) {
+    const matched = branches.find((branch) =>
+      normalizeKey(branch.code) === normalizedInput ||
+      normalizeKey(branch.name) === normalizedInput
+    );
+    if (matched) return matched;
+  }
+
+  if (defaultBranchId) {
+    return branches.find((branch) => branch.id === defaultBranchId) ?? null;
+  }
+
+  return null;
+}
+
+async function downloadTemplate() {
+  const XLSX = await import("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm");
+  const rows = [
+    { "employee number": "100001", name: "홍길동", branch: "PUS", position: "사원" },
+    { "employee number": "100002", name: "김철수", branch: "TAE", position: "주임" },
+  ];
+  const worksheet = XLSX.utils.json_to_sheet(rows);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "직원목록");
+  XLSX.writeFile(workbook, "employee-upload-template.xlsx");
+}
+
+function statCard(label, valueId) {
+  return `
+    <div class="stat-card">
+      <div class="stat-card__label">${label}</div>
+      <div class="stat-card__value" id="${valueId}">0</div>
+    </div>
+  `;
+}
+
+function inlineStat(label, value) {
+  return `
+    <div class="stat-card">
+      <div class="stat-card__label">${label}</div>
+      <div class="stat-card__value">${value}</div>
+    </div>
+  `;
+}
+
+function branchLabel(branch) {
+  return branch.code ? `${branch.code}${t.branchLabelSeparator}${branch.name}` : (branch.name ?? branch.id);
+}
+
+function readField(row, keys) {
+  for (const key of keys) {
+    if (row[key] !== undefined && row[key] !== null && String(row[key]).trim() !== "") {
+      return row[key];
+    }
+  }
+  return "";
+}
+
+function lowerCaseKeys(row) {
+  return Object.fromEntries(
+    Object.entries(row).map(([key, value]) => [String(key).trim().toLowerCase(), value])
+  );
+}
+
+function normalizeEmpNo(value) {
+  return String(value ?? "").trim();
+}
+
+function normalizeKey(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function employeeBranchKey(item) {
+  return item?.branchId || item?.branchCode || item?.branchName || "";
+}
+
+function matchesSelectedBranch(item, branch) {
+  if (!branch) return true;
+  const branchCandidates = [branch.id, branch.code, branch.name]
+    .map((value) => normalizeKey(value))
+    .filter(Boolean);
+  return [item?.branchId, item?.branchCode, item?.branchName]
+    .map((value) => normalizeKey(value))
+    .some((value) => value && branchCandidates.includes(value));
+}
+
+function resetFilters() {
+  const companyFilter = document.getElementById("employee-company-filter");
+  const branchFilter = document.getElementById("employee-branch-filter");
+  const searchInput = document.getElementById("employee-search");
+  if (companyFilter) companyFilter.value = "";
+  fillBranchFilter();
+  if (branchFilter) branchFilter.value = "";
+  if (searchInput) searchInput.value = "";
+}
+
+function buildCompanies(companyList, branchList, employeeList) {
+  const companyMap = new Map();
+
+  companyList.forEach((company) => {
+    if (!company?.id) return;
+    companyMap.set(company.id, {
+      id: company.id,
+      name: company.name ?? company.id,
+    });
+  });
+
+  branchList.forEach((branch) => {
+    if (!branch?.companyId || companyMap.has(branch.companyId)) return;
+    companyMap.set(branch.companyId, {
+      id: branch.companyId,
+      name: branch.companyName ?? branch.companyId,
+    });
+  });
+
+  employeeList.forEach((employee) => {
+    if (!employee?.companyId || companyMap.has(employee.companyId)) return;
+    companyMap.set(employee.companyId, {
+      id: employee.companyId,
+      name: employee.companyName ?? employee.companyId,
+    });
+  });
+
+  return Array.from(companyMap.values());
+}
+
+function setText(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = value;
+}
+
+function esc(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function attr(value) {
+  return esc(value).replace(/'/g, "&#39;");
+}

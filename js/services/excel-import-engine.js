@@ -1,0 +1,1253 @@
+/**
+ * Excel Import Engine  v3.0
+ * ─────────────────────────────────────────────────────────────────
+ * Reader → Normalizer → TemplateDetector → Mapper → Validator → Preview → Import
+ *
+ * 지원 양식:
+ *  A. 법정/직무 분리 시트 — 표준형 (전정길, 신형 영문병기 등)
+ *  B. 법정/직무 분리 시트 — TAS형 (김소현, 박진우, 김연수, 배예나, 김채영)
+ *  C. 법정/직무 분리 시트 — 보수예정/교육이수형 (신태용, 배수민, 강재원)
+ *  D. Sheet1 단일 시트 — 섹션 분리형 (이지현)
+ * ─────────────────────────────────────────────────────────────────
+ */
+
+// ═══════════════════════════════════════════════════════════════════
+// § 0.  SheetJS 로더
+// ═══════════════════════════════════════════════════════════════════
+let _xlsxPromise = null;
+async function loadXlsx() {
+  if (!_xlsxPromise) {
+    _xlsxPromise = import("https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs").catch(() => null);
+  }
+  return _xlsxPromise;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// § 1.  READER  —  원본 셀 데이터 추출
+// ═══════════════════════════════════════════════════════════════════
+async function readerRead(file) {
+  const XLSX = await loadXlsx();
+  if (!XLSX) throw new Error("SheetJS 로드 실패");
+
+  const buffer = await file.arrayBuffer();
+  const wb = XLSX.read(buffer, { type: "array", cellDates: false, dense: false });
+
+  return wb.SheetNames.filter((n) => !n.startsWith("_")).map((sheetName) => {
+    const ws = wb.Sheets[sheetName];
+    const ref = ws["!ref"] ?? "A1:A1";
+    const range = XLSX.utils.decode_range(ref);
+
+    const cells = {};
+    for (let r = range.s.r; r <= range.e.r; r++) {
+      for (let c = range.s.c; c <= range.e.c; c++) {
+        const addr = XLSX.utils.encode_cell({ r, c });
+        const cell = ws[addr];
+        if (!cell) continue;
+        let v = cell.v;
+        if (v == null) v = cell.w ?? null;
+        if (v != null) cells[`${r},${c}`] = v;
+      }
+    }
+
+    // 병합맵
+    const mergeMap = {};
+    for (const m of ws["!merges"] ?? []) {
+      const anchorAddr = XLSX.utils.encode_cell({ r: m.s.r, c: m.s.c });
+      const anchorVal = ws[anchorAddr]?.v ?? ws[anchorAddr]?.w ?? null;
+      for (let r = m.s.r; r <= m.e.r; r++) {
+        for (let c = m.s.c; c <= m.e.c; c++) {
+          mergeMap[`${r},${c}`] = anchorVal;
+        }
+      }
+    }
+
+    return { sheetName, cells, mergeMap, maxRow: range.e.r, maxCol: range.e.c };
+  });
+}
+
+function rawCell(sheet, r, c) {
+  const key = `${r},${c}`;
+  if (key in sheet.mergeMap) return sheet.mergeMap[key];
+  return sheet.cells[key] ?? null;
+}
+
+function hasCellValue(value) {
+  return value != null && String(value).trim() !== "";
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// § 2.  NORMALIZER
+// ═══════════════════════════════════════════════════════════════════
+
+// 공백·괄호 제거 + 소문자
+function norm(v) {
+  if (v == null) return "";
+  return String(v)
+    .replace(/\([^)]*\)/g, "")
+    .replace(/\[[^\]]*\]/g, "")
+    .replace(/\s+/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+// ── Stage 정규화
+const STAGE_INITIAL  = new Set(["초기", "초기교육", "입문", "입문교육", "initial"]);
+const STAGE_RECURRENT = new Set([
+  "보수", "보수교육", "정기", "정기교육", "갱신", "갱신교육", "재교육",
+  "recurrent", "recurring", "refresher", "recurrenttraining",
+]);
+const RESULT_PASS_SET = new Set(["pass", "이수", "수료", "완료", "합격"]);
+const RESULT_FAIL_SET = new Set(["fail", "미수료", "불합격"]);
+
+function normStage(v) {
+  if (!v) return null;
+  const s = norm(v);
+  if (STAGE_INITIAL.has(s))   return "initial";
+  if (STAGE_RECURRENT.has(s)) return "recurrent";
+  return null; // result 값은 null
+}
+
+function inferStage(...values) {
+  for (const value of values) {
+    const explicit = normStage(value);
+    if (explicit) return explicit;
+  }
+  const context = values.map((value) => norm(value)).join("|");
+  if (/초기|입문|initial/.test(context)) return "initial";
+  if (/보수|정기|갱신|재교육|recurr|refresher/.test(context)) return "recurrent";
+  return null;
+}
+
+function detectSheetTrainingType(sheetName) {
+  const value = norm(sheetName);
+  if (value.includes("법정")) return "legal";
+  if (/직무|보수|정기|갱신|재교육|초기|입문/.test(value)) return "job";
+  return "other";
+}
+
+function inferTrainingType(baseType, courseName, subjectName, sheetName) {
+  // 과정/과목의 명시적 분류가 시트명에서 얻은 기본값보다 우선한다.
+  const rowContext = [courseName, subjectName].map((value) => norm(value)).join("|");
+  if (rowContext.includes("직무")) return "job";
+  if (rowContext.includes("법정")) return "legal";
+  if (baseType === "legal" || baseType === "job") return baseType;
+  const context = [rowContext, norm(sheetName)].join("|");
+  if (context.includes("법정")) return "legal";
+  if (/직무|보수|정기|갱신|재교육|초기|입문/.test(context)) return "job";
+  return baseType || "other";
+}
+
+function normResult(v) {
+  if (!v) return null;
+  const s = norm(v);
+  if (STAGE_INITIAL.has(s) || STAGE_RECURRENT.has(s)) return null; // stage 값은 무시
+  if (RESULT_PASS_SET.has(s)) return "PASS";
+  if (RESULT_FAIL_SET.has(s)) return "FAIL";
+  return null;
+}
+
+/** result/stage 열 교차 감지·보정 */
+function resolveResultStage(rawResult, rawStage) {
+  const stageFromResultCol  = normStage(rawResult);
+  const resultFromStageCol  = normResult(rawStage);
+  const stageFromStageCol   = normStage(rawStage);
+  const resultFromResultCol = normResult(rawResult);
+
+  let finalResult = resultFromResultCol ?? null;
+  let finalStage  = stageFromStageCol  ?? null;
+
+  if (!finalResult && resultFromStageCol) finalResult = resultFromStageCol;
+  if (!finalStage  && stageFromResultCol) finalStage  = stageFromResultCol;
+
+  return {
+    result:             finalResult ?? "PASS",
+    initialOrRecurrent: finalStage  ?? null,
+  };
+}
+
+// ── 헤더 별칭 테이블
+const HEADER_ALIAS = {
+  // 교육과정명
+  교육과정명:    "courseName",  교육과정:  "courseName",
+  과정명:        "courseName",  교육과정명curriculum: "courseName",
+  // 교육과목
+  교육과목:      "subjectName", 과목:      "subjectName",
+  // 강사
+  강사:          "instructor",  instructor: "instructor",
+  // 교육시간
+  교육시간:      "hours",       "교육\n시간": "hours",
+  교육시간time:  "hours",       시간:          "hours",
+  // 교육기간 / 교육일자 / 교육날짜
+  교육기간:      "period",      교육일자:   "period",
+  교육기간period:"period",      기간:       "period",
+  // 수료일자
+  수료일자:      "completedAt", 수료일:     "completedAt",
+  "수료\n일자":  "completedAt", completion:  "completedAt",
+  // 결과
+  결과:          "result",      result:     "result",
+  결과result:    "result",
+  // 초기/보수 (stage)
+  "초기/보수":   "stage",       초기보수:   "stage",
+  "initial/recurrent": "stage", initialrecurrent: "stage",
+  // 보수 예정 (신태용/배수민 양식): stage
+  보수예정:      "stage",
+  // 교육 이수 / 발령일자 (신태용/배수민 양식): result 대용
+  교육이수:      "result2",     발령일자:   "result2",
+  // 비고
+  비고:          "note",        remark:     "note",
+};
+
+function normHeader(v) {
+  if (!v) return "";
+  const cleaned = norm(v);
+  return HEADER_ALIAS[cleaned] ?? cleaned;
+}
+
+// ── 시간 파싱: "3 HRS" → 3, "4H" → 4, "27H" → 27, "8HRS\n(4HRS...)" → 8
+function normHours(v) {
+  if (v == null || v === "") return null;
+  const s = String(v).split(/[\n(]/)[0]
+    .replace(/[Hh][Rr][Ss]?/g, "")
+    .replace(/시간/g, "")
+    .trim();
+  const n = parseFloat(s);
+  return isNaN(n) ? null : n;
+}
+
+// ── 날짜: Excel serial / ISO / YYYY.MM.DD / YYYY-MM-DD / datetime string
+function normDate(v) {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  if (Number.isFinite(n) && n >= 100000000000) return Math.round(n);
+  if (Number.isFinite(n) && n >= 30000 && n < 2958466) {
+    return Math.round((n - 25569) * 86400 * 1000);
+  }
+  let s = String(v).trim();
+  // "2024-02-26 00:00:00" 패턴 (datetime string)
+  s = s.replace(/ 00:00:00$/, "").trim();
+  // 범위면 첫 번째만
+  s = s.split(/[~–\n]/)[0].trim();
+  s = s.replace(/(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일?/, "$1-$2-$3");
+  // 구분자 통일
+  s = s.replace(/[.]/g, "-");
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d.getTime();
+}
+
+// ── 기간: 다양한 패턴 → { startDate, endDate }
+function normPeriod(v) {
+  if (!v) return { startDate: null, endDate: null };
+  const s = String(v).trim();
+
+  // 줄바꿈/범위/쉼표로 나열된 모든 완전한 날짜를 수집한다.
+  const dates = Array.from(s.matchAll(/(\d{4})[.\-/\s]+(\d{1,2})[.\-/\s]+(\d{1,2})/g))
+    .map((m) => normDate(`${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`))
+    .filter(Boolean)
+    .sort((a, b) => a - b);
+  if (dates.length) {
+    return { startDate: dates[0], endDate: dates.length > 1 ? dates[dates.length - 1] : null };
+  }
+
+  // YYYY.MM.DD\nYYYY.MM.DD 또는 YYYY.MM.DD~YYYY.MM.DD (전체 연도)
+  const m0 = s.match(
+    /(\d{4})[.\-\/\s]+(\d{1,2})[.\-\/\s]+(\d{1,2})\s*[~–\-\n\/]\s*(\d{4})[.\-\/\s]+(\d{1,2})[.\-\/\s]+(\d{1,2})/
+  );
+  if (m0) {
+    return {
+      startDate: normDate(`${m0[1]}-${m0[2].padStart(2,"0")}-${m0[3].padStart(2,"0")}`),
+      endDate:   normDate(`${m0[4]}-${m0[5].padStart(2,"0")}-${m0[6].padStart(2,"0")}`),
+    };
+  }
+  // YYYY.MM.DD~MM.DD (단축 종료)
+  const m1 = s.match(/^(\d{4})[.\-](\d{1,2})[.\-](\d{1,2})\s*[~–-]\s*(\d{1,2})[.\-](\d{1,2})$/);
+  if (m1) {
+    return {
+      startDate: normDate(`${m1[1]}-${m1[2].padStart(2,"0")}-${m1[3].padStart(2,"0")}`),
+      endDate:   normDate(`${m1[1]}-${m1[4].padStart(2,"0")}-${m1[5].padStart(2,"0")}`),
+    };
+  }
+  return { startDate: normDate(s), endDate: null };
+}
+
+// ── 이름 정규화 (공백, 영문 제거)
+function normName(v) {
+  if (!v) return "";
+  return String(v)
+    .replace(/\([^)]*\)/g, "")
+    .replace(/[a-zA-Z]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// ── 사번 정규화 (탭·공백 제거)
+function normEmpNo(v) {
+  if (!v) return "";
+  return String(v).normalize("NFKC")
+    .replace(/[\s\u00a0\u200b-\u200d\u2060\ufeff]/g, "")
+    .toUpperCase();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// § 3.  TEMPLATE DETECTOR
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * 공통 헤더 행 탐지: 교육과정명/과목 포함 행
+ * 반환: 행 인덱스(0-based) 또는 -1
+ */
+function findHeaderRow(sheet, startRow = 0, endRow = 30) {
+  for (let r = startRow; r <= Math.min(endRow, sheet.maxRow); r++) {
+    for (let c = 0; c <= sheet.maxCol; c++) {
+      const v = rawCell(sheet, r, c);
+      if (!v) continue;
+      const h = normHeader(v);
+      if (h === "courseName" || h === "subjectName") return r;
+    }
+  }
+  return -1;
+}
+
+/**
+ * 섹션 헤더 탐지: "법정교육"/"보수교육 및 사내교육" 같은 섹션 구분자 행
+ * 반환: { row, type: "legal"|"job" }[]
+ */
+function findSectionHeaders(sheet) {
+  const sections = [];
+  for (let r = 0; r <= sheet.maxRow; r++) {
+    const v = String(rawCell(sheet, r, 0) ?? rawCell(sheet, r, 1) ?? "").trim();
+    const n = norm(v);
+    let type = "";
+    if (n.includes("법정교육")) type = "legal";
+    else if (n.includes("직무교육") || n.includes("보수교육") || n.includes("사내교육")) type = "job";
+    if (!type) continue;
+
+    // 실제 과정명(예: 직무초기교육/직무보수교육)을 섹션 제목으로 오탐하지 않는다.
+    // 진짜 섹션 제목이라면 바로 아래 5행 안에 별도의 컬럼 헤더가 있어야 한다.
+    const headerRow = findHeaderRow(sheet, r, Math.min(r + 5, sheet.maxRow));
+    if (headerRow < r) continue;
+    sections.push({ row: r, type, headerRow });
+  }
+  return sections;
+}
+
+/** 시트가 TAS 양식인지 (수료일 열이 헤더에 없고 6~7열에 존재) */
+function isTasSheet(sheet) {
+  const hr = findHeaderRow(sheet);
+  if (hr < 0) return false;
+  // 헤더에 completedAt 열이 없으면 TAS
+  for (let c = 0; c <= sheet.maxCol; c++) {
+    const v = rawCell(sheet, hr, c);
+    if (normHeader(v) === "completedAt") return false;
+  }
+  return true;
+}
+
+/** 시트가 보수예정/교육이수형인지 */
+function isBosooSheet(sheet) {
+  const hr = findHeaderRow(sheet);
+  if (hr < 0) return false;
+  for (let c = 0; c <= sheet.maxCol; c++) {
+    const v = rawCell(sheet, hr, c);
+    const h = normHeader(v);
+    if (h === "stage" && norm(rawCell(sheet, hr, c) ?? "") === "보수예정") return true;
+  }
+  return false;
+}
+
+// ── Parser A: 표준형 (법정/직무 시트 분리, 컬럼 정상 존재)
+const ParserStandard = {
+  id: "standard",
+  name: "표준형 (법정/직무 분리)",
+  detect(sheet) {
+    return !isTasSheet(sheet) && !isBosooSheet(sheet) && findHeaderRow(sheet) >= 0;
+  },
+  parse(sheet, trainingType) {
+    return _parseBlock(sheet, findHeaderRow(sheet), sheet.maxRow, trainingType, { splitSubjects: false });
+  },
+};
+
+// ── Parser B: TAS형 (수료일 열 헤더 없음 → 6열 또는 7열에서 직접 읽기)
+const ParserTAS = {
+  id: "tas",
+  name: "TAS형 (수료일 헤더 없음)",
+  detect(sheet) { return isTasSheet(sheet); },
+  parse(sheet, trainingType) {
+    return _parseTAS(sheet, trainingType);
+  },
+};
+
+// ── Parser C: 보수예정/교육이수형 (신태용/배수민/강재원)
+const ParserBosoo = {
+  id: "bosoo",
+  name: "보수예정/교육이수형",
+  detect(sheet) { return isBosooSheet(sheet); },
+  parse(sheet, trainingType) {
+    return _parseBosoo(sheet, trainingType);
+  },
+};
+
+// ── Parser D: Sheet1 단일 시트 섹션형 (이지현)
+const ParserSheet1 = {
+  id: "sheet1_section",
+  name: "Sheet1 섹션 분리형",
+  detect(sheet) {
+    const sections = findSectionHeaders(sheet);
+    return sections.length >= 2;
+  },
+  parse(sheet) {
+    return _parseSheet1(sheet);
+  },
+};
+
+// ── Parser Z: Generic (fallback)
+const ParserGeneric = {
+  id: "generic",
+  name: "Generic",
+  detect() { return true; },
+  parse(sheet, trainingType) {
+    return _parseBlock(sheet, findHeaderRow(sheet), sheet.maxRow, trainingType, { splitSubjects: false });
+  },
+};
+
+// 순서: 구체적인 것 먼저
+const PARSERS = [ParserSheet1, ParserTAS, ParserBosoo, ParserStandard, ParserGeneric];
+
+function detectParser(sheet) {
+  for (const p of PARSERS) {
+    if (p.detect(sheet)) return p;
+  }
+  return ParserGeneric;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// § 4.  MAPPER
+// ═══════════════════════════════════════════════════════════════════
+
+export function normalizeEntryTypeValue(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return { value: "", reason: "값 없음" };
+  const normalized = raw.normalize("NFKC");
+  if (/^신입$/i.test(normalized)) return { value: "신입", reason: "단일 텍스트 신입 감지" };
+  if (/^경력$/i.test(normalized)) return { value: "경력", reason: "단일 텍스트 경력 감지" };
+  const markerPattern = /(?:O|○|●|✓|✔|V|Y|YES|■)/i;
+  const checked = (label) => {
+    const start = normalized.search(new RegExp(label, "i"));
+    if (start < 0) return false;
+    const other = label === "신입" ? "경력" : "신입";
+    const tail = normalized.slice(start + label.length);
+    const otherIndex = tail.search(new RegExp(other, "i"));
+    const segment = (otherIndex >= 0 ? tail.slice(0, otherIndex) : tail).trim();
+    const bracket = segment.match(/^[\s/:·,]*(?:\(|\[|【)\s*([^\)\]】]*)\s*(?:\)|\]|】)/);
+    if (bracket) {
+      const mark = bracket[1].trim();
+      return markerPattern.test(mark) || mark === "0";
+    }
+    return /^[\s/:·,]*(?:□\s*)?(?:O|○|●|✓|✔|V|Y|YES|■)(?=\s|\/|·|,|$)/i.test(segment);
+  };
+  const newcomer = checked("신입");
+  const experienced = checked("경력");
+  if (newcomer !== experienced) {
+    const result = newcomer ? "신입" : "경력";
+    return { value: result, reason: `${result} 항목의 인접 체크 표시 감지` };
+  }
+  return { value: "", reason: newcomer && experienced ? "양쪽 모두 체크되어 미탐지" : "체크 표시가 없거나 모호하여 미탐지" };
+}
+
+/** 직원 정보 탐지 */
+function detectEmpInfo(sheet, headerRow) {
+  const info = {
+    name: "",
+    empNo: "",
+    birthDate: null,
+    hireDate: null,
+    entryType: "",
+    internalLicense: "",
+    externalLicense: "",
+    branchName: "",
+    position: "",
+    diagnostics: [],
+  };
+  const labelKey = (value) => norm(value).replace(/[^a-z0-9가-힣]/g, "");
+  const aliasEntries = {
+    name: ["성명", "이름", "name", "성명name"],
+    empNo: ["사번", "직원번호", "employeeno", "employeeid", "empno", "idnbr", "사번idnbr"],
+    birthDate: ["생년월일", "생년월일", "생년", "dob", "dateofbirth", "birthdate", "birthday"],
+    hireDate: ["입사일", "입사일자", "입사년월일", "채용일", "hiredate", "joindate", "employmentdate"],
+    entryType: ["신입경력", "경력구분", "채용구분", "입사구분", "경력여부", "employmenttype", "careertype"],
+    internalLicense: ["사내자격", "사내자격증", "내부자격", "internallicense", "internalqualification"],
+    externalLicense: ["사외자격", "사외자격증", "외부자격", "externallicense", "externalqualification"],
+    branchName: ["지점", "소속지점", "소속", "부서", "근무지", "branch", "department", "station"],
+    position: ["직책", "직급직책", "직급", "position", "jobtitle", "title"],
+  };
+  const aliases = new Map();
+  Object.entries(aliasEntries).forEach(([field, values]) => values.forEach((value) => aliases.set(labelKey(value), field)));
+  const qualifications = { internalLicense: [], externalLicense: [] };
+  const emptyValues = new Set(["", "-", "없음", "해당없음", "na", "n/a", "none"]);
+  const cellRef = (row, col) => {
+    let letters = "";
+    for (let n = col + 1; n > 0; n = Math.floor((n - 1) / 26)) letters = String.fromCharCode(65 + ((n - 1) % 26)) + letters;
+    return `${letters}${row + 1}`;
+  };
+  const limit = Math.min(Math.max(headerRow + 1, 15), sheet.maxRow, 50);
+  for (let r = 0; r <= limit; r++) {
+    for (let c = 0; c <= sheet.maxCol; c++) {
+      const v = rawCell(sheet, r, c);
+      if (!v) continue;
+      const key = labelKey(v);
+      const field = aliases.get(key);
+      if (!field) continue;
+      const candidates = [];
+      for (let dc = 1; dc <= 6 && c + dc <= sheet.maxCol; dc++) {
+        const adjacent = rawCell(sheet, r, c + dc);
+        const adjacentField = aliases.get(labelKey(adjacent));
+        if (adjacentField === field) continue;
+        if (adjacentField) break;
+        candidates.push({ row: r, col: c + dc });
+      }
+      for (let dr = 1; dr <= 4 && r + dr <= sheet.maxRow; dr++) {
+        const adjacent = rawCell(sheet, r + dr, c);
+        const adjacentField = aliases.get(labelKey(adjacent));
+        if (adjacentField === field) continue;
+        if (adjacentField) break;
+        candidates.push({ row: r + dr, col: c });
+      }
+      for (const location of candidates) {
+        if (location.row > sheet.maxRow || location.col > sheet.maxCol) continue;
+        const cand = rawCell(sheet, location.row, location.col);
+        const raw = String(cand ?? "").trim();
+        if (!hasCellValue(cand) || aliases.has(labelKey(cand)) || emptyValues.has(labelKey(raw))) continue;
+        let normalized = raw;
+        if (field === "name") normalized = normName(raw);
+        else if (field === "empNo") normalized = normEmpNo(raw);
+        else if (field === "birthDate" || field === "hireDate") normalized = normDate(cand);
+        const entryTypeResult = field === "entryType" ? normalizeEntryTypeValue(raw) : null;
+        if (entryTypeResult) normalized = entryTypeResult.value;
+        if (entryTypeResult && !normalized) {
+          info.diagnostics.push({ field, label: String(v).trim(), labelCell: cellRef(r, c), valueCell: cellRef(location.row, location.col), rawValue: raw, normalizedValue: "미탐지", reason: entryTypeResult.reason });
+          break;
+        }
+        if (!normalized) continue;
+        info.diagnostics.push({
+          field,
+          label: String(v).trim(),
+          labelCell: cellRef(r, c),
+          valueCell: cellRef(location.row, location.col),
+          rawValue: raw,
+          normalizedValue: normalized,
+          reason: entryTypeResult?.reason ?? "",
+        });
+        if (field === "internalLicense" || field === "externalLicense") {
+          if (!qualifications[field].includes(String(normalized))) qualifications[field].push(String(normalized));
+        } else if (!info[field]) {
+          info[field] = normalized;
+        }
+        if (field !== "internalLicense" && field !== "externalLicense") break;
+      }
+    }
+  }
+  info.internalLicense = qualifications.internalLicense.join(" / ");
+  info.externalLicense = qualifications.externalLicense.join(" / ");
+  return info;
+}
+
+/** 컬럼맵 구축 */
+function buildColMap(sheet, headerRow) {
+  const colMap = {};
+  for (let c = 0; c <= sheet.maxCol; c++) {
+    const v = rawCell(sheet, headerRow, c);
+    if (!v) continue;
+    const key = normHeader(v);
+    if (key && !colMap[key]) colMap[key] = c;
+  }
+  return colMap;
+}
+
+const BLOCK_COMMON_FIELDS = [
+  "instructor", "hours", "period", "completedAt", "result", "result2", "stage", "note",
+];
+
+function blockComparable(field, value) {
+  if (!hasCellValue(value)) return "";
+  if (field === "stage") return normStage(value) ?? "";
+  if (field === "result" || field === "result2") {
+    return normResult(value) ?? normStage(value) ?? "";
+  }
+  return norm(value);
+}
+
+/**
+ * 과정 블록을 먼저 찾고, 블록 어느 행에 있든 하나뿐인 공통값을 대표값으로 만든다.
+ * 병합되지 않은 stage/result 셀이 블록 마지막 행에만 있어도 앞선 과목에 역방향 적용된다.
+ */
+function buildCourseBlockContexts(sheet, headerRow, dataEnd, colMap) {
+  const blocks = [];
+  let active = null;
+
+  for (let r = headerRow + 1; r <= dataEnd; r++) {
+    const courseCol = colMap.courseName;
+    const courseRaw = courseCol !== undefined ? rawCell(sheet, r, courseCol) : null;
+    const explicitCourseName = hasCellValue(courseRaw)
+      ? String(courseRaw).replace(/\n/g, " ").trim()
+      : "";
+
+    if (explicitCourseName && (!active || norm(explicitCourseName) !== norm(active.courseName))) {
+      if (active) active.endRow = r - 1;
+      active = { startRow: r, endRow: dataEnd, courseName: explicitCourseName, common: {} };
+      blocks.push(active);
+    }
+  }
+
+  const byRow = new Map();
+  for (const block of blocks) {
+    const subjectCol = colMap.subjectName;
+    block.hasSubjectRows = subjectCol !== undefined && Array.from(
+      { length: block.endRow - block.startRow + 1 },
+      (_, index) => block.startRow + index
+    ).some((r) => hasCellValue(rawCell(sheet, r, subjectCol)));
+    for (const field of BLOCK_COMMON_FIELDS) {
+      const col = colMap[field];
+      if (col === undefined) continue;
+      const candidates = [];
+      const distinct = new Set();
+      for (let r = block.startRow; r <= block.endRow; r++) {
+        const value = rawCell(sheet, r, col);
+        const comparable = blockComparable(field, value);
+        if (!comparable) continue;
+        candidates.push(value);
+        distinct.add(comparable);
+      }
+      if (distinct.size === 1 && candidates.length) block.common[field] = candidates[0];
+    }
+    for (let r = block.startRow; r <= block.endRow; r++) byRow.set(r, block);
+  }
+  return byRow;
+}
+
+/**
+ * 표준 블록 파싱
+ * dataStart: 데이터 시작 행(0-based), dataEnd: 종료 행
+ * trainingType: "legal"|"job"|"other"
+ */
+function _parseBlock(sheet, headerRow, dataEnd, trainingType, { splitSubjects = false } = {}) {
+  if (headerRow < 0) return [];
+
+  const colMap  = buildColMap(sheet, headerRow);
+  const empInfo = detectEmpInfo(sheet, headerRow);
+  const rows    = [];
+  const blockContexts = buildCourseBlockContexts(sheet, headerRow, dataEnd, colMap);
+
+  const inherit = {
+    courseName: "", instructor: "", hours: null, period: "",
+    completedAt: null, result: "", stage: "", note: "",
+  };
+
+  for (let r = headerRow + 1; r <= dataEnd; r++) {
+    const get = (field) => {
+      const c = colMap[field];
+      return c !== undefined ? rawCell(sheet, r, c) : null;
+    };
+
+    const courseRaw    = get("courseName");
+    const subjectRaw   = get("subjectName");
+    const instructorRaw = get("instructor");
+    const hoursRaw     = get("hours");
+    const periodRaw    = get("period");
+    const completedRaw = get("completedAt");
+    const resultRaw    = get("result");
+    // result2 = 교육이수 / 발령일자 → stage 혹은 result 보조
+    const result2Raw   = get("result2");
+    const stageRaw     = get("stage");
+    const noteRaw      = get("note");
+    const block = blockContexts.get(r) ?? null;
+
+    const explicitCourseName = hasCellValue(courseRaw)
+      ? String(courseRaw).replace(/\n/g, " ").trim()
+      : "";
+    const startsNewCourse = block?.startRow === r || (explicitCourseName && inherit.courseName &&
+      norm(explicitCourseName) !== norm(inherit.courseName));
+    if (startsNewCourse) {
+      // 과정 블록이 바뀌면 이전 과정의 초기/보수·강사·날짜가 새 과정으로 새지 않게 한다.
+      Object.assign(inherit, {
+        instructor: "", hours: null, period: "", completedAt: null,
+        result: "", stage: "", note: "",
+      });
+    }
+
+    // ── 과정명 상속
+    const resolvedCourseName = explicitCourseName || block?.courseName || inherit.courseName;
+    if (resolvedCourseName) inherit.courseName = resolvedCourseName;
+
+    // ── 나머지 상속
+    const instructorValue = hasCellValue(instructorRaw) ? instructorRaw : block?.common.instructor;
+    const hoursValue      = hasCellValue(hoursRaw) ? hoursRaw : block?.common.hours;
+    const periodValue     = hasCellValue(periodRaw) ? periodRaw : block?.common.period;
+    const completedValue  = hasCellValue(completedRaw) ? completedRaw : block?.common.completedAt;
+    const resultValue     = hasCellValue(resultRaw) ? resultRaw : block?.common.result;
+    const stageValue      = hasCellValue(stageRaw) ? stageRaw : block?.common.stage;
+    const noteValue       = hasCellValue(noteRaw) ? noteRaw : block?.common.note;
+    const result2Value    = hasCellValue(result2Raw) ? result2Raw : block?.common.result2;
+    const instructor  = hasCellValue(instructorValue) ? String(instructorValue).replace(/\n/g, ", ").trim() : inherit.instructor;
+    const hoursVal    = hasCellValue(hoursValue) ? hoursValue : inherit.hours;
+    const period      = hasCellValue(periodValue) ? String(periodValue) : inherit.period;
+    const completedAt = hasCellValue(completedValue) ? completedValue : inherit.completedAt;
+    const result      = hasCellValue(resultValue) ? String(resultValue) : inherit.result;
+    const stage       = hasCellValue(stageValue) ? String(stageValue) : inherit.stage;
+    const note        = hasCellValue(noteValue) ? String(noteValue) : inherit.note;
+
+    if (hasCellValue(instructorRaw)) inherit.instructor = instructor;
+    if (hasCellValue(hoursRaw)) inherit.hours = hoursRaw;
+    if (hasCellValue(periodRaw)) inherit.period = period;
+    if (hasCellValue(completedRaw)) inherit.completedAt = completedRaw;
+    if (hasCellValue(resultRaw)) inherit.result = result;
+    if (hasCellValue(stageRaw)) inherit.stage = stage;
+    if (hasCellValue(noteRaw)) inherit.note = note;
+
+    if (!resolvedCourseName && !subjectRaw) continue;
+
+    const { startDate, endDate } = normPeriod(period);
+    const completedMs = normDate(completedAt);
+
+    // result2(교육이수) 처리: stage 열에 보수예정, result2 열에 이수 같은 구조
+    let rawResultFinal = result;
+    let rawStageFinal  = stage;
+    if (result2Value != null) {
+      const r2 = String(result2Value).trim();
+      // result2가 result 값이면 result로 사용
+      if (normResult(r2)) rawResultFinal = r2;
+      // result2가 stage 값이면 stage로 사용 (보완)
+      else if (normStage(r2)) rawStageFinal = rawStageFinal || r2;
+    }
+
+    let subjects = [];
+    if (subjectRaw != null) {
+      const raw = String(subjectRaw);
+      subjects = splitSubjects
+        ? raw.split(/\n/).map((s) => s.trim()).filter(Boolean)
+        : [raw.trim()].filter(Boolean);
+    }
+    // 블록 공통값만 기록된 보조 행은 세부 과목 이력으로 만들지 않는다.
+    if (!hasCellValue(subjectRaw) && block?.hasSubjectRows) continue;
+    if (!subjects.length) subjects = [""];
+
+    if (!resolvedCourseName && subjects.every((s) => !s) && !completedMs) continue;
+
+    for (const subjectName of subjects) {
+      const resolved = resolveResultStage(rawResultFinal, rawStageFinal);
+      const initialOrRecurrent = resolved.initialOrRecurrent ?? inferStage(
+        rawStageFinal,
+        resolvedCourseName,
+        subjectName,
+        sheet.sheetName
+      );
+      rows.push({
+        sourceRowNumber: r + 1,
+        employeeName: empInfo.name,
+        empNo:        empInfo.empNo,
+        trainingType: inferTrainingType(trainingType, resolvedCourseName, subjectName, sheet.sheetName),
+        courseName:   resolvedCourseName || subjectName,
+        subjectName:  subjectName || resolvedCourseName,
+        instructor,
+        hours:        normHours(hoursVal),
+        startDate,
+        endDate,
+        completedAt:  completedMs,
+        result: resolved.result,
+        initialOrRecurrent,
+        note:         String(note).replace(/\n/g, " ").trim(),
+        sourceBlockStartRow: block ? block.startRow + 1 : r + 1,
+        sourceBlockEndRow: block ? block.endRow + 1 : r + 1,
+        rawCourseName: explicitCourseName || block?.courseName || "",
+        rawStage: hasCellValue(stageRaw) ? String(stageRaw) : String(block?.common.stage ?? ""),
+        rawPeriod: hasCellValue(periodRaw) ? String(periodRaw) : String(block?.common.period ?? ""),
+        rawCompletedAt: hasCellValue(completedRaw) ? completedRaw : block?.common.completedAt ?? null,
+      });
+    }
+  }
+
+  return rows;
+}
+
+/**
+ * TAS 형 파싱
+ * 헤더에 수료일자 열이 없고, 실제 데이터에서 6열(col5) 또는 7열(col6)에 수료일이 있음
+ * 교육일자 열을 period로, 별도 수료일을 completedAt으로 처리
+ */
+function _parseTAS(sheet, trainingType) {
+  const hr = findHeaderRow(sheet);
+  if (hr < 0) return [];
+
+  const colMap  = buildColMap(sheet, hr);
+  const empInfo = detectEmpInfo(sheet, hr);
+  const rows    = [];
+
+  // TAS에서 수료일은 헤더가 없어도 6열(col5)이나 7열(col6)에 있음
+  // period 열(교육일자) 옆 열을 completedAt으로 추정
+  let completedAtCol = -1;
+  const periodCol = colMap["period"] ?? -1;
+  if (periodCol >= 0) {
+    // 헤더에 없는 오른쪽 열 탐색 (데이터 행에서 날짜값 확인)
+    for (let dc = 1; dc <= 3; dc++) {
+      const testCol = periodCol + dc;
+      // 이 열이 다른 헤더가 아닌지 확인
+      const headerVal = normHeader(rawCell(sheet, hr, testCol) ?? "");
+      if (headerVal === "stage" || headerVal === "note" || headerVal === "result2") continue;
+      // 데이터 행에서 날짜 같은 값이 있는지
+      for (let r = hr + 1; r <= Math.min(hr + 5, sheet.maxRow); r++) {
+        const v = rawCell(sheet, r, testCol);
+        if (v && normDate(v)) { completedAtCol = testCol; break; }
+      }
+      if (completedAtCol >= 0) break;
+    }
+  }
+  const blockContexts = buildCourseBlockContexts(sheet, hr, sheet.maxRow, {
+    ...colMap,
+    ...(completedAtCol >= 0 ? { completedAt: completedAtCol } : {}),
+  });
+
+  const inherit = {
+    courseName: "", instructor: "", hours: null, period: "",
+    completedAt: null, result: "", stage: "", note: "",
+  };
+
+  for (let r = hr + 1; r <= sheet.maxRow; r++) {
+    const get = (field) => {
+      const c = colMap[field];
+      return c !== undefined ? rawCell(sheet, r, c) : null;
+    };
+
+    const courseRaw    = get("courseName");
+    const subjectRaw   = get("subjectName");
+    const instructorRaw = get("instructor");
+    const hoursRaw     = get("hours");
+    const periodRaw    = get("period");
+    const completedRaw = completedAtCol >= 0 ? rawCell(sheet, r, completedAtCol) : get("completedAt");
+    const stageRaw     = get("stage");
+    const result2Raw   = get("result2");
+    const noteRaw      = get("note");
+    const block = blockContexts.get(r) ?? null;
+
+    const explicitCourseName = hasCellValue(courseRaw)
+      ? String(courseRaw).replace(/\n/g, " ").trim()
+      : "";
+    const startsNewCourse = block?.startRow === r || (explicitCourseName && inherit.courseName &&
+      norm(explicitCourseName) !== norm(inherit.courseName));
+    if (startsNewCourse) {
+      Object.assign(inherit, {
+        instructor: "", hours: null, period: "", completedAt: null,
+        result: "", stage: "", note: "",
+      });
+    }
+
+    const courseName = explicitCourseName || block?.courseName || inherit.courseName;
+    if (courseName) inherit.courseName = courseName;
+
+    const instructorValue = hasCellValue(instructorRaw) ? instructorRaw : block?.common.instructor;
+    const hoursValue      = hasCellValue(hoursRaw) ? hoursRaw : block?.common.hours;
+    const periodValue     = hasCellValue(periodRaw) ? periodRaw : block?.common.period;
+    const completedValue  = hasCellValue(completedRaw) ? completedRaw : block?.common.completedAt;
+    const stageValue      = hasCellValue(stageRaw) ? stageRaw : block?.common.stage;
+    const noteValue       = hasCellValue(noteRaw) ? noteRaw : block?.common.note;
+    const result2Value    = hasCellValue(result2Raw) ? result2Raw : block?.common.result2;
+    const instructor  = hasCellValue(instructorValue) ? String(instructorValue).replace(/\n/g, ", ").trim() : inherit.instructor;
+    const hoursVal    = hasCellValue(hoursValue) ? hoursValue : inherit.hours;
+    const period      = hasCellValue(periodValue) ? String(periodValue) : inherit.period;
+    const completedAt = hasCellValue(completedValue) ? completedValue : inherit.completedAt;
+    const stage       = hasCellValue(stageValue) ? String(stageValue) : inherit.stage;
+    const note        = hasCellValue(noteValue) ? String(noteValue) : inherit.note;
+
+    if (instructorRaw  != null) inherit.instructor  = instructor;
+    if (hoursRaw       != null) inherit.hours       = hoursRaw;
+    if (periodRaw      != null) inherit.period      = period;
+    if (completedRaw   != null) inherit.completedAt = completedRaw;
+    if (stageRaw       != null) inherit.stage       = stage;
+    if (noteRaw        != null) inherit.note        = note;
+
+    if (!courseName && !subjectRaw) continue;
+    if (!hasCellValue(subjectRaw) && block?.hasSubjectRows) continue;
+
+    // TAS에서 result는 "이수"(교육이수 열), stage는 "초기"(보수예정 열)
+    let rawResult = "PASS";
+    let rawStage  = stage;
+    if (result2Value != null) {
+      const r2 = String(result2Value).trim();
+      if (normResult(r2)) rawResult = r2;
+    }
+
+    const { startDate, endDate } = normPeriod(period);
+    const completedMs = normDate(completedAt);
+
+    if (!courseName && !subjectRaw && !completedMs) continue;
+
+    const subjectName = subjectRaw != null ? String(subjectRaw).trim() : "";
+    const resolved = resolveResultStage(rawResult, rawStage);
+    const initialOrRecurrent = resolved.initialOrRecurrent ?? inferStage(
+      rawStage,
+      courseName,
+      subjectName,
+      sheet.sheetName
+    );
+    rows.push({
+      sourceRowNumber: r + 1,
+      employeeName: empInfo.name,
+      empNo:        empInfo.empNo,
+      trainingType: inferTrainingType(trainingType, courseName, subjectName, sheet.sheetName),
+      courseName:   courseName || subjectName,
+      subjectName:  subjectName || courseName,
+      instructor,
+      hours:        normHours(hoursVal),
+      startDate,
+      endDate,
+      completedAt:  completedMs,
+      result: resolved.result,
+      initialOrRecurrent,
+      note:         String(note).replace(/\n/g, " ").trim(),
+      sourceBlockStartRow: block ? block.startRow + 1 : r + 1,
+      sourceBlockEndRow: block ? block.endRow + 1 : r + 1,
+      rawCourseName: explicitCourseName || block?.courseName || "",
+      rawStage: hasCellValue(stageRaw) ? String(stageRaw) : String(block?.common.stage ?? ""),
+      rawPeriod: hasCellValue(periodRaw) ? String(periodRaw) : String(block?.common.period ?? ""),
+      rawCompletedAt: hasCellValue(completedRaw) ? completedRaw : block?.common.completedAt ?? null,
+    });
+  }
+
+  return rows;
+}
+
+/**
+ * 보수예정/교육이수형 파싱 (신태용, 배수민, 강재원)
+ * - 헤더: 보수예정(stage), 교육이수/발령일자(result2)
+ * - 법정: 교육일자 열(period=교육날짜), 직무: 교육기간 열
+ */
+function _parseBosoo(sheet, trainingType) {
+  // 표준 파싱과 동일하되 result2 처리 포함
+  return _parseBlock(sheet, findHeaderRow(sheet), sheet.maxRow, trainingType, { splitSubjects: false });
+}
+
+/**
+ * Sheet1 섹션 분리형 파싱 (이지현)
+ * 단일 시트에 법정+직무 섹션이 순서대로 있음
+ */
+function _parseSheet1(sheet) {
+  const sections = findSectionHeaders(sheet);
+  const empInfo  = detectEmpInfo(sheet, findHeaderRow(sheet));
+  const allRows  = [];
+
+  for (let i = 0; i < sections.length; i++) {
+    const sec     = sections[i];
+    const nextSec = sections[i + 1];
+    const secEnd  = nextSec ? nextSec.row - 1 : sheet.maxRow;
+
+    // 섹션 내 헤더 행 탐지
+    const hr = sec.headerRow ?? findHeaderRow(sheet, sec.row, sec.row + 5);
+    if (hr < 0) continue;
+
+    const blockRows = _parseBlock(sheet, hr, secEnd, sec.type, { splitSubjects: false });
+    // 직원 정보 덮어쓰기 (Sheet1에서 한 번만 탐지됨)
+    for (const row of blockRows) {
+      row.employeeName = row.employeeName || empInfo.name;
+      row.empNo        = row.empNo        || empInfo.empNo;
+    }
+    allRows.push(...blockRows);
+  }
+
+  return allRows;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// § 5.  VALIDATOR
+// ═══════════════════════════════════════════════════════════════════
+const STATUS = {
+  NEW:       "신규",
+  FILL:      "보완",
+  DUPLICATE: "중복",
+  ERROR:     "오류",
+};
+
+function validate(rows, { empByNo, empByName, existingHistory }) {
+  const normKey = (s) => String(s ?? "").toLowerCase().replace(/[\s()[\]·\-]/g, "");
+
+  return rows.map((row) => {
+    if (!row.courseName && !row.subjectName) {
+      return { ...row, _status: STATUS.ERROR, _statusDetail: "과정명 없음" };
+    }
+    if (!row.completedAt) {
+      return { ...row, _status: STATUS.ERROR, _statusDetail: "수료일 없음" };
+    }
+
+    // 직원 매칭
+    let employee = null;
+    if (row.empNo) employee = empByNo.get(row.empNo.toLowerCase()) ?? null;
+    if (!employee && row.employeeName) {
+      const cands = empByName.get(row.employeeName) ?? [];
+      if (cands.length === 1) employee = cands[0];
+      else if (cands.length > 1) {
+        return { ...row, _status: STATUS.ERROR, _statusDetail: `동명이인 (${cands.length}명)` };
+      }
+    }
+    if (!employee) {
+      return { ...row, _status: STATUS.ERROR, _statusDetail: `직원 미매칭: ${row.employeeName || row.empNo || "?"}` };
+    }
+
+    // 기존 이력 매칭
+    const courseKey = normKey(row.courseName || row.subjectName);
+    const subjectKey = normKey(row.subjectName || row.courseName);
+    const typeKey = row.trainingType || "other";
+    const stageKey = inferStage(row.initialOrRecurrent, row.courseName, row.subjectName) || "";
+    const existing = existingHistory.find((h) => {
+      if (h.uid !== employee.uid) return false;
+      const hCourse = normKey(h.courseName ?? h.title ?? h.subjectName ?? "");
+      const hSubject = normKey(h.subjectName ?? h.courseName ?? h.title ?? "");
+      const hDate   = Number(h.completedAt ?? 0);
+      return normalizeImportTrainingType(h.trainingType) === typeKey &&
+        hCourse === courseKey &&
+        hSubject === subjectKey &&
+        hDate === Number(row.completedAt) &&
+        (inferStage(h.subType, h.educationStage) || "") === stageKey;
+    });
+
+    if (existing) {
+      const fillable = ["instructor", "hours", "startDate", "endDate", "initialOrRecurrent", "note"].filter((f) => {
+        const existVal = existing[f === "instructor" ? "instructorName" : f === "initialOrRecurrent" ? "educationStage" : f];
+        return (!existVal || existVal === "" || existVal === "-") && !!row[f];
+      });
+      return {
+        ...row,
+        _status: fillable.length > 0 ? STATUS.FILL : STATUS.DUPLICATE,
+        _statusDetail: fillable.join(", ") || "완료",
+        _employee: employee,
+        _existing: existing,
+      };
+    }
+
+    return { ...row, _status: STATUS.NEW, _statusDetail: "신규 생성", _employee: employee };
+  });
+}
+
+function normalizeImportTrainingType(value) {
+  const key = norm(value);
+  if (["job", "직무", "직무교육", "initial", "recurrent", "recurring"].includes(key)) return "job";
+  if (["legal", "법정", "법정교육"].includes(key)) return "legal";
+  if (["online", "온라인", "온라인교육"].includes(key)) return "online";
+  if (["external", "외부", "외부교육"].includes(key)) return "external";
+  return "other";
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// § 6.  PREVIEW
+// ═══════════════════════════════════════════════════════════════════
+export function renderDetailedPreview(container, preview) {
+  if (!container) return;
+  const STATUS_COLOR = {
+    신규: "var(--green-600,#16a34a)",
+    보완: "var(--blue-600,#2563eb)",
+    중복: "var(--gray-400,#9ca3af)",
+    오류: "var(--red-600,#dc2626)",
+  };
+  const fmt = (ms) => {
+    if (!ms) return "–";
+    const d = new Date(Number(ms));
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  };
+  const esc = (s) => String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  const stageLabel = { initial: "초기", recurrent: "보수" };
+  const { summary, rows } = preview;
+  const originalRows = rows.map((row, originalIndex) => ({ row, originalIndex }));
+  let sortState = { column: null, direction: null };
+  const columns = [
+    { key: "status", label: "처리", value: (r) => r._status },
+    { key: "employeeName", label: "직원명", value: (r) => r._employee?.name ?? r.employeeName },
+    { key: "empNo", label: "사번", value: (r) => r._employee?.empNo ?? r.empNo },
+    { key: "trainingType", label: "교육유형/분류", value: (r) => r.trainingType },
+    { key: "courseName", label: "교육과정명", value: (r) => r.courseName },
+    { key: "subjectName", label: "교육과목명", value: (r) => r.subjectName },
+    { key: "instructor", label: "강사", value: (r) => r.instructor },
+    { key: "hours", label: "교육시간", value: (r) => Number(r.hours ?? 0), numeric: true },
+    { key: "startDate", label: "교육 시작일", value: (r) => Number(r.startDate ?? 0), numeric: true },
+    { key: "endDate", label: "교육 종료일", value: (r) => Number(r.endDate ?? 0), numeric: true },
+    { key: "completedAt", label: "수료일", value: (r) => Number(r.completedAt ?? 0), numeric: true },
+    { key: "result", label: "결과", value: (r) => r.result },
+    { key: "stage", label: "초기/보수", value: (r) => stageLabel[r.initialOrRecurrent] ?? r.initialOrRecurrent },
+    { key: "note", label: "비고", value: (r) => r.note },
+  ];
+
+  const cycleSort = (key) => {
+    const previousDirection = sortState.column === key ? sortState.direction : null;
+    const nextDirection = previousDirection === null ? "asc" : previousDirection === "asc" ? "desc" : null;
+    sortState = { column: nextDirection ? key : null, direction: nextDirection };
+    renderTable();
+  };
+
+  const renderTable = () => {
+    const selectedColumn = columns.find((column) => column.key === sortState.column);
+    const displayedRows = [...originalRows];
+    if (selectedColumn && sortState.direction) {
+      const direction = sortState.direction === "asc" ? 1 : -1;
+      displayedRows.sort((a, b) => {
+        const av = selectedColumn.value(a.row);
+        const bv = selectedColumn.value(b.row);
+        const compared = selectedColumn.numeric
+          ? (Number(av) || 0) - (Number(bv) || 0)
+          : String(av ?? "").localeCompare(String(bv ?? ""), "ko", { numeric: true, sensitivity: "base" });
+        return compared === 0 ? a.originalIndex - b.originalIndex : compared * direction;
+      });
+    }
+
+    const header = (column) => {
+      const active = sortState.column === column.key && Boolean(sortState.direction);
+      const icon = active ? (sortState.direction === "asc" ? "▲" : "▼") : "";
+      const ariaSort = !active ? "none" : sortState.direction === "asc" ? "ascending" : "descending";
+      return `<th data-preview-sort="${column.key}" tabindex="0" aria-sort="${ariaSort}" style="cursor:pointer;user-select:none;white-space:nowrap" title="클릭: 오름차순 → 내림차순 → 원래 순서">${column.label}${icon ? ` <span aria-hidden="true" style="font-size:10px">${icon}</span>` : ""}</th>`;
+    };
+
+    container.innerHTML = `
+      <div style="display:flex;gap:var(--space-3);flex-wrap:wrap;margin-bottom:var(--space-3);font-size:var(--text-sm)">
+        <span>전체 <strong>${summary.total}</strong></span>
+        <span style="color:var(--green-600,#16a34a)">신규 <strong>${summary.new}</strong></span>
+        <span style="color:var(--blue-600,#2563eb)">보완 <strong>${summary.fill}</strong></span>
+        <span style="color:var(--gray-400,#9ca3af)">중복 <strong>${summary.duplicate}</strong></span>
+        <span style="color:var(--red-600,#dc2626)">오류 <strong>${summary.error}</strong></span>
+      </div>
+      <div style="overflow-x:auto;max-height:400px;overflow-y:auto;border:1px solid var(--gray-200);border-radius:var(--radius-md)">
+        <table class="data-table" style="min-width:1100px;font-size:var(--text-xs)">
+          <thead><tr>${columns.map(header).join("")}</tr></thead>
+          <tbody>
+            ${displayedRows.map(({ row: r }) => `
+              <tr>
+                <td><span style="color:${STATUS_COLOR[r._status] ?? "inherit"};font-weight:600">${esc(r._status)}</span>
+                    ${r._statusDetail ? `<br/><span style="color:var(--gray-400);font-size:10px">${esc(r._statusDetail)}</span>` : ""}
+                </td>
+                <td>${esc(r._employee?.name ?? r.employeeName)}</td>
+                <td>${esc(r._employee?.empNo ?? r.empNo)}</td>
+                <td>${r.trainingType === "legal" ? "법정" : r.trainingType === "job" ? "직무" : r.trainingType === "online" ? "온라인" : r.trainingType === "external" ? "외부" : "기타"}</td>
+                <td>${esc(r.courseName)}</td><td>${esc(r.subjectName)}</td><td>${esc(r.instructor)}</td>
+                <td>${r.hours ?? "–"}</td><td>${fmt(r.startDate)}</td><td>${fmt(r.endDate)}</td>
+                <td>${fmt(r.completedAt)}</td><td>${esc(r.result)}</td>
+                <td>${esc(stageLabel[r.initialOrRecurrent] ?? r.initialOrRecurrent ?? "–")}</td><td>${esc(r.note)}</td>
+              </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>`;
+
+  };
+
+  if (container._excelPreviewSortClick) container.removeEventListener("click", container._excelPreviewSortClick);
+  if (container._excelPreviewSortKeydown) container.removeEventListener("keydown", container._excelPreviewSortKeydown);
+  container._excelPreviewSortClick = (event) => {
+    const header = event.target.closest?.("th[data-preview-sort]");
+    if (!header || !container.contains(header)) return;
+    cycleSort(header.dataset.previewSort);
+  };
+  container._excelPreviewSortKeydown = (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const header = event.target.closest?.("th[data-preview-sort]");
+    if (!header || !container.contains(header)) return;
+    event.preventDefault();
+    cycleSort(header.dataset.previewSort);
+  };
+  container.addEventListener("click", container._excelPreviewSortClick);
+  container.addEventListener("keydown", container._excelPreviewSortKeydown);
+
+  renderTable();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// § 7.  공개 API
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * 파일 분석 (Reader → Normalizer → TemplateDetector → Mapper)
+ */
+export async function analyzeExcel(file) {
+  const sheetRaws = await readerRead(file);
+
+  const allRows    = [];
+  const parsersUsed = [];
+  const parserDiagnostics = [];
+
+  for (const sheetRaw of sheetRaws) {
+    const parser = detectParser(sheetRaw);
+    const headerRow = findHeaderRow(sheetRaw);
+    const candidates = PARSERS.map((candidate) => ({
+      id: candidate.id,
+      matched: Boolean(candidate.detect(sheetRaw)),
+    }));
+    if (!parsersUsed.includes(parser.name)) parsersUsed.push(parser.name);
+
+    // 시트 이름에서 교육유형 판별
+    const trainingType = detectSheetTrainingType(sheetRaw.sheetName);
+
+    let rows;
+    if (parser.id === "sheet1_section") {
+      // Sheet1 섹션형은 내부에서 교육유형을 스스로 판별
+      rows = parser.parse(sheetRaw);
+    } else {
+      rows = parser.parse(sheetRaw, trainingType);
+    }
+    const colMap = headerRow >= 0 ? buildColMap(sheetRaw, headerRow) : {};
+    const importTracePrefix = `${Date.now().toString(36)}-${sheetRaw.sheetName}`;
+    rows = rows.map((row, index) => ({
+      ...row,
+      // 구분 열이 없는 시트도 시트/섹션 구조로 초기·보수를 보존한다.
+      trainingType: inferTrainingType(
+        row.trainingType ?? trainingType,
+        row.courseName,
+        row.subjectName,
+        sheetRaw.sheetName
+      ),
+      initialOrRecurrent: row.initialOrRecurrent ?? inferStage(
+        row.courseName,
+        row.subjectName,
+        sheetRaw.sheetName
+      ),
+      sourceRowNumber: row.sourceRowNumber ?? (headerRow + index + 2),
+      sourceSheetName: sheetRaw.sheetName,
+      importTraceId: `${importTracePrefix}-${index + 1}`,
+    }));
+    parserDiagnostics.push({
+      sheetName: sheetRaw.sheetName,
+      detectedTemplate: parser.id,
+      finalParser: parser.id,
+      candidates,
+      headerRow: headerRow >= 0 ? headerRow + 1 : null,
+      dataStartRow: headerRow >= 0 ? headerRow + 2 : null,
+      columnMapping: colMap,
+      parsedCount: rows.length,
+    });
+    allRows.push(...rows);
+  }
+
+  // 직원 정보 추출 (첫 번째 유효 시트)
+  let empInfo = {
+    name: "", empNo: "", birthDate: null, hireDate: null, entryType: "",
+    internalLicense: "", externalLicense: "", branchName: "", position: "",
+    diagnostics: [],
+  };
+  for (const sheetRaw of sheetRaws) {
+    const hr = findHeaderRow(sheetRaw);
+    const info = detectEmpInfo(sheetRaw, hr >= 0 ? hr : 12);
+    for (const [key, value] of Object.entries(info)) {
+      if (key === "diagnostics") empInfo.diagnostics.push(...(Array.isArray(value) ? value : []));
+      else if (!empInfo[key] && value) empInfo[key] = value;
+    }
+  }
+
+  return { empInfo, rows: allRows, parsersUsed, parserDiagnostics, fileName: file.name };
+}
+
+export function validateAndPreview(rows, lookups) {
+  const validated = validate(rows, lookups);
+  const summary = {
+    total:     validated.length,
+    new:       validated.filter((r) => r._status === STATUS.NEW).length,
+    fill:      validated.filter((r) => r._status === STATUS.FILL).length,
+    duplicate: validated.filter((r) => r._status === STATUS.DUPLICATE).length,
+    error:     validated.filter((r) => r._status === STATUS.ERROR).length,
+  };
+  return { summary, rows: validated };
+}
+
+export function getImportableRows(validatedRows) {
+  return validatedRows.filter((r) => r._status === STATUS.NEW || r._status === STATUS.FILL);
+}
+
+export { STATUS };

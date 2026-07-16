@@ -1,203 +1,111 @@
-/**
- * TAS WT — Router
- * Hash-based SPA router with role-based guards.
- *
- * URL pattern: /#/{view}/{...params}
- * e.g.  /#/dashboard
- *        /#/trainings
- *        /#/trainings/abc123
- *        /#/admin/users
- */
-
-import { authStore, ROLES } from "./auth.js";
+import { authStore, PORTAL_ROLES, ROLES } from "./auth.js";
+import { TEXT } from "../constants/text.js";
 import { setBreadcrumb, setPageTitle } from "../modules/topbar.js";
 import { toast } from "../utils/toast.js";
 
-/* ── Route definitions ───────────────────────────────────── */
-// Each route: { path, view: async fn, title, allow: [ROLES...] | null (all) }
 const routes = [
-  // ── Shared / common
-  {
-    path: "dashboard",
-    title: "대시보드",
-    allow: null,
-    view: () => import("../views/dashboard.js").then(m => m.render),
-  },
-  {
-    path: "my-trainings",
-    title: "내 교육",
-    allow: [ROLES.EMPLOYEE, ROLES.INSTRUCTOR],
-    view: () => import("../views/my-trainings.js").then(m => m.render),
-  },
-  {
-    path: "my-history",
-    title: "교육 이력",
-    allow: [ROLES.EMPLOYEE],
-    view: () => import("../views/my-history.js").then(m => m.render),
-  },
-
-  // ── HQ Admin
-  {
-    path: "trainings",
-    title: "교육 관리",
-    allow: [ROLES.HQ_ADMIN, ROLES.SUPER_ADMIN],
-    view: () => import("../views/trainings.js").then(m => m.render),
-  },
-  {
-    path: "training-detail",
-    title: "교육 상세",
-    allow: [ROLES.HQ_ADMIN, ROLES.SUPER_ADMIN],
-    view: () => import("../views/training-detail.js").then(m => m.render),
-  },
-  {
-    path: "materials",
-    title: "교육자료",
-    allow: [ROLES.HQ_ADMIN, ROLES.INSTRUCTOR],
-    view: () => import("../views/materials.js").then(m => m.render),
-  },
-  {
-    path: "employees",
-    title: "직원 관리",
-    allow: [ROLES.HQ_ADMIN],
-    view: () => import("../views/employees.js").then(m => m.render),
-  },
-  {
-    path: "employee-detail",
-    title: "직원 상세",
-    allow: [ROLES.HQ_ADMIN],
-    view: () => import("../views/employee-detail.js").then(m => m.render),
-  },
-  {
-    path: "statistics",
-    title: "통계",
-    allow: [ROLES.HQ_ADMIN],
-    view: () => import("../views/statistics.js").then(m => m.render),
-  },
-  {
-    path: "announcements",
-    title: "공지사항",
-    allow: null,
-    view: () => import("../views/announcements.js").then(m => m.render),
-  },
-  {
-    path: "templates",
-    title: "교육 템플릿",
-    allow: [ROLES.HQ_ADMIN],
-    view: () => import("../views/templates.js").then(m => m.render),
-  },
-
-  // ── Instructor
-  {
-    path: "slideshow",
-    title: "슬라이드쇼",
-    allow: [ROLES.INSTRUCTOR, ROLES.HQ_ADMIN],
-    view: () => import("../views/slideshow.js").then(m => m.render),
-  },
-  {
-    path: "lesson-plan",
-    title: "교안 작성",
-    allow: [ROLES.INSTRUCTOR],
-    view: () => import("../views/lesson-plan.js").then(m => m.render),
-  },
-
-  // ── Super Admin
-  {
-    path: "admin/companies",
-    title: "회사 관리",
-    allow: [ROLES.SUPER_ADMIN],
-    view: () => import("../views/admin/companies.js").then(m => m.render),
-  },
-  {
-    path: "admin/branches",
-    title: "지점 관리",
-    allow: [ROLES.SUPER_ADMIN],
-    view: () => import("../views/admin/branches.js").then(m => m.render),
-  },
-  {
-    path: "admin/accounts",
-    title: "계정 관리",
-    allow: [ROLES.SUPER_ADMIN],
-    view: () => import("../views/admin/accounts.js").then(m => m.render),
-  },
-  {
-    path: "admin/settings",
-    title: "시스템 설정",
-    allow: [ROLES.SUPER_ADMIN],
-    view: () => import("../views/admin/settings.js").then(m => m.render),
-  },
+  { path: "dashboard", title: TEXT.routes.dashboard, allow: PORTAL_ROLES, view: () => import("../views/dashboard.js").then((m) => m.render) },
+  { path: "my-trainings", title: TEXT.routes.myTrainings, allow: [ROLES.INSTRUCTOR], view: () => import("../views/my-trainings.js").then((m) => m.render) },
+  { path: "trainings", title: TEXT.routes.trainings, allow: [ROLES.SUPER_ADMIN], view: () => import("../views/trainings.js").then((m) => m.render) },
+  { path: "instructor-trainings", title: TEXT.routes.instructorTrainings, allow: [ROLES.INSTRUCTOR], view: () => import("../views/instructor-trainings.js").then((m) => m.render) },
+  { path: "training-detail", title: TEXT.routes.trainingDetail, allow: [ROLES.SUPER_ADMIN, ROLES.INSTRUCTOR], view: () => import("../views/training-detail.js").then((m) => m.render) },
+  { path: "history-overview", title: TEXT.routes.historyOverview, allow: [ROLES.SUPER_ADMIN], view: () => import("../views/history-overview.js").then((m) => m.render) },
+  { path: "history-cards", title: TEXT.routes.historyCards, allow: [ROLES.HQ_ADMIN, ROLES.SUPER_ADMIN, ROLES.INSTRUCTOR], view: () => import("../views/history-cards.js").then((m) => m.render) },
+  { path: "materials", title: TEXT.routes.materials, allow: [ROLES.HQ_ADMIN, ROLES.INSTRUCTOR, ROLES.SUPER_ADMIN], view: () => import("../views/materials.js").then((m) => m.render) },
+  { path: "employees", title: TEXT.routes.employees, allow: [ROLES.HQ_ADMIN, ROLES.SUPER_ADMIN, ROLES.INSTRUCTOR], view: () => import("../views/employees.js").then((m) => m.render) },
+  { path: "employee-detail", title: TEXT.routes.employeeDetail, allow: [ROLES.HQ_ADMIN], view: () => import("../views/employee-detail.js").then((m) => m.render) },
+  { path: "statistics", title: TEXT.routes.statistics, allow: [ROLES.HQ_ADMIN], view: () => import("../views/statistics.js").then((m) => m.render) },
+  { path: "announcements", title: TEXT.routes.announcements, allow: PORTAL_ROLES, view: () => import("../views/announcements.js").then((m) => m.render) },
+  { path: "audit-logs", title: TEXT.routes.auditLogs, allow: [ROLES.HQ_ADMIN], view: () => import("../views/audit-logs.js").then((m) => m.render) },
+  { path: "templates", title: TEXT.routes.templates, allow: [], view: () => import("../views/templates.js").then((m) => m.render) },
+  { path: "notification-settings", title: TEXT.routes.notificationSettings, allow: [ROLES.HQ_ADMIN], view: () => import("../views/notification-settings.js").then((m) => m.render) },
+  { path: "slideshow", title: TEXT.routes.slideshow, allow: [ROLES.INSTRUCTOR, ROLES.HQ_ADMIN], view: () => import("../views/slideshow.js").then((m) => m.render) },
+  { path: "lesson-plan", title: TEXT.routes.lessonPlan, allow: [ROLES.INSTRUCTOR], view: () => import("../views/lesson-plan.js").then((m) => m.render) },
+  { path: "admin/companies", title: TEXT.routes.companies, allow: [ROLES.SUPER_ADMIN], view: () => import("../views/admin/companies.js").then((m) => m.render) },
+  { path: "admin/branches", title: TEXT.routes.branches, allow: [ROLES.SUPER_ADMIN], view: () => import("../views/admin/branches.js").then((m) => m.render) },
+  { path: "admin/accounts", title: TEXT.routes.accounts, allow: [ROLES.SUPER_ADMIN], view: () => import("../views/admin/accounts.js").then((m) => m.render) },
+  { path: "admin/employees", title: TEXT.routes.adminEmployees, allow: [ROLES.SUPER_ADMIN], view: () => import("../views/admin/employees.js").then((m) => m.render) },
+  { path: "admin/settings", title: TEXT.routes.adminSettings, allow: [ROLES.SUPER_ADMIN], view: () => import("../views/admin/settings.js").then((m) => m.render) },
 ];
 
-/* ── Router ─────────────────────────────────────────────── */
 class Router {
   #currentPath = null;
-  #listeners   = [];
+  #listeners = [];
 
   init() {
     window.addEventListener("hashchange", () => this.#resolve());
     this.#resolve();
   }
 
-  /** Navigate to a path, optionally with query params */
   push(path, params = {}) {
-    const qs = Object.keys(params).length
-      ? "?" + new URLSearchParams(params).toString()
-      : "";
+    const qs = Object.keys(params).length ? `?${new URLSearchParams(params).toString()}` : "";
     window.location.hash = `#/${path}${qs}`;
   }
 
-  /** Get current URL params */
   get params() {
     const raw = window.location.hash.replace(/^#\/[^?]*\??/, "");
     return raw ? Object.fromEntries(new URLSearchParams(raw)) : {};
   }
 
-  /** Get current path segment */
-  get currentPath() { return this.#currentPath; }
+  get currentPath() {
+    return this.#currentPath;
+  }
 
-  /** Subscribe to route changes */
-  onChange(fn) { this.#listeners.push(fn); }
+  onChange(fn) {
+    this.#listeners.push(fn);
+  }
 
   async #resolve() {
     const hash = window.location.hash.replace(/^#\//, "").split("?")[0];
     const path = hash || "dashboard";
-
-    const route = routes.find(r => r.path === path);
+    const route = routes.find((item) => item.path === path);
 
     if (!route) {
       this.push("dashboard");
       return;
     }
 
-    // Role guard
     if (route.allow && !route.allow.includes(authStore.role)) {
-      toast.warning("접근 권한이 없습니다.");
+      toast.warning(TEXT.common.accessDenied);
       this.push("dashboard");
       return;
     }
 
     this.#currentPath = path;
-    this.#listeners.forEach(fn => fn(path, route));
+    this.#listeners.forEach((fn) => fn(path, route));
 
     setPageTitle(route.title);
     setBreadcrumb(route.title);
 
-    // Load & render the view
     const content = document.getElementById("page-content");
+    if (!content) return;
+
     content.innerHTML = `
       <div style="display:flex;align-items:center;justify-content:center;height:200px;">
         <div class="splash__spinner" style="border-color:var(--gray-200);border-top-color:var(--brand-400)"></div>
-      </div>`;
+      </div>
+    `;
 
     try {
-      const renderFn = await route.view();
-      await renderFn(content, this.params);
+      const render = await route.view();
+      await render(content, this.params);
     } catch (err) {
       console.error(`[router] Failed to load view: ${path}`, err);
+      const hint = err instanceof TypeError && err.message.includes("import")
+        ? "The requested view module could not be loaded."
+        : (err.message || "Unknown error");
+
       content.innerHTML = `
-        <div class="empty-state">
-          <div class="empty-state__title">페이지를 불러올 수 없습니다</div>
-          <div>${err.message}</div>
-        </div>`;
+        <div class="empty-state" style="padding:var(--space-16)">
+          <svg width="48" height="48" viewBox="0 0 48 48" fill="none" class="empty-state__icon">
+            <circle cx="24" cy="24" r="20" stroke="currentColor" stroke-width="2"/>
+            <path d="M24 16v10M24 30v2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          <div class="empty-state__title">${TEXT.common.pageLoadFailed}</div>
+          <div style="font-size:var(--text-xs);font-family:var(--font-mono);color:var(--gray-400);margin-top:var(--space-2);max-width:400px;word-break:break-all">${hint}</div>
+          <button class="btn btn--ghost btn--sm" style="margin-top:var(--space-4)" onclick="window.location.hash='#/dashboard'">${TEXT.common.goToDashboard}</button>
+        </div>
+      `;
     }
   }
 }

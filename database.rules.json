@@ -4,7 +4,7 @@
     /* ── Users ─────────────────────────────────── */
     "users": {
       "$uid": {
-        ".read":  "auth != null && (auth.uid === $uid || root.child('users').child(auth.uid).child('role').val() === 'super_admin' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin')",
+        ".read":  "auth != null && (auth.uid === $uid || root.child('users').child(auth.uid).child('role').val() === 'super_admin' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'instructor')",
         ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'super_admin')"
       }
     },
@@ -27,45 +27,89 @@
       ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'super_admin' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin')"
     },
 
-    /* ── Trainings ─────────────────────────────── */
+    /* ── Trainings (기존) ──────────────────────── */
     "trainings": {
       ".read":  "auth != null",
-      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')"
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin' || root.child('users').child(auth.uid).child('role').val() === 'instructor')"
     },
 
-    /* ── Assignments ───────────────────────────── */
+    /* ── Assignments (기존) ────────────────────── */
     "trainingAssignments": {
-      ".read":  "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')",
+      ".read":  "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin' || root.child('users').child(auth.uid).child('role').val() === 'instructor')",
       "$trainingId": {
-        "$uid": {
-          ".read":  "auth != null && auth.uid === $uid"
-        }
+        "$uid": { ".read": "auth != null && auth.uid === $uid" }
       },
-      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')"
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin' || root.child('users').child(auth.uid).child('role').val() === 'instructor')"
     },
-
     "userAssignments": {
       "$uid": {
-        ".read":  "auth != null && (auth.uid === $uid || root.child('users').child(auth.uid).child('role').val() === 'hq_admin')",
-        ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')"
+        ".read":  "auth != null && (auth.uid === $uid || root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'instructor')",
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin' || root.child('users').child(auth.uid).child('role').val() === 'instructor')"
       }
     },
 
-    /* ── Completions ───────────────────────────── */
+    /* ── Completions (기존) ────────────────────── */
     "trainingCompletions": {
-      ".read":  "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')",
+      ".read":  "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin' || root.child('users').child(auth.uid).child('role').val() === 'instructor')",
       "$trainingId": {
         "$uid": {
           ".read":  "auth != null && auth.uid === $uid",
-          ".write": "auth != null && auth.uid === $uid"
+          ".write": "auth != null && (auth.uid === $uid || root.child('users').child(auth.uid).child('role').val() === 'instructor' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin')"
         }
       }
     },
-
     "userCompletions": {
       "$uid": {
-        ".read":  "auth != null && (auth.uid === $uid || root.child('users').child(auth.uid).child('role').val() === 'hq_admin')",
-        ".write": "auth != null && auth.uid === $uid"
+        ".read":  "auth != null && (auth.uid === $uid || root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'instructor')",
+        ".write": "auth != null && (auth.uid === $uid || root.child('users').child(auth.uid).child('role').val() === 'instructor' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin')"
+      }
+    },
+
+    /* ══════════════════════════════════════════
+       ★ 신규: Training Items
+         .indexOn: companyId, instructorId, createdBy
+    ══════════════════════════════════════════ */
+    "trainingItems": {
+      ".read":  "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'instructor' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'instructor' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')",
+      ".indexOn": ["companyId", "instructorId", "createdBy"]
+    },
+
+    /* ══════════════════════════════════════════
+       ★ 신규: Training Sessions
+         .indexOn: itemId, companyId
+    ══════════════════════════════════════════ */
+    "trainingSessions": {
+      ".read":  "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'instructor' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'instructor' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')",
+      ".indexOn": ["itemId", "companyId", "createdBy"]
+    },
+
+    /* ══════════════════════════════════════════
+       ★ 신규: Session Assignments
+    ══════════════════════════════════════════ */
+    "sessionAssignments": {
+      ".read":  "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'instructor' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'instructor' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')"
+    },
+    "userSessionAssignments": {
+      "$uid": {
+        ".read":  "auth != null && (auth.uid === $uid || root.child('users').child(auth.uid).child('role').val() === 'instructor' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin')",
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'instructor' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')"
+      }
+    },
+
+    /* ══════════════════════════════════════════
+       ★ 신규: Session Completions
+    ══════════════════════════════════════════ */
+    "sessionCompletions": {
+      ".read":  "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'instructor' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'instructor' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')"
+    },
+    "userSessionCompletions": {
+      "$uid": {
+        ".read":  "auth != null && (auth.uid === $uid || root.child('users').child(auth.uid).child('role').val() === 'instructor' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin')",
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'instructor' || root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')"
       }
     },
 
@@ -87,15 +131,19 @@
       ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')"
     },
 
-    /* ── Lesson Plans (강사 전용, 본인만 읽기/쓰기) */
+    /* ── Settings ──────────────────────────────── */
+    "settings": {
+      ".read":  "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin' || root.child('users').child(auth.uid).child('role').val() === 'instructor')",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'hq_admin' || root.child('users').child(auth.uid).child('role').val() === 'super_admin')"
+    },
+
+    /* ── Lesson Plans / Cue Cards ──────────────── */
     "lessonPlans": {
       "$uid": {
         ".read":  "auth != null && auth.uid === $uid",
         ".write": "auth != null && auth.uid === $uid"
       }
     },
-
-    /* ── Cue Cards (강사 전용, 본인만 읽기/쓰기) */
     "cueCards": {
       "$uid": {
         ".read":  "auth != null && auth.uid === $uid",

@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════
-   TAS WT — Design Tokens
+   TAS Learning Hub — Design Tokens
    Single source of truth for all visual values.
    ═══════════════════════════════════════════════════════════ */
 
@@ -98,7 +98,7 @@
 
   /* ── Layout Dimensions ─────────────────────────────────── */
   --sidebar-width:          240px;
-  --sidebar-width-collapsed: 60px;
+  --sidebar-width-collapsed: 84px;
   --topbar-height:          56px;
   --breadcrumb-height:      40px;
 

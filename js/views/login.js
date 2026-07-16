@@ -1,9 +1,18 @@
 /**
  * TAS WT — Login View
+ *
+ * 로그인 방식: 사번 입력
+ * Firebase Authentication 계정 형식: {사번소문자}@tas.local
+ * 예) 사번 TASEDU → tasedu@tas.local
  */
 
 import { authStore } from "../core/auth.js";
-import { toast }     from "../utils/toast.js";
+import { TEXT }      from "../constants/text.js";
+
+/** 사번 → Firebase 이메일 변환 (고정 도메인: @tas.local) */
+function empNoToEmail(empNo) {
+  return `${empNo.trim().toLowerCase()}@tas.local`;
+}
 
 export function showLogin(container) {
   container.innerHTML = `
@@ -11,27 +20,31 @@ export function showLogin(container) {
       <div class="login-panel__logo">
         <div class="login-panel__logo-mark">TAS</div>
         <div class="login-panel__logo-text">
-          <div class="login-panel__logo-name">TAS WT</div>
-          <div class="login-panel__logo-sub">Web Training Platform</div>
+          <div class="login-panel__logo-name">${TEXT.brand.serviceName}</div>
+          <div class="login-panel__logo-sub">${TEXT.brand.loginTagline}</div>
         </div>
       </div>
 
       <h1 class="login-panel__heading">로그인</h1>
-      <p class="login-panel__subheading">계속하려면 계정 정보를 입력하세요.</p>
+      <p class="login-panel__subheading">아이디와 비밀번호를 입력하세요.</p>
 
       <div class="login-form" id="login-form">
         <div class="form-group">
-          <label class="form-label form-label--required" for="login-email">이메일</label>
+          <label class="form-label form-label--required" for="login-empno">아이디</label>
           <div class="input-group">
             <svg class="input-group__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M14 4H2a1 1 0 00-1 1v7a1 1 0 001 1h12a1 1 0 001-1V5a1 1 0 00-1-1zM1 5l7 5 7-5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+              <path d="M8 8a3 3 0 100-6 3 3 0 000 6zm-5 6a5 5 0 0110 0" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
             </svg>
             <input
               class="form-control"
-              type="email"
-              id="login-email"
-              placeholder="name@company.com"
-              autocomplete="email"
+              type="text"
+              id="login-empno"
+              name="username"
+              placeholder="••••••••"
+              autocomplete="username"
+              inputmode="text"
+              autocapitalize="none"
+              spellcheck="false"
               required
             />
           </div>
@@ -71,7 +84,6 @@ export function showLogin(container) {
             <input type="checkbox" id="remember-me" />
             <span class="check-group__label">로그인 상태 유지</span>
           </label>
-          <button class="link-btn" type="button" id="btn-forgot-pw">비밀번호 찾기</button>
         </div>
 
         <div id="login-error" class="form-error hidden" style="margin-top:var(--space-1)">
@@ -89,51 +101,45 @@ export function showLogin(container) {
       </div>
 
       <div class="login-panel__footer">
-        TAS Web Training &copy; ${new Date().getFullYear()} — v1.0
+        ${TEXT.brand.loginFooter} &copy; ${new Date().getFullYear()} — v1.0
       </div>
     </div>
 
     <div class="login-art">
-      <div class="login-art__grid"></div>
+      <div class="login-art__grid" aria-hidden="true"></div>
       <h2 class="login-art__headline">
-        효율적인 교육 관리,<br />
-        <span>TAS Web Training</span>
+        <span class="login-art__eyebrow">Trinity Air Service</span>
+        <span class="login-art__title">${TEXT.brand.serviceName}</span>
       </h2>
       <p class="login-art__sub">
-        교육자료 업로드부터 수료 관리, 전자서명, 통계까지<br />
-        하나의 플랫폼에서 관리하세요.
+        교육 운영 및 이력 관리 통합 플랫폼
       </p>
       <div class="login-art__stats">
         <div class="login-art__stat">
-          <div class="login-art__stat-value">500+</div>
-          <div class="login-art__stat-label">사용자</div>
+          <div class="login-art__stat-value">통합</div>
+          <div class="login-art__stat-label">교육 운영</div>
         </div>
         <div class="login-art__stat">
-          <div class="login-art__stat-value">4</div>
-          <div class="login-art__stat-label">권한 레벨</div>
+          <div class="login-art__stat-value">체계</div>
+          <div class="login-art__stat-label">이력 관리</div>
         </div>
         <div class="login-art__stat">
-          <div class="login-art__stat-value">PWA</div>
-          <div class="login-art__stat-label">모바일 지원</div>
+          <div class="login-art__stat-value">보안</div>
+          <div class="login-art__stat-label">권한 관리</div>
         </div>
       </div>
     </div>
   `;
 
-  // Event: submit on Enter
-  container.querySelectorAll("input").forEach(input => {
+  // Event: submit on Enter (any input field)
+  document.querySelectorAll("#login-empno, #login-password").forEach(input => {
     input.addEventListener("keydown", e => {
-      if (e.key === "Enter") attemptLogin(container);
+      if (e.key === "Enter") attemptLogin();
     });
   });
 
-  // Login button
-  container.getElementById
-    ? null  // won't work on HTMLElement, use document
-    : null;
-
   document.getElementById("btn-login")
-    ?.addEventListener("click", () => attemptLogin(container));
+    ?.addEventListener("click", () => attemptLogin());
 
   // Toggle password visibility
   document.getElementById("toggle-pw")?.addEventListener("click", () => {
@@ -141,23 +147,30 @@ export function showLogin(container) {
     pw.type = pw.type === "password" ? "text" : "password";
   });
 
-  // Forgot password placeholder
-  document.getElementById("btn-forgot-pw")?.addEventListener("click", () => {
-    toast.info("비밀번호 초기화는 관리자에게 문의하세요.");
-  });
 }
 
-async function attemptLogin(container) {
-  const email    = document.getElementById("login-email")?.value?.trim();
-  const password = document.getElementById("login-password")?.value;
+async function attemptLogin() {
+  const rawEmpNo = document.getElementById("login-empno")?.value ?? "";
+  const password = document.getElementById("login-password")?.value ?? "";
   const errorEl  = document.getElementById("login-error");
   const errorTxt = document.getElementById("login-error-text");
   const btn      = document.getElementById("btn-login");
 
-  if (!email || !password) {
-    showError("이메일과 비밀번호를 입력하세요.", errorEl, errorTxt);
+  const empNo = rawEmpNo.trim();
+
+  if (!empNo) {
+    showError("아이디를 입력하세요.", errorEl, errorTxt);
+    document.getElementById("login-empno")?.focus();
     return;
   }
+  if (!password) {
+    showError("비밀번호를 입력하세요.", errorEl, errorTxt);
+    document.getElementById("login-password")?.focus();
+    return;
+  }
+
+  // 사번 → Firebase 이메일 변환 (항상 @tas.local)
+  const email = empNoToEmail(empNo);
 
   btn.classList.add("btn--loading");
   btn.disabled = true;
@@ -170,7 +183,7 @@ async function attemptLogin(container) {
     btn.classList.remove("btn--loading");
     btn.disabled = false;
 
-    const msg = friendlyError(err.code);
+    const msg = friendlyError(err.code, empNo);
     showError(msg, errorEl, errorTxt);
   }
 }
@@ -182,14 +195,16 @@ function showError(msg, errorEl, errorTxt) {
   }
 }
 
-function friendlyError(code) {
+function friendlyError(code, empNo = "") {
   const map = {
-    "auth/user-not-found":      "등록되지 않은 이메일입니다.",
+    "auth/employee-login-disabled": "직원 계정은 로그인 대상이 아닙니다.",
+    "auth/user-not-found":      `등록되지 않은 아이디입니다. (${empNo})`,
     "auth/wrong-password":      "비밀번호가 올바르지 않습니다.",
-    "auth/invalid-email":       "이메일 형식이 올바르지 않습니다.",
+    "auth/invalid-email":       "아이디 형식이 올바르지 않습니다.",
     "auth/too-many-requests":   "로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요.",
     "auth/user-disabled":       "비활성화된 계정입니다. 관리자에게 문의하세요.",
-    "auth/invalid-credential":  "이메일 또는 비밀번호가 올바르지 않습니다.",
+    "auth/invalid-credential":  "아이디 또는 비밀번호가 올바르지 않습니다.",
+    "auth/network-request-failed": "네트워크 오류가 발생했습니다. 연결을 확인하세요.",
   };
   return map[code] ?? "로그인 중 오류가 발생했습니다. 다시 시도하세요.";
 }
