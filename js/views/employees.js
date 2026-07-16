@@ -1724,10 +1724,11 @@ function buildLedgerPdfPage({ rows, isDeadline, branchLabel, trainingLabel, sort
       .ledger-pdf-page{width:1120px;height:790px;box-sizing:border-box;padding:28px 30px 22px;background:#fff;color:#172033;font-family:Arial,'Malgun Gothic','Apple SD Gothic Neo',sans-serif;overflow:hidden}
       .ledger-pdf-page *{box-sizing:border-box}.ledger-pdf-head{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:12px;border-bottom:2px solid #1f5fae;margin-bottom:10px}
       .ledger-pdf-brand{font-size:12px;font-weight:700;color:#1f5fae;letter-spacing:.2px}.ledger-pdf-title{font-size:24px;font-weight:800;margin-top:4px}.ledger-pdf-meta{text-align:right;font-size:11px;line-height:1.65;color:#475569}
-      .ledger-pdf-table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:10px}.ledger-pdf-table th{background:#eaf2fb;color:#163b66;font-weight:700;border:1px solid #9db4cc;padding:7px 4px;white-space:nowrap;text-align:center;vertical-align:middle}
-      .ledger-pdf-table td{border:1px solid #c9d4df;padding:5px 4px;vertical-align:middle;text-align:center;line-height:1.25;overflow-wrap:anywhere}.ledger-pdf-table tbody tr:nth-child(even){background:#f8fafc}
+      .ledger-pdf-table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:10px}.ledger-pdf-table th{background:#eaf2fb;color:#163b66;font-weight:700;border:1px solid #9db4cc;padding:0;white-space:nowrap;text-align:center;vertical-align:middle}
+      .ledger-pdf-table td{border:1px solid #c9d4df;padding:0;vertical-align:middle;text-align:center;line-height:1;overflow-wrap:anywhere}.ledger-pdf-table tbody tr:nth-child(even){background:#f8fafc}
       .ledger-pdf-table th,.ledger-pdf-table td{display:table-cell!important;text-align:center!important;vertical-align:middle!important}
-      .ledger-pdf-table td:first-child{font-weight:700}.ledger-pdf-note{text-align:center!important;white-space:normal}.ledger-pdf-dates{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;white-space:nowrap}.ledger-pdf-status{font-weight:700}
+      .ledger-pdf-cell{display:flex;min-height:30px;padding:5px 4px;align-items:center;justify-content:center;line-height:1.15;text-align:center;transform:translateY(-1px)}
+      .ledger-pdf-table th .ledger-pdf-cell{padding:7px 4px;line-height:1;transform:translateY(0)}.ledger-pdf-table td:first-child{font-weight:700}.ledger-pdf-note{white-space:normal}.ledger-pdf-dates{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;white-space:nowrap}.ledger-pdf-status{font-weight:700}
       .ledger-pdf-date{white-space:nowrap;overflow-wrap:normal!important}
       .ledger-pdf-footer{position:absolute;left:30px;right:30px;bottom:8px;display:flex;justify-content:space-between;color:#64748b;font-size:9px}
     </style>
@@ -1748,22 +1749,22 @@ function buildLedgerPdfPage({ rows, isDeadline, branchLabel, trainingLabel, sort
 function buildStandardLedgerPdfTable(rows) {
   return `<table class="ledger-pdf-table">
     <colgroup><col style="width:8%"><col style="width:8%"><col style="width:8%"><col style="width:7%"><col style="width:8%"><col style="width:8%"><col style="width:9%"><col style="width:9%"><col style="width:9%"><col style="width:7%"><col style="width:7%"><col style="width:12%"></colgroup>
-    <thead><tr><th>성명</th><th>아이디/사번</th><th>입사일</th><th>직급/직책</th><th>초기교육</th><th>최종교육일</th><th>${PY}년</th><th>${CY}년</th><th>다음 예정일</th><th>남은 일수</th><th>상태</th><th>비고</th></tr></thead>
+    <thead><tr><th><div class="ledger-pdf-cell">성명</div></th><th><div class="ledger-pdf-cell">아이디/사번</div></th><th><div class="ledger-pdf-cell">입사일</div></th><th><div class="ledger-pdf-cell">직급/직책</div></th><th><div class="ledger-pdf-cell">초기교육</div></th><th><div class="ledger-pdf-cell">최종교육일</div></th><th><div class="ledger-pdf-cell">${PY}년</div></th><th><div class="ledger-pdf-cell">${CY}년</div></th><th><div class="ledger-pdf-cell">다음 예정일</div></th><th><div class="ledger-pdf-cell">남은 일수</div></th><th><div class="ledger-pdf-cell">상태</div></th><th><div class="ledger-pdf-cell">비고</div></th></tr></thead>
     <tbody>${rows.map((row) => `<tr>
-      <td>${esc(row.name || "-")}</td><td>${esc(row.empNo || "-")}</td><td class="ledger-pdf-date">${esc(formatLedgerDisplayDate(row.joinDate))}</td><td>${esc(row.position || "-")}</td>
-      <td class="ledger-pdf-date">${esc(formatLedgerDisplayDate(row.initialDate))}</td><td class="ledger-pdf-date">${esc(formatLedgerDisplayDate(row.lastDate))}</td>
-      <td>${renderLedgerPdfDates(row.prevDates)}</td><td>${renderLedgerPdfDates(row.currDates)}</td><td class="ledger-pdf-date">${esc(formatLedgerDisplayDate(row.nextDueDate))}</td>
-      <td>${esc(ledgerPdfDaysLabel(row))}</td><td class="ledger-pdf-status">${esc(ledgerPdfStatusLabel(row))}</td><td class="ledger-pdf-note">${esc(row.note || "-")}</td>
+      <td><div class="ledger-pdf-cell">${esc(row.name || "-")}</div></td><td><div class="ledger-pdf-cell">${esc(row.empNo || "-")}</div></td><td><div class="ledger-pdf-cell ledger-pdf-date">${esc(formatLedgerDisplayDate(row.joinDate))}</div></td><td><div class="ledger-pdf-cell">${esc(row.position || "-")}</div></td>
+      <td><div class="ledger-pdf-cell ledger-pdf-date">${esc(formatLedgerDisplayDate(row.initialDate))}</div></td><td><div class="ledger-pdf-cell ledger-pdf-date">${esc(formatLedgerDisplayDate(row.lastDate))}</div></td>
+      <td><div class="ledger-pdf-cell">${renderLedgerPdfDates(row.prevDates)}</div></td><td><div class="ledger-pdf-cell">${renderLedgerPdfDates(row.currDates)}</div></td><td><div class="ledger-pdf-cell ledger-pdf-date">${esc(formatLedgerDisplayDate(row.nextDueDate))}</div></td>
+      <td><div class="ledger-pdf-cell">${esc(ledgerPdfDaysLabel(row))}</div></td><td><div class="ledger-pdf-cell ledger-pdf-status">${esc(ledgerPdfStatusLabel(row))}</div></td><td><div class="ledger-pdf-cell ledger-pdf-note">${esc(row.note || "-")}</div></td>
     </tr>`).join("")}</tbody></table>`;
 }
 
 function buildDeadlineLedgerPdfTable(rows) {
   return `<table class="ledger-pdf-table">
     <colgroup><col style="width:11%"><col style="width:11%"><col style="width:11%"><col style="width:20%"><col style="width:13%"><col style="width:13%"><col style="width:10%"><col style="width:11%"></colgroup>
-    <thead><tr><th>지점</th><th>성명</th><th>아이디/사번</th><th>교육항목</th><th>기준 교육일</th><th>다음 예정일</th><th>남은 일수</th><th>상태</th></tr></thead>
+    <thead><tr><th><div class="ledger-pdf-cell">지점</div></th><th><div class="ledger-pdf-cell">성명</div></th><th><div class="ledger-pdf-cell">아이디/사번</div></th><th><div class="ledger-pdf-cell">교육항목</div></th><th><div class="ledger-pdf-cell">기준 교육일</div></th><th><div class="ledger-pdf-cell">다음 예정일</div></th><th><div class="ledger-pdf-cell">남은 일수</div></th><th><div class="ledger-pdf-cell">상태</div></th></tr></thead>
     <tbody>${rows.map((row) => `<tr>
-      <td>${esc(row.branchName || "-")}</td><td>${esc(row.name || "-")}</td><td>${esc(row.empNo || "-")}</td><td>${esc(row.trainingItemName || "-")}</td>
-      <td class="ledger-pdf-date">${esc(formatLedgerDisplayDate(row.baseTrainingDate))}</td><td class="ledger-pdf-date">${esc(formatLedgerDisplayDate(row.nextDueDate))}</td><td>${esc(ledgerPdfDaysLabel(row))}</td><td class="ledger-pdf-status">${esc(ledgerPdfStatusLabel(row))}</td>
+      <td><div class="ledger-pdf-cell">${esc(row.branchName || "-")}</div></td><td><div class="ledger-pdf-cell">${esc(row.name || "-")}</div></td><td><div class="ledger-pdf-cell">${esc(row.empNo || "-")}</div></td><td><div class="ledger-pdf-cell">${esc(row.trainingItemName || "-")}</div></td>
+      <td><div class="ledger-pdf-cell ledger-pdf-date">${esc(formatLedgerDisplayDate(row.baseTrainingDate))}</div></td><td><div class="ledger-pdf-cell ledger-pdf-date">${esc(formatLedgerDisplayDate(row.nextDueDate))}</div></td><td><div class="ledger-pdf-cell">${esc(ledgerPdfDaysLabel(row))}</div></td><td><div class="ledger-pdf-cell ledger-pdf-status">${esc(ledgerPdfStatusLabel(row))}</div></td>
     </tr>`).join("")}</tbody></table>`;
 }
 
