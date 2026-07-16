@@ -63,7 +63,7 @@ export function normalizeMaterialType(type) {
   return LEGACY_MATERIAL_TYPE_MAP[normalized] ?? "other";
 }
 
-export async function requestUploadUrl(file, materialId = "") {
+export async function requestUploadUrl(file, existingMaterialId = "") {
   const validationMessage = validateFile(file);
   if (validationMessage) {
     throw new Error(validationMessage);
@@ -77,7 +77,7 @@ export async function requestUploadUrl(file, materialId = "") {
       fileName: file.name,
       fileType: file.type,
       fileSize: file.size,
-      materialId: String(materialId || "").trim(),
+      materialId: String(existingMaterialId || "").trim(),
     });
   } catch (err) {
     console.error("[material-service] requestUploadUrl failed", { code: err?.code, message: err?.message }, err);
