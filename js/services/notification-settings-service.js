@@ -5,7 +5,6 @@ export const DEFAULT_DEADLINE_BUCKETS = [
     type: "withinDays",
     days: 30,
     enabled: true,
-    notify: false,
   },
   {
     key: "bucket2",
@@ -13,7 +12,6 @@ export const DEFAULT_DEADLINE_BUCKETS = [
     type: "withinDays",
     days: 14,
     enabled: true,
-    notify: true,
   },
   {
     key: "bucket3",
@@ -21,7 +19,6 @@ export const DEFAULT_DEADLINE_BUCKETS = [
     type: "withinDays",
     days: 7,
     enabled: true,
-    notify: true,
   },
   {
     key: "bucket4",
@@ -29,7 +26,6 @@ export const DEFAULT_DEADLINE_BUCKETS = [
     type: "completed",
     days: null,
     enabled: true,
-    notify: false,
   },
 ];
 
@@ -71,7 +67,6 @@ export function normalizeDeadlineBuckets(input) {
         ? normalizeDays(Number.isFinite(parsedDays) ? parsedDays : fallbackDays)
         : null,
       enabled: source?.enabled ?? defaultBucket.enabled,
-      notify: isCompletedSlot ? false : (source?.notify ?? defaultBucket.notify),
     };
   });
 }

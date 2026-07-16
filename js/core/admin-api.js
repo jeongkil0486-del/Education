@@ -27,6 +27,9 @@ const getAnnouncementReadStatusCallable = httpsCallable(functions, "getAnnouncem
 const listAuditLogsCallable = httpsCallable(functions, "listAuditLogs");
 const saveAnnouncementCallable = httpsCallable(functions, "saveAnnouncement");
 const deleteAnnouncementCallable = httpsCallable(functions, "deleteAnnouncement");
+const listUserNotificationsCallable = httpsCallable(functions, "listUserNotifications");
+const markNotificationReadCallable = httpsCallable(functions, "markNotificationRead");
+const markAllNotificationsReadCallable = httpsCallable(functions, "markAllNotificationsRead");
 
 export async function createEmployeeAccounts(payload) {
   const result = await createEmployeesCallable(payload);
@@ -222,6 +225,21 @@ export async function saveAnnouncement(payload) {
 
 export async function deleteAnnouncement(payload) {
   const result = await deleteAnnouncementCallable(payload);
+  return result.data;
+}
+
+export async function listUserNotifications() {
+  const result = await listUserNotificationsCallable({});
+  return result.data;
+}
+
+export async function markNotificationRead(payload) {
+  const result = await markNotificationReadCallable(payload);
+  return result.data;
+}
+
+export async function markAllNotificationsRead() {
+  const result = await markAllNotificationsReadCallable({});
   return result.data;
 }
 

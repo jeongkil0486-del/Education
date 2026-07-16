@@ -9,7 +9,7 @@
  * 업로드 흐름:
  *   1. createMaterialUploadUrl Function → presigned PUT URL
  *   2. 브라우저 XHR PUT → R2 직접 전송 (진행률 표시)
- *   3. 업로드 성공 → Firebase DB 메타 저장 (url = R2 공개 URL)
+ *   3. 업로드 성공 → finalizeMaterialUpload Function이 R2 객체 확인 후 메타·알림 저장
  *
  * 다운로드: url 필드가 있는 자료만 버튼 활성화
  */
@@ -190,7 +190,7 @@ function renderTable(container) {
           <th>크기</th>
           <th>업로드자</th>
           <th>등록일</th>
-          <th style="width:250px"></th>
+          <th style="width:320px"></th>
         </tr>
       </thead>
       <tbody>
@@ -237,6 +237,9 @@ function renderTable(container) {
                        파일 미등록
                      </span>`
                 }
+                ${canUpload()
+                  ? `<button class="btn btn--ghost btn--sm btn-mat-replace" data-id="${esc(m.id)}">파일 교체</button>`
+                  : ""}
                 ${canDelete()
                   ? `<button class="btn btn--ghost btn--sm btn-mat-delete"
                              data-id="${m.id}"
@@ -254,6 +257,12 @@ function renderTable(container) {
     btn.addEventListener("click", () =>
       confirmDelete(btn.dataset.id, btn.dataset.title, container)
     );
+  });
+  wrap.querySelectorAll(".btn-mat-replace").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const material = state.materials.find((item) => item.id === btn.dataset.id);
+      if (material) openUploadModal(container, material);
+    });
   });
   wrap.querySelectorAll(".btn-mat-slideshow").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -292,11 +301,12 @@ function renderTable(container) {
 /* ══════════════════════════════════════════════════════════
    업로드 모달
 ══════════════════════════════════════════════════════════ */
-function openUploadModal(container) {
+function openUploadModal(container, existingMaterial = null) {
   let selectedFile = null;
+  const actionLabel = existingMaterial ? "교체" : "업로드";
 
   modal.open({
-    title: "교육자료 업로드",
+    title: existingMaterial ? "교육자료 파일 교체" : "교육자료 업로드",
     size:  "md",
     body: `
       <div style="display:flex;flex-direction:column;gap:var(--space-5)">
@@ -304,7 +314,7 @@ function openUploadModal(container) {
         <div class="form-group">
           <label class="form-label form-label--required">자료명</label>
           <input class="form-control" id="mat-title" type="text"
-                 placeholder="예) 신규입사자 초기교육 자료" maxlength="100" />
+                 placeholder="예) 신규입사자 초기교육 자료" maxlength="100" value="${escAttr(existingMaterial?.title ?? "")}" />
         </div>
 
         <div class="form-group">
@@ -312,7 +322,7 @@ function openUploadModal(container) {
           <select class="form-control" id="mat-type">
             <option value="">선택하세요</option>
             ${MATERIAL_TYPES.map(t =>
-              `<option value="${t}">${MATERIAL_TYPE_LABELS[t]}</option>`
+              `<option value="${t}" ${existingMaterial?.trainingType === t ? "selected" : ""}>${MATERIAL_TYPE_LABELS[t]}</option>`
             ).join("")}
           </select>
         </div>
@@ -321,7 +331,7 @@ function openUploadModal(container) {
           <label class="form-label">설명/비고</label>
           <textarea class="form-control" id="mat-desc" rows="2"
             placeholder="자료에 대한 간단한 설명을 입력하세요."
-            maxlength="300" style="resize:vertical"></textarea>
+            maxlength="300" style="resize:vertical">${esc(existingMaterial?.description ?? "")}</textarea>
         </div>
 
         <div class="form-group">
@@ -377,8 +387,8 @@ function openUploadModal(container) {
       </div>`,
     actions: [
       { label: "취소",    variant: "secondary", onClick: () => modal.close() },
-      { label: "업로드", variant: "primary",
-        onClick: () => handleUpload(container, () => selectedFile) },
+      { label: actionLabel, variant: "primary",
+        onClick: () => handleUpload(container, () => selectedFile, existingMaterial) },
     ],
   });
 
@@ -427,7 +437,7 @@ function openUploadModal(container) {
 }
 
 /* ── 업로드 실행 ──────────────────────────────────────────── */
-async function handleUpload(container, getFile) {
+async function handleUpload(container, getFile, existingMaterial = null) {
   const title = document.getElementById("mat-title")?.value?.trim();
   const type  = document.getElementById("mat-type")?.value;
   const desc  = document.getElementById("mat-desc")?.value ?? "";
@@ -441,7 +451,8 @@ async function handleUpload(container, getFile) {
   if (fileErr) { toast.error(fileErr); return; }
 
   /* 진행률 UI */
-  modal.setLoading("업로드", true);
+  const actionLabel = existingMaterial ? "교체" : "업로드";
+  modal.setLoading(actionLabel, true);
   const progressWrap = document.getElementById("mat-progress-wrap");
   const progressBar  = document.getElementById("mat-progress-bar");
   const progressPct  = document.getElementById("mat-progress-pct");
@@ -455,13 +466,13 @@ async function handleUpload(container, getFile) {
   };
 
   try {
-    await uploadMaterial(
+    const result = await uploadMaterial(
       { title, trainingType: type, description: desc },
       file,
-      { onProgress: setProgress }
+      { onProgress: setProgress, materialId: existingMaterial?.id ?? "" }
     );
 
-    toast.success("교육자료가 업로드되었습니다.");
+    toast.success(result?.message || (existingMaterial ? "교육자료 파일이 교체되었습니다." : "교육자료가 업로드되었습니다."));
     setTimeout(() => { modal.close(); loadData(container); }, 400);
 
   } catch (err) {
@@ -474,7 +485,7 @@ async function handleUpload(container, getFile) {
 
     toast.error(msg);
     if (progressWrap) progressWrap.style.display = "none";
-    modal.setLoading("업로드", false);
+    modal.setLoading(actionLabel, false);
   }
 }
 

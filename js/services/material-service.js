@@ -63,7 +63,7 @@ export function normalizeMaterialType(type) {
   return LEGACY_MATERIAL_TYPE_MAP[normalized] ?? "other";
 }
 
-export async function requestUploadUrl(file) {
+export async function requestUploadUrl(file, materialId = "") {
   const validationMessage = validateFile(file);
   if (validationMessage) {
     throw new Error(validationMessage);
@@ -77,6 +77,7 @@ export async function requestUploadUrl(file) {
       fileName: file.name,
       fileType: file.type,
       fileSize: file.size,
+      materialId: String(materialId || "").trim(),
     });
   } catch (err) {
     console.error("[material-service] requestUploadUrl failed", { code: err?.code, message: err?.message }, err);
@@ -158,35 +159,33 @@ export function putFileToR2(uploadUrl, file, opts = {}) {
 }
 
 export async function saveMaterialMeta(materialId, values, fileInfo) {
-  await materialsDB.update(materialId, {
-    title: values.title.trim(),
+  const fn = httpsCallable(functions, "finalizeMaterialUpload");
+  const result = await fn({
+    materialId,
+    key: fileInfo.key ?? "",
+    title: values.title?.trim() ?? "",
     trainingType: normalizeMaterialType(values.trainingType),
     description: values.description?.trim() ?? "",
     fileName: fileInfo.fileName,
     fileType: fileInfo.fileType,
     fileSize: fileInfo.fileSize,
-    url: fileInfo.publicUrl,
-    r2Key: fileInfo.key ?? "",
-    companyId: authStore.companyId ?? null,
-    uploadedBy: authStore.uid,
-    uploadedByName: authStore.name,
-    createdAt: Date.now(),
   });
+  materialListCache = { uid: "", loadedAt: 0, items: null };
+  return result.data;
 }
 
 export async function uploadMaterial(values, file, opts = {}) {
   const notify = (label, pct) => opts.onProgress?.(label, pct);
 
   notify("업로드 URL 요청 중...", 5);
-  const { uploadUrl, publicUrl, materialId, key } = await requestUploadUrl(file);
+  const { uploadUrl, materialId, key } = await requestUploadUrl(file, opts.materialId);
 
   await putFileToR2(uploadUrl, file, {
     onProgress: (pct) => notify("R2 업로드 중...", 10 + Math.round(pct * 0.8)),
   });
 
   notify("저장 중...", 95);
-  await saveMaterialMeta(materialId, values, {
-    publicUrl,
+  const result = await saveMaterialMeta(materialId, values, {
     key,
     fileName: file.name,
     fileSize: file.size,
@@ -194,7 +193,7 @@ export async function uploadMaterial(values, file, opts = {}) {
   });
 
   notify("완료", 100);
-  return materialId;
+  return { materialId, ...result };
 }
 
 export async function listMaterials(options = {}) {
@@ -242,4 +241,5 @@ export async function listMaterials(options = {}) {
 
 export async function deleteMaterial(id) {
   await materialsDB.delete(id);
+  materialListCache = { uid: "", loadedAt: 0, items: null };
 }

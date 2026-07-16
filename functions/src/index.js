@@ -4,7 +4,8 @@ const { onCall, onRequest, HttpsError } = require("firebase-functions/v2/https")
 const logger = require("firebase-functions/logger");
 const { defineSecret } = require("firebase-functions/params");
 const admin = require("firebase-admin");
-const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
+const crypto = require("crypto");
+const { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { classifyTraining, reconcileHistoryRecords } = require("./training-classification");
 const {
@@ -51,6 +52,49 @@ const MAX_MATERIAL_FILE_SIZE = 50 * 1024 * 1024;
 const PDF_ONLY_MESSAGE = "교육자료는 PDF 파일만 업로드할 수 있습니다.";
 const PDF_SIZE_MESSAGE = "PDF 파일은 최대 50MB까지 업로드할 수 있습니다.";
 
+const NOTIFICATION_TYPES = Object.freeze({
+  ANNOUNCEMENT: "ANNOUNCEMENT",
+  MATERIAL: "MATERIAL",
+});
+
+function notificationId(...parts) {
+  const digest = crypto.createHash("sha256").update(parts.map((part) => normalizeText(part)).join("|")).digest("hex");
+  return `n_${digest.slice(0, 32)}`;
+}
+
+function normalizeR2Etag(value) {
+  return normalizeText(value).replace(/^"|"$/g, "");
+}
+
+function isImportantAnnouncement(record) {
+  return record?.important === true
+    || record?.pinned === true
+    || ["important", "urgent", "high"].includes(normalizeText(record?.priority).toLowerCase());
+}
+
+async function instructorNotificationRecipients(companyId, targetBranchIds = []) {
+  const normalizedCompanyId = normalizeText(companyId);
+  if (!normalizedCompanyId) return [];
+  const [usersSnap, branchesSnap] = await Promise.all([
+    db.ref("users").get(),
+    db.ref("branches").get(),
+  ]);
+  return announcementTargetUsers({
+    companyId: normalizedCompanyId,
+    targetBranchIds: Array.from(new Set(targetBranchIds.map(normalizeText).filter(Boolean))),
+  }, usersSnap.val() ?? {}, branchesSnap.val() ?? {});
+}
+
+function appendUserNotificationUpdates(updates, recipients, id, notification) {
+  recipients.forEach((recipient) => {
+    updates[`userNotifications/${recipient.uid}/${id}`] = {
+      ...notification,
+      read: false,
+      createdAt: Number(notification.createdAt) || Date.now(),
+    };
+  });
+}
+
 function getR2Config() {
   return {
     endpoint: String(R2_ENDPOINT.value() || "").trim(),
@@ -86,17 +130,56 @@ function buildR2Client(r2Config = getR2Config()) {
   });
 }
 
-function buildR2Key(materialId, fileName) {
-  const safe = String(fileName || "upload.pdf")
+function safeR2FileName(fileName) {
+  return String(fileName || "upload.pdf")
     .replace(/[^a-zA-Z0-9.\-_]/g, "_")
     .replace(/_{2,}/g, "_")
     .slice(0, 200);
+}
 
-  return `materials/${materialId}/${safe}`;
+function buildR2Key(materialId, fileName) {
+  return `materials/${materialId}/${safeR2FileName(fileName)}`;
+}
+
+function buildR2ReplacementKey(materialId, fileName) {
+  return `materials/${materialId}/versions/${Date.now()}-${crypto.randomBytes(4).toString("hex")}-${safeR2FileName(fileName)}`;
+}
+
+function isAllowedMaterialKey(materialId, fileName, key) {
+  if (key === buildR2Key(materialId, fileName)) return true;
+  const escapedFileName = safeR2FileName(fileName).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^materials/${materialId}/versions/\\d{10,16}-[a-f0-9]{8}-${escapedFileName}$`).test(key);
 }
 
 function hasPdfExtension(fileName) {
   return String(fileName || "").trim().toLowerCase().endsWith(ALLOWED_MATERIAL_EXT);
+}
+
+function normalizeMaterialTypeValue(value) {
+  const normalized = normalizeText(value).toLowerCase();
+  const aliases = {
+    job: "job",
+    initial: "job",
+    "직무교육": "job",
+    legal: "legal",
+    recurring: "legal",
+    "법정교육": "legal",
+    external: "external",
+    "외부교육": "external",
+    online: "online",
+    "온라인교육": "online",
+    other: "other",
+    "기타": "other",
+  };
+  return aliases[normalized] || "other";
+}
+
+function assertMaterialId(value) {
+  const materialId = normalizeText(value);
+  if (!/^[A-Za-z0-9_-]{1,140}$/.test(materialId)) {
+    throw new HttpsError("invalid-argument", "올바른 교육자료 ID가 아닙니다.");
+  }
+  return materialId;
 }
 
 function materialVisibleToActor(material, actor) {
@@ -229,14 +312,18 @@ async function assertGuideOwner(uid, guideId) {
 exports.createMaterialUploadUrl = onCall(R2_OPTS, async (request) => {
   ensureAuthenticated(request);
 
-  const roleSnap = await db.ref(`users/${request.auth.uid}/role`).get();
-  if (!roleSnap.exists() || roleSnap.val() !== "hq_admin") {
+  const actor = await getUserProfile(request.auth.uid);
+  if (!actor || actor.role !== "hq_admin") {
     throw new HttpsError("permission-denied", "교육관리자(hq_admin)만 파일을 업로드할 수 있습니다.");
   }
+  const companyId = await resolveActorCompanyId(actor);
+  if (!companyId) throw new HttpsError("failed-precondition", "교육자료의 회사 범위를 결정할 수 없습니다.");
 
   const fileName = normalizeText(request.data?.fileName);
   const fileType = normalizeText(request.data?.fileType).toLowerCase();
   const fileSize = Number(request.data?.fileSize ?? 0);
+  const requestedMaterialId = normalizeText(request.data?.materialId);
+  if (requestedMaterialId) assertMaterialId(requestedMaterialId);
 
   if (!fileName) {
     throw new HttpsError("invalid-argument", "fileName이 필요합니다.");
@@ -254,9 +341,20 @@ exports.createMaterialUploadUrl = onCall(R2_OPTS, async (request) => {
     throw new HttpsError("failed-precondition", "R2_BUCKET 환경변수가 없습니다.");
   }
 
-  const newRef = db.ref("materials").push();
-  const materialId = newRef.key;
-  const key = buildR2Key(materialId, fileName);
+  let materialId = requestedMaterialId;
+  if (materialId) {
+    const existingSnap = await db.ref(`materials/${materialId}`).get();
+    if (!existingSnap.exists()) throw new HttpsError("not-found", "교체할 교육자료를 찾을 수 없습니다.");
+    const existing = await resolveLegacyMaterialCompany(existingSnap.val() ?? {});
+    if (normalizeText(existing.companyId) !== companyId) {
+      throw new HttpsError("permission-denied", "다른 회사 교육자료의 파일은 교체할 수 없습니다.");
+    }
+  } else {
+    materialId = db.ref("materials").push().key;
+  }
+  const key = requestedMaterialId
+    ? buildR2ReplacementKey(materialId, fileName)
+    : buildR2Key(materialId, fileName);
   const r2 = buildR2Client();
 
   const command = new PutObjectCommand({
@@ -294,7 +392,146 @@ exports.createMaterialUploadUrl = onCall(R2_OPTS, async (request) => {
     fileType,
   });
 
-  return { uploadUrl, publicUrl, materialId, key };
+  return { uploadUrl, publicUrl, materialId, key, replacing: Boolean(requestedMaterialId) };
+});
+
+exports.finalizeMaterialUpload = onCall(R2_OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const actor = await getUserProfile(request.auth.uid);
+  if (!actor || actor.role !== "hq_admin") {
+    throw new HttpsError("permission-denied", "교육관리자(hq_admin)만 교육자료 업로드를 완료할 수 있습니다.");
+  }
+  const companyId = await resolveActorCompanyId(actor);
+  if (!companyId) throw new HttpsError("failed-precondition", "교육자료의 회사 범위를 결정할 수 없습니다.");
+
+  const materialId = assertMaterialId(request.data?.materialId);
+  const key = normalizeText(request.data?.key);
+  const title = normalizeText(request.data?.title).slice(0, 100);
+  const description = normalizeText(request.data?.description).slice(0, 300);
+  const fileName = normalizeText(request.data?.fileName);
+  const fileType = normalizeText(request.data?.fileType).toLowerCase();
+  const requestedFileSize = Number(request.data?.fileSize ?? 0);
+  const trainingType = normalizeMaterialTypeValue(request.data?.trainingType);
+
+  if (!key || !title || !fileName) {
+    throw new HttpsError("invalid-argument", "교육자료 업로드 완료 정보가 부족합니다.");
+  }
+  if (!hasPdfExtension(fileName) || !ALLOWED_MATERIAL_MIME.includes(fileType)) {
+    throw new HttpsError("invalid-argument", PDF_ONLY_MESSAGE);
+  }
+  if (requestedFileSize <= 0 || requestedFileSize > MAX_MATERIAL_FILE_SIZE) {
+    throw new HttpsError("invalid-argument", PDF_SIZE_MESSAGE);
+  }
+  if (!isAllowedMaterialKey(materialId, fileName, key)) {
+    throw new HttpsError("permission-denied", "허용되지 않은 교육자료 파일 경로입니다.");
+  }
+
+  const { bucket, publicBaseUrl } = getR2Config();
+  if (!bucket) throw new HttpsError("failed-precondition", "R2_BUCKET 환경변수가 없습니다.");
+  let object;
+  try {
+    object = await buildR2Client().send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+  } catch (error) {
+    logger.error("[R2] material finalize head failed", {
+      actorUid: actor.uid,
+      materialId,
+      key,
+      code: error?.code,
+      message: error?.message,
+    });
+    throw new HttpsError("failed-precondition", "R2 업로드가 완료된 파일을 확인할 수 없습니다.");
+  }
+
+  const actualFileSize = Number(object.ContentLength ?? requestedFileSize);
+  if (actualFileSize <= 0 || actualFileSize > MAX_MATERIAL_FILE_SIZE) {
+    throw new HttpsError("invalid-argument", PDF_SIZE_MESSAGE);
+  }
+  const actualFileType = normalizeText(object.ContentType || fileType).toLowerCase();
+  if (!ALLOWED_MATERIAL_MIME.includes(actualFileType)) {
+    throw new HttpsError("invalid-argument", PDF_ONLY_MESSAGE);
+  }
+  const existingSnap = await db.ref(`materials/${materialId}`).get();
+  const existing = existingSnap.exists() ? await resolveLegacyMaterialCompany(existingSnap.val() ?? {}) : {};
+  if (existingSnap.exists() && normalizeText(existing.companyId) !== companyId) {
+    throw new HttpsError("permission-denied", "다른 회사 교육자료는 수정할 수 없습니다.");
+  }
+
+  const now = Date.now();
+  const r2Etag = normalizeR2Etag(object.ETag);
+  const fileVersion = r2Etag || [key, actualFileSize, new Date(object.LastModified ?? now).getTime()].join(":");
+  let previousVersion = normalizeText(existing.fileVersion || existing.r2Etag);
+  if (!previousVersion && existing.r2Key && normalizeText(existing.r2Key) !== key) {
+    try {
+      const previousObject = await buildR2Client().send(new HeadObjectCommand({
+        Bucket: bucket,
+        Key: normalizeText(existing.r2Key),
+      }));
+      previousVersion = normalizeR2Etag(previousObject.ETag);
+    } catch (error) {
+      logger.warn("[R2] previous material version could not be read", {
+        actorUid: actor.uid,
+        materialId,
+        code: error?.code,
+        message: error?.message,
+      });
+    }
+  }
+  const created = !existingSnap.exists();
+  const fileReplaced = !created && (
+    previousVersion
+      ? previousVersion !== fileVersion
+      : normalizeText(existing.r2Key) !== key || !normalizeText(existing.r2Key)
+  );
+  const record = {
+    ...existing,
+    title,
+    trainingType,
+    description,
+    fileName,
+    fileType: actualFileType,
+    fileSize: actualFileSize,
+    url: publicBaseUrl ? `${publicBaseUrl}/${key}` : "",
+    r2Key: key,
+    r2Etag,
+    fileVersion,
+    fileUpdatedAt: now,
+    companyId,
+    uploadedBy: existing.uploadedBy ?? actor.uid,
+    uploadedByName: existing.uploadedByName ?? actor.name ?? "",
+    createdAt: existing.createdAt ?? now,
+    updatedAt: now,
+    updatedBy: actor.uid,
+    updatedByName: actor.name ?? "",
+  };
+
+  const updates = { [`materials/${materialId}`]: record };
+  let notificationRecipientCount = 0;
+  if (created || fileReplaced) {
+    const recipients = await instructorNotificationRecipients(companyId);
+    const action = created ? "CREATED" : "REPLACED";
+    const id = notificationId(NOTIFICATION_TYPES.MATERIAL, action, materialId, created ? "created" : fileVersion);
+    appendUserNotificationUpdates(updates, recipients, id, {
+      type: NOTIFICATION_TYPES.MATERIAL,
+      title: created ? "새 교육자료" : "교육자료 교체",
+      message: title,
+      targetPage: "materials",
+      targetId: materialId,
+      companyId,
+      sourceId: materialId,
+      sourceAction: action,
+      createdAt: now,
+    });
+    notificationRecipientCount = recipients.length;
+  }
+
+  await db.ref().update(updates);
+  return {
+    material: { id: materialId, ...record },
+    created,
+    fileReplaced,
+    notificationRecipientCount,
+    message: created ? "교육자료가 등록되었습니다." : fileReplaced ? "교육자료 파일이 교체되었습니다." : "동일한 파일로 확인되어 알림 없이 저장되었습니다.",
+  };
 });
 
 exports.getMaterialDownloadUrl = onCall(R2_OPTS, async (request) => {
@@ -2228,20 +2465,21 @@ async function ensureHQAdminProfile(uid) {
 }
 
 function resolveInstructorBranchIds(profile) {
-  const primary = normalizeText(profile?.branchId);
-  if (primary) return [primary];
-  const assigned = profile?.assignedBranches;
-  if (Array.isArray(assigned)) {
-    return Array.from(new Set(assigned.map(normalizeText).filter(Boolean)));
-  }
-  if (assigned && typeof assigned === "object") {
-    return Object.entries(assigned)
-      .filter(([, enabled]) => !!enabled)
-      .map(([branchId]) => normalizeText(branchId))
-      .filter(Boolean);
-  }
-  const assignedString = normalizeText(assigned);
-  return assignedString ? [assignedString] : [];
+  const ids = [normalizeText(profile?.branchId)].filter(Boolean);
+  [profile?.assignedBranches, profile?.branchIds].forEach((assigned) => {
+    if (Array.isArray(assigned)) {
+      ids.push(...assigned.map(normalizeText).filter(Boolean));
+    } else if (assigned && typeof assigned === "object") {
+      ids.push(...Object.entries(assigned)
+        .filter(([, enabled]) => !!enabled)
+        .map(([branchId]) => normalizeText(branchId))
+        .filter(Boolean));
+    } else {
+      const assignedString = normalizeText(assigned);
+      if (assignedString) ids.push(assignedString);
+    }
+  });
+  return Array.from(new Set(ids));
 }
 
 async function getUserProfile(uid) {
@@ -2626,10 +2864,31 @@ exports.saveAnnouncement = onCall(OPTS, async (request) => {
   const readsReset = Boolean(announcementId) && announcementReadResetFingerprint(existing) !== announcementReadResetFingerprint(record);
   const updates = { [`announcements/${ref.key}`]: record };
   if (readsReset) updates[`announcementReads/${ref.key}`] = null;
+  let notificationRecipientCount = 0;
+  if (!announcementId && normalizeText(record.companyId) && announcementIsPublished(record, now)) {
+    const targetBranchIds = announcementBranchIds(record);
+    const recipients = await instructorNotificationRecipients(record.companyId, targetBranchIds);
+    const id = notificationId(NOTIFICATION_TYPES.ANNOUNCEMENT, ref.key);
+    appendUserNotificationUpdates(updates, recipients, id, {
+      type: NOTIFICATION_TYPES.ANNOUNCEMENT,
+      title: isImportantAnnouncement(record) ? "중요 공지사항" : "새 공지사항",
+      message: record.title,
+      targetPage: "announcements",
+      targetId: ref.key,
+      companyId: record.companyId,
+      branchId: targetBranchIds.length === 1 ? targetBranchIds[0] : "",
+      sourceId: ref.key,
+      sourceAction: "CREATED",
+      important: isImportantAnnouncement(record),
+      createdAt: now,
+    });
+    notificationRecipientCount = recipients.length;
+  }
   await db.ref().update(updates);
   return {
     announcement: { id: ref.key, ...record },
     readsReset,
+    notificationRecipientCount,
     message: announcementId
       ? `공지사항이 수정되었습니다.${readsReset ? " 공지 내용이 변경되어 기존 읽음 상태가 초기화되었습니다." : ""}`
       : "공지사항이 등록되었습니다.",
@@ -2656,6 +2915,77 @@ exports.deleteAnnouncement = onCall(OPTS, async (request) => {
     [`announcementReads/${announcementId}`]: null,
   });
   return { announcementId, message: "공지사항이 삭제되었습니다." };
+});
+
+async function notificationActor(uid) {
+  const actor = await getUserProfile(uid);
+  if (!actor || actor.role !== "instructor" || actor.active === false || actor.disabled === true) {
+    throw new HttpsError("permission-denied", "강사 본인의 알림만 조회하거나 변경할 수 있습니다.");
+  }
+  const companyId = await resolveActorCompanyId(actor);
+  if (!companyId) throw new HttpsError("failed-precondition", "알림의 회사 범위를 결정할 수 없습니다.");
+  return { actor, companyId };
+}
+
+function assertNotificationId(value) {
+  const id = normalizeText(value);
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(id)) {
+    throw new HttpsError("invalid-argument", "올바른 알림 ID가 아닙니다.");
+  }
+  return id;
+}
+
+function notificationBelongsToCompany(notification, companyId) {
+  return normalizeText(notification?.companyId) === normalizeText(companyId)
+    && Object.values(NOTIFICATION_TYPES).includes(normalizeText(notification?.type));
+}
+
+exports.listUserNotifications = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const { companyId } = await notificationActor(request.auth.uid);
+  const snap = await db.ref(`userNotifications/${request.auth.uid}`).get();
+  const notifications = [];
+  snap.forEach((child) => {
+    const value = child.val() ?? {};
+    if (!notificationBelongsToCompany(value, companyId)) return;
+    notifications.push({ id: child.key, ...value });
+  });
+  notifications.sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0));
+  return {
+    notifications: notifications.slice(0, 20),
+    unreadCount: notifications.filter((item) => item.read !== true).length,
+    totalCount: notifications.length,
+  };
+});
+
+exports.markNotificationRead = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const { companyId } = await notificationActor(request.auth.uid);
+  const id = assertNotificationId(request.data?.notificationId ?? request.data?.id);
+  const ref = db.ref(`userNotifications/${request.auth.uid}/${id}`);
+  const snap = await ref.get();
+  if (!snap.exists()) throw new HttpsError("not-found", "알림을 찾을 수 없습니다.");
+  if (!notificationBelongsToCompany(snap.val(), companyId)) {
+    throw new HttpsError("permission-denied", "이 알림을 변경할 권한이 없습니다.");
+  }
+  const alreadyRead = snap.val()?.read === true;
+  if (!alreadyRead) await ref.update({ read: true, readAt: Date.now() });
+  return { notificationId: id, alreadyRead, read: true };
+});
+
+exports.markAllNotificationsRead = onCall(OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const { companyId } = await notificationActor(request.auth.uid);
+  const snap = await db.ref(`userNotifications/${request.auth.uid}`).get();
+  const updates = {};
+  snap.forEach((child) => {
+    const value = child.val() ?? {};
+    if (!notificationBelongsToCompany(value, companyId) || value.read === true) return;
+    updates[`${child.key}/read`] = true;
+    updates[`${child.key}/readAt`] = Date.now();
+  });
+  if (Object.keys(updates).length) await db.ref(`userNotifications/${request.auth.uid}`).update(updates);
+  return { updatedCount: Object.keys(updates).length / 2, read: true };
 });
 
 function normalizeTrainingTypeValue(value) {

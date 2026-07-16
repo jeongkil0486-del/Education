@@ -13,8 +13,8 @@ export async function render(container) {
   container.innerHTML = `
     <div class="section-header">
       <div>
-        <div class="section-title">알림 설정</div>
-        <div class="section-subtitle">교육관리 상단 기한 카드와 추후 사용할 알림 기준을 설정합니다.</div>
+        <div class="section-title">교육기한 설정</div>
+        <div class="section-subtitle">교육관리 대시보드와 직원관리대장에 표시할 교육기한 기준을 설정합니다.</div>
       </div>
     </div>
 
@@ -22,7 +22,7 @@ export async function render(container) {
       <div class="card__header">
         <div>
           <div class="card__title">교육 기한 카드 설정</div>
-          <div class="card__subtitle">4개 카드 각각의 이름, 기준일, 표시 여부, 알림 사용 여부를 관리합니다.</div>
+          <div class="card__subtitle">4개 카드 각각의 이름, 기준일, 표시 여부를 관리합니다.</div>
         </div>
       </div>
       <div class="card__body" style="display:flex;flex-direction:column;gap:var(--space-5)">
@@ -108,10 +108,6 @@ function renderBucketSettings() {
             <input class="bucket-input" data-key="${bucket.key}" data-field="enabled" type="checkbox" ${bucket.enabled ? "checked" : ""} />
             <span class="check-group__label">카드 표시</span>
           </label>
-          <label class="check-group">
-            <input class="bucket-input" data-key="${bucket.key}" data-field="notify" type="checkbox" ${bucket.notify ? "checked" : ""} />
-            <span class="check-group__label">알림 사용</span>
-          </label>
         </div>
       </div>
     </div>
@@ -131,7 +127,7 @@ function handleBucketChange(event) {
   const bucket = state.settings.deadlineBuckets.find((item) => item.key === key);
   if (!bucket || !field) return;
 
-  if (field === "enabled" || field === "notify") {
+  if (field === "enabled") {
     bucket[field] = event.target.checked;
   } else if (field === "days") {
     const parsed = Number(event.target.value);
@@ -161,7 +157,6 @@ function updatePreview() {
         type: bucket.type,
         ...(bucket.type === "withinDays" ? { days: Number(bucket.days ?? 1) } : {}),  // overdue/completed는 days 없음
         enabled: !!bucket.enabled,
-        notify: !!bucket.notify,
       })),
     },
     null,
@@ -197,14 +192,13 @@ async function saveSettings() {
         type: bucket.type,
         ...(bucket.type === "withinDays" ? { days: Number(bucket.days) } : {}),
         enabled: !!bucket.enabled,
-        notify: !!bucket.notify,
       })),
     };
 
     await settingsDB.setNotifications(payload);
     state.settings = normalizeNotificationSettings(payload);
     renderBucketSettings();
-    toast.success("알림 설정을 저장했습니다.");
+    toast.success("교육기한 설정을 저장했습니다.");
   } catch (err) {
     console.error("[notification-settings] save error:", err);
     toast.error("설정 저장 중 오류가 발생했습니다.");

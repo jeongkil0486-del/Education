@@ -42,7 +42,7 @@ export const TEXT = {
     announcements: "공지사항",
     auditLogs: "감사 로그",
     templates: "교육 템플릿",
-    notificationSettings: "알림 설정",
+    notificationSettings: "교육기한 설정",
     slideshow: "슬라이드쇼",
     lessonPlan: "교안 작성",
     companies: "회사 관리",
@@ -62,7 +62,7 @@ export const TEXT = {
       info: "안내",
       learning: "교육",
     },
-    notifications: "알림 설정",
+    notifications: "교육기한 설정",
     assignedTrainings: "배정 교육",
   },
   brand: {
