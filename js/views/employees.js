@@ -21,6 +21,10 @@ import {
 } from "../services/training-service.js";
 import { normalizeNotificationSettings } from "../services/notification-settings-service.js";
 import {
+  calculateAdjustedLastDate,
+  isValidLedgerEducationRecord,
+} from "../services/employee-ledger-last-date.js";
+import {
   bulkImportManualTrainingHistories,
   updateEmployeeManagementProfile,
   resetSelectedManualTrainingHistories,
@@ -883,6 +887,8 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
       .filter((entry) => entry.date)
       .sort((a, b) => a.date.localeCompare(b.date) || a.originalIndex - b.originalIndex);
     const uniqueDates = [...new Set(datedRecords.map((entry) => entry.date))];
+    const validDatedRecords = datedRecords.filter((entry) => isValidLedgerEducationRecord(entry.record));
+    const validUniqueDates = [...new Set(validDatedRecords.map((entry) => entry.date))];
 
     // Explicit initial rows take precedence. When legacy rows have no stage, the
     // earliest dated occurrence of the selected canonical item is the initial one.
@@ -890,9 +896,17 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
       .filter((entry) => isInitialRec(entry.record))
       .map((entry) => entry.date);
     const initialDate = explicitInitialDates[0] ?? uniqueDates[0] ?? null;
-    const lastDate = uniqueDates.at(-1) ?? null;
-
     const selectedCanonicalKey = canonicalLedgerMetaKey(trainingMeta);
+    const rawLastDate = uniqueDates.at(-1) ?? null;
+    const validInitialDate = validDatedRecords
+      .filter((entry) => isInitialRec(entry.record))
+      .map((entry) => entry.date)[0] ?? validUniqueDates[0] ?? null;
+    const isLegalTraining = normalizeTrainingType(trainingMeta?.trainingType) === "legal"
+      || selectedCanonicalKey.startsWith("legal");
+    const lastDate = isLegalTraining
+      ? calculateAdjustedLastDate(validInitialDate, validUniqueDates)
+      : rawLastDate;
+
     const datesForYear = (year) => {
       const explicitField = `year_${year}`;
       const dates = recs.flatMap((record) => {
@@ -945,10 +959,10 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
     const latestRecurrentEntry = recurrentEntries.at(-1)
       ?? (!latestDatedStage && uniqueDates.length > 1 ? latestDatedEntry : null);
     const latestRecurrentDate = latestRecurrentEntry?.date ?? null;
-    const initialOnly = Boolean(lastDate && !latestRecurrentDate);
+    const initialOnly = Boolean(rawLastDate && !latestRecurrentDate);
     // 직원관리대장에서는 초기 회차도 주기의 시작점이다. 최신 보수 회차가 없으면
     // 초기교육일을 사용하고, legacy 데이터의 stage/date가 불완전하면 최종 유효일로 보완한다.
-    const cycleBaseDate = latestRecurrentDate ?? initialDate ?? lastDate;
+    const cycleBaseDate = latestRecurrentDate ?? initialDate ?? rawLastDate;
     const dueRow = cycleBaseDate ? applyDueMetadata([{
       completedAt: new Date(cycleBaseDate).getTime(),
       cycleMonths: effectiveCycle,
@@ -957,7 +971,7 @@ function aggregateLedger(employees, histories, trainingMeta, globalCycleMonths =
 
     // daysRemaining 기반 직접 상태 결정
     let dueStatus, dueStatusLabel, daysRemaining, nextDueDate, dueReason;
-    if (!lastDate) {
+    if (!rawLastDate) {
       dueStatus = "none"; dueStatusLabel = "-"; daysRemaining = null; nextDueDate = null; dueReason = recs.length ? "no_valid_date" : "no_history";
     } else if (!effectiveCycle) {
       dueStatus = "unconfigured"; dueStatusLabel = "-"; daysRemaining = null; nextDueDate = null; dueReason = "cycle_missing";
@@ -2550,47 +2564,6 @@ async function submitHistoryUploadInline() {
   } finally {
     if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="margin-right:4px"><path d="M8 10V2m0 0L5 5m3-3l3 3M3 13h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>이력 업로드`; }
   }
-}
-
-/* ──────────────────────────────────────────────────────
-   최종교육일 계산 헬퍼
-   규칙: 최신 교육연도 + 초기교육 월/일
-   초기교육이 없으면 실제 최신 교육일 반환
-   윤년 2월 29일 → 비윤년이면 2월 28일로 보정
-────────────────────────────────────────────────────── */
-function calculateAdjustedLastDate(initialDate, allDates) {
-  // 날짜가 아예 없으면 null
-  if (!allDates || allDates.length === 0) return null;
-
-  // 실제 최신 날짜 (rawLastDate)
-  const rawLast = allDates[allDates.length - 1];
-
-  // 초기교육 날짜가 없으면 실제 최신 날짜 그대로 반환
-  if (!initialDate) return rawLast;
-
-  // 초기교육의 월/일 추출 (UTC 기준, 하루 밀림 방지)
-  const initParts = initialDate.split("-").map(Number);
-  if (initParts.length < 3 || initParts.some(isNaN)) return rawLast;
-  const initMonth = initParts[1]; // 1~12
-  const initDay   = initParts[2]; // 1~31
-
-  // 모든 이력 중 가장 최신 연도 추출
-  const years = allDates.map((d) => Number(d.slice(0, 4))).filter((y) => y > 0);
-  if (!years.length) return rawLast;
-  const latestYear = Math.max(...years);
-
-  // 해당 연도에서 초기교육 월/일이 유효한지 확인 (윤년 보정)
-  const day = clampDayInMonth(latestYear, initMonth, initDay);
-  const mm  = String(initMonth).padStart(2, "0");
-  const dd  = String(day).padStart(2, "0");
-  return `${latestYear}-${mm}-${dd}`;
-}
-
-/** 해당 연도·월에서 day가 초과하면 그 달의 마지막 날로 보정 */
-function clampDayInMonth(year, month, day) {
-  // month: 1~12, Date(year, month, 0) = 해당 월의 마지막 날 (JS: 0-indexed month)
-  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
-  return Math.min(day, lastDay);
 }
 
 /* ═══════════════════════════════════════════════════════
