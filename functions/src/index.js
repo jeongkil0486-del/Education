@@ -14,6 +14,12 @@ const {
   employeeTarget,
   trainingHistorySnapshot,
 } = require("./audit-log");
+const {
+  compareImportEmployeeIdentity,
+  importEmployeeMismatchMessage,
+  normalizeImportEmployeeName,
+  normalizeImportEmployeeNumber,
+} = require("./employee-import-identity");
 
 admin.initializeApp();
 
@@ -3600,7 +3606,7 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
     if (!targetSnap.exists() || targetSnap.val()?.role !== "employee") {
       throw new HttpsError("not-found", "업로드 대상 직원 정보를 찾을 수 없습니다.");
     }
-    targetEmployee = { uid: targetEmployeeUid, ...targetSnap.val() };
+    targetEmployee = { ...targetSnap.val(), uid: targetEmployeeUid };
     assertEmployeeHistoryScope(actor, targetEmployee);
   }
 
@@ -3617,28 +3623,24 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
   // 회사 직원 목록 조회
   const usersSnap = await db.ref("users").get();
   const allUsers  = Object.entries(usersSnap.val() ?? {}).map(([uid, u]) => ({ uid, ...u }));
-  // empNo: 탭·공백 완전 제거 후 대소문자 무시
-  const normalizeImportEmpNo = (value) => String(value ?? "")
-    .normalize("NFKC")
-    .replace(/[\s\u00a0\u200b-\u200d\u2060\ufeff]/g, "")
-    .toUpperCase();
   const empByNo   = new Map(
     allUsers
       .filter((u) => u.empNo)
-      .map((u) => [normalizeImportEmpNo(u.empNo).toLowerCase(), u])
+      .map((u) => [normalizeImportEmployeeNumber(u.empNo), u])
   );
   const empByName = new Map();
   for (const u of allUsers) {
     if (!u.name) continue;
-    const k = String(u.name).replace(/\s+/g, " ").trim();
+    const k = normalizeImportEmployeeName(u.name);
     if (!empByName.has(k)) empByName.set(k, []);
     empByName.get(k).push(u);
   }
   if (!targetEmployee) {
-    const profileEmpNo = normalizeImportEmpNo(importedProfile.empNo);
-    const candidates = normalizeText(importedProfile.name) ? (empByName.get(normalizeText(importedProfile.name)) ?? []) : [];
+    const profileEmpNo = normalizeImportEmployeeNumber(importedProfile.empNo);
+    const profileName = normalizeImportEmployeeName(importedProfile.name);
+    const candidates = profileName ? (empByName.get(profileName) ?? []) : [];
     targetEmployee = profileEmpNo
-      ? (empByNo.get(profileEmpNo.toLowerCase()) ?? null)
+      ? (empByNo.get(profileEmpNo) ?? null)
       : candidates.length === 1 ? candidates[0] : null;
     if (targetEmployee) assertEmployeeHistoryScope(actor, targetEmployee);
   }
@@ -3669,8 +3671,10 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
 
   for (const row of rows) {
     // empNo: 탭·공백 완전 제거 (\tT259144 같은 패턴 처리)
-    const empNoRaw   = normalizeImportEmpNo(row.empNo ?? row.employeeEmpNo ?? "");
-    const empNameRaw = String(row.employeeName ?? row.name ?? "").replace(/\s+/g, " ").trim();
+    const rowEmployeeNumber = row.empNo ?? row.employeeEmpNo ?? "";
+    const rowEmployeeName = row.employeeName ?? row.name ?? "";
+    const empNoRaw = normalizeImportEmployeeNumber(rowEmployeeNumber);
+    const empNameRaw = normalizeImportEmployeeName(rowEmployeeName);
     const rawTrainingType = normalizeHistoryImportType(row);
     const rawCourseName = normalizeText(row.courseName ?? row.subjectName ?? "");
     const subjectName  = normalizeText(row.subjectName ?? row.courseName ?? "");
@@ -3711,13 +3715,19 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
     // 직원 탐색
     let employee = targetEmployee;
     if (targetEmployee) {
-      const targetEmpNo = normalizeImportEmpNo(targetEmployee.empNo);
-      const targetName = String(targetEmployee.name ?? "").replace(/\s+/g, " ").trim();
-      if ((empNoRaw && empNoRaw !== targetEmpNo) || (!empNoRaw && empNameRaw && empNameRaw !== targetName)) {
-        throw new HttpsError("failed-precondition", "엑셀의 직원 정보와 선택한 직원이 일치하지 않습니다.");
+      const identityComparison = compareImportEmployeeIdentity(targetEmployee, {
+        empNo: rowEmployeeNumber,
+        name: rowEmployeeName,
+      });
+      if (!identityComparison.matches) {
+        const rowLabel = row.sourceRowNumber ? `엑셀 이력 ${row.sourceRowNumber}행` : "엑셀 이력";
+        throw new HttpsError(
+          "failed-precondition",
+          importEmployeeMismatchMessage(identityComparison, rowLabel)
+        );
       }
     } else if (empNoRaw) {
-      employee = empByNo.get(empNoRaw.toLowerCase()) ?? null;
+      employee = empByNo.get(empNoRaw) ?? null;
     }
     if (!employee && empNameRaw) {
       const candidates = empByName.get(empNameRaw) ?? [];
@@ -3924,12 +3934,15 @@ exports.importHistoryExcelData = onCall(OPTS, async (request) => {
   }
 
   if (targetEmployee && Object.keys(importedProfile).length) {
-    const targetEmpNo = normalizeImportEmpNo(targetEmployee.empNo);
-    const profileEmpNo = normalizeImportEmpNo(importedProfile.empNo);
-    const profileName = normalizeText(importedProfile.name);
-    if ((profileEmpNo && profileEmpNo !== targetEmpNo) ||
-        (!profileEmpNo && profileName && profileName !== normalizeText(targetEmployee.name))) {
-      throw new HttpsError("failed-precondition", "엑셀 인적사항과 선택한 직원이 일치하지 않습니다.");
+    const profileIdentityComparison = compareImportEmployeeIdentity(targetEmployee, {
+      empNo: importedProfile.empNo,
+      name: importedProfile.name,
+    });
+    if (!profileIdentityComparison.matches) {
+      throw new HttpsError(
+        "failed-precondition",
+        importEmployeeMismatchMessage(profileIdentityComparison, "엑셀 인적사항")
+      );
     }
 
     const profilePatch = {};
