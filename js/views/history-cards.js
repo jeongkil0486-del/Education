@@ -21,6 +21,10 @@ import {
   getImportableRows,
   STATUS as IMPORT_STATUS,
 } from "../services/excel-import-engine.js";
+import {
+  compareEmployeeImportIdentity,
+  employeeImportMismatchMessage,
+} from "../services/employee-import-identity.js";
 
 /* ──────────────────────────────────────────────────────────
    교육유형 → 섹션 매핑
@@ -1282,19 +1286,60 @@ function openImportExcelModal() {
           if (statusEl) statusEl.textContent = "파일 분석 중...";
           try {
             const analyzed = await analyzeExcel(file);
+            const selectedIdentity = {
+              name: S.selectedEmployee?.name ?? "",
+              empNo: S.selectedEmployee?.empNo ?? "",
+            };
+            const profileComparison = compareEmployeeImportIdentity(selectedIdentity, {
+              name: analyzed.empInfo?.name ?? analyzed.empInfo?.employeeName ?? "",
+              empNo: analyzed.empInfo?.empNo ?? "",
+            });
+            const profileIdentityError = profileComparison.matches
+              ? ""
+              : employeeImportMismatchMessage(profileComparison, "Excel 인적사항");
+            const previewRows = analyzed.rows.map((row, index) => {
+              let status = IMPORT_STATUS.NEW;
+              let statusDetail = "신규 생성";
+              let identityError = profileIdentityError;
 
-            // 기본 미리보기 통계 (직원 매칭은 서버에서)
-            let newCount = 0, errorCount = 0;
-            for (const r of analyzed.rows) {
-              if (!r.completedAt || (!r.courseName && !r.subjectName)) errorCount++;
-              else newCount++;
-            }
+              if (!identityError) {
+                const rowComparison = compareEmployeeImportIdentity(selectedIdentity, {
+                  name: row.employeeName ?? "",
+                  empNo: row.empNo ?? "",
+                });
+                if (!rowComparison.matches) {
+                  const rowNumber = row.sourceRowNumber ?? index + 1;
+                  identityError = employeeImportMismatchMessage(rowComparison, `Excel 이력 ${rowNumber}행`);
+                }
+              }
+
+              if (identityError) {
+                status = IMPORT_STATUS.ERROR;
+                statusDetail = identityError;
+              } else if (!row.completedAt) {
+                status = IMPORT_STATUS.ERROR;
+                statusDetail = "수료일 없음";
+              } else if (!row.courseName && !row.subjectName) {
+                status = IMPORT_STATUS.ERROR;
+                statusDetail = "과정명 없음";
+              }
+
+              return { ...row, _status: status, _statusDetail: statusDetail, _identityError: identityError };
+            });
+            const identityErrors = previewRows.filter((row) => row._identityError);
+            const errorCount = previewRows.filter((row) => row._status === IMPORT_STATUS.ERROR).length;
+            const newCount = previewRows.length - errorCount;
             const preview = {
-              summary: { total: analyzed.rows.length, new: newCount, fill: 0, duplicate: 0, error: errorCount },
-              rows: analyzed.rows,
+              summary: { total: previewRows.length, new: newCount, fill: 0, duplicate: 0, error: errorCount },
+              rows: previewRows,
             };
 
-            window._importAnalyzed = analyzed;
+            window._importAnalyzed = {
+              ...analyzed,
+              rows: previewRows,
+              identityErrors,
+              profileIdentityError,
+            };
 
             const previewEl = document.getElementById("import-preview");
             const contentEl = document.getElementById("import-preview-content");
@@ -1305,10 +1350,12 @@ function openImportExcelModal() {
             }
 
             const parserInfo = analyzed.parsersUsed?.join(", ") ?? "";
-            const validCount = analyzed.rows.filter((r) => r.completedAt && (r.courseName || r.subjectName)).length;
+            const validCount = newCount;
+            const firstError = previewRows.find((row) => row._status === IMPORT_STATUS.ERROR)?._statusDetail ?? "";
             if (statusEl) statusEl.textContent =
               `분석 완료: 총 ${analyzed.rows.length}건 (저장 가능: ${validCount}건, 오류: ${errorCount}건)` +
-              (parserInfo ? `  [${parserInfo}]` : "");
+              (parserInfo ? `  [${parserInfo}]` : "") +
+              (firstError ? ` · 첫 오류: ${firstError}` : "");
           } catch (err) {
             console.error("[history-cards] analyzeExcel failed", err);
             if (statusEl) statusEl.textContent = `분석 실패: ${err.message}`;
@@ -1322,11 +1369,16 @@ function openImportExcelModal() {
         onClick: async () => {
           const analyzed = window._importAnalyzed;
           if (!analyzed?.rows?.length) { toast.warning("먼저 파일을 분석해 주세요."); return; }
+          if (analyzed.profileIdentityError || analyzed.identityErrors?.length) {
+            const firstError = analyzed.profileIdentityError || analyzed.identityErrors[0]?._identityError;
+            toast.error(firstError || "Excel 직원 정보가 선택한 직원과 일치하지 않습니다.");
+            return;
+          }
           const mode = document.querySelector("input[name='import-mode']:checked")?.value ?? "fill";
 
           // 수료일 없는 행 제외 (필수), 과정명 없는 행 제외
           const payload = analyzed.rows
-            .filter((r) => r.completedAt && (r.courseName || r.subjectName))
+            .filter((r) => r._status !== IMPORT_STATUS.ERROR && r.completedAt && (r.courseName || r.subjectName))
             .map((r) => ({
               empNo:          String(r.empNo ?? "").trim(),
               employeeName:   String(r.employeeName ?? "").trim(),
