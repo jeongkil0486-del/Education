@@ -1074,12 +1074,10 @@ function selectEvidenceFile(row, button) {
     } catch (error) {
       const responseCode = String(error?.responseText || "").match(/<Code>([^<]+)<\/Code>/)?.[1] || "";
       const responseMessage = String(error?.responseText || "").match(/<Message>([^<]+)<\/Message>/)?.[1] || "";
-      console.error("[history-evidence] upload failed", {
-        code: error?.code,
-        message: error?.message,
-        responseCode,
-        responseMessage,
-      });
+      console.error(
+        `[history-evidence] upload failed code=${error?.code || ""}`
+        + ` responseCode=${responseCode} responseMessage=${responseMessage}`,
+      );
       toast.error(error?.message || "교육 증빙 PDF 업로드에 실패했습니다.");
       button.disabled = false;
       button.textContent = originalText;
