@@ -855,6 +855,15 @@ exports.createHistoryEvidenceUploadUrl = onCall(HISTORY_EVIDENCE_R2_OPTS, async 
   return {
     uploadId,
     uploadUrl,
+    uploadHeaders: {
+      "Content-Type": HISTORY_EVIDENCE_MIME,
+      "x-amz-meta-evidence-id": target.evidenceId,
+      "x-amz-meta-employee-uid": target.employeeUid,
+      "x-amz-meta-history-source": target.historyRef.source,
+      "x-amz-meta-source-record-id": target.historyRef.recordId,
+      "x-amz-meta-uploaded-by": request.auth.uid,
+      "x-amz-meta-original-name": encodeURIComponent(fileName),
+    },
     evidenceId: target.evidenceId,
     replacing: Boolean(existing.r2Key),
     expiresAt: now + PRESIGN_EXPIRES_SEC * 1000,

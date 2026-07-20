@@ -87,10 +87,11 @@ export async function uploadHistoryEvidence({ employeeUid, row, file, onProgress
     fileType: file.type,
     fileSize: file.size,
   });
-  const { uploadId, uploadUrl } = createResult.data ?? {};
+  const { uploadId, uploadUrl, uploadHeaders } = createResult.data ?? {};
   if (!uploadId || !uploadUrl) throw new Error("교육 증빙 업로드 URL을 받지 못했습니다.");
 
   await putFileToR2(uploadUrl, file, {
+    headers: uploadHeaders,
     onProgress: (percent) => onProgress?.("PDF 업로드 중", 10 + Math.round(percent * 0.8)),
   });
 
