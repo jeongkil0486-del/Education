@@ -152,6 +152,7 @@ export function putFileToR2(uploadUrl, file, opts = {}) {
       } else {
         const error = new Error(`R2 업로드 실패 (HTTP ${xhr.status})`);
         error.code = `r2/http-${xhr.status}`;
+        error.responseText = String(xhr.responseText || "");
         reject(error);
       }
     });
