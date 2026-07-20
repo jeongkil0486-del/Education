@@ -90,9 +90,6 @@ export async function uploadHistoryEvidence({ employeeUid, row, file, onProgress
   const { uploadId, uploadUrl, uploadHeaders } = createResult.data ?? {};
   if (!uploadId || !uploadUrl) throw new Error("교육 증빙 업로드 URL을 받지 못했습니다.");
 
-  const signedHeaders = new URL(uploadUrl).searchParams.get("X-Amz-SignedHeaders") || "";
-  const requestHeaderNames = Object.keys(uploadHeaders ?? {}).map((name) => name.toLowerCase()).sort();
-  console.info(`[history-evidence] upload request signedHeaders=${signedHeaders} requestHeaders=${requestHeaderNames.join(",")}`);
   await putFileToR2(uploadUrl, file, {
     headers: uploadHeaders,
     onProgress: (percent) => onProgress?.("PDF 업로드 중", 10 + Math.round(percent * 0.8)),

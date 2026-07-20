@@ -807,23 +807,26 @@ exports.createHistoryEvidenceUploadUrl = onCall(HISTORY_EVIDENCE_R2_OPTS, async 
   const now = Date.now();
   const existingSnap = await db.ref(target.evidencePath).get();
   const existing = existingSnap.val() ?? {};
+  const uploadMetadata = {
+    "evidence-id": target.evidenceId,
+    "employee-uid": target.employeeUid,
+    "history-source": target.historyRef.source,
+    "source-record-id": target.historyRef.recordId,
+    "uploaded-by": request.auth.uid,
+    "original-name": encodeURIComponent(fileName),
+  };
   const command = new PutObjectCommand({
     Bucket: bucket,
     Key: key,
     ContentType: HISTORY_EVIDENCE_MIME,
-    ContentLength: fileSize,
-    Metadata: {
-      "evidence-id": target.evidenceId,
-      "employee-uid": target.employeeUid,
-      "history-source": target.historyRef.source,
-      "source-record-id": target.historyRef.recordId,
-      "uploaded-by": request.auth.uid,
-      "original-name": encodeURIComponent(fileName),
-    },
+    Metadata: uploadMetadata,
   });
   let uploadUrl;
   try {
-    uploadUrl = await getSignedUrl(buildR2Client(), command, { expiresIn: PRESIGN_EXPIRES_SEC });
+    uploadUrl = await getSignedUrl(buildR2Client(), command, {
+      expiresIn: PRESIGN_EXPIRES_SEC,
+      unhoistableHeaders: new Set(Object.keys(uploadMetadata).map((name) => `x-amz-meta-${name}`)),
+    });
   } catch (error) {
     logger.error("[history-evidence] upload presign failed", {
       actorUid: request.auth.uid,
@@ -857,12 +860,7 @@ exports.createHistoryEvidenceUploadUrl = onCall(HISTORY_EVIDENCE_R2_OPTS, async 
     uploadUrl,
     uploadHeaders: {
       "Content-Type": HISTORY_EVIDENCE_MIME,
-      "x-amz-meta-evidence-id": target.evidenceId,
-      "x-amz-meta-employee-uid": target.employeeUid,
-      "x-amz-meta-history-source": target.historyRef.source,
-      "x-amz-meta-source-record-id": target.historyRef.recordId,
-      "x-amz-meta-uploaded-by": request.auth.uid,
-      "x-amz-meta-original-name": encodeURIComponent(fileName),
+      ...Object.fromEntries(Object.entries(uploadMetadata).map(([name, value]) => [`x-amz-meta-${name}`, value])),
     },
     evidenceId: target.evidenceId,
     replacing: Boolean(existing.r2Key),
