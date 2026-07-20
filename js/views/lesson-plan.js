@@ -207,6 +207,7 @@ async function renderThumbnail(button) {
 
 async function selectPage(container, pageNumber) {
   if (!state.pdf) return;
+  captureCurrentPageNotes(container);
   state.page = Math.min(state.pageCount, Math.max(1, pageNumber));
   container.querySelectorAll(".guide-thumb").forEach((button) => button.classList.toggle("is-active", Number(button.dataset.page) === state.page));
   container.querySelector("#guide-current-page").textContent = `${state.page} / ${state.pageCount}`;
@@ -236,9 +237,29 @@ async function selectPage(container, pageNumber) {
   try { await state.renderTask.promise; loading.classList.add("hidden"); } catch (error) { if (error?.name !== "RenderingCancelledException") loading.textContent = "페이지 렌더링에 실패했습니다."; }
 }
 
+function captureCurrentPageNotes(container) {
+  if (!state.page || !state.guide?.pageNotes) return;
+  if (container.querySelector("#guide-page-note-fields")?.classList.contains("hidden")) return;
+  const pageKey = String(state.page);
+  const note = {
+    note: container.querySelector("#guide-page-note")?.value ?? "",
+    emphasis: container.querySelector("#guide-page-emphasis")?.value ?? "",
+    question: container.querySelector("#guide-page-question")?.value ?? "",
+  };
+  if (note.note || note.emphasis || note.question) {
+    state.guide.pageNotes[pageKey] = {
+      ...(state.guide.pageNotes[pageKey] ?? {}),
+      ...note,
+    };
+  } else {
+    delete state.guide.pageNotes[pageKey];
+  }
+}
+
 async function saveGuide(container) {
   const button = container.querySelector("#guide-save");
   if (button.disabled) return;
+  captureCurrentPageNotes(container);
   const materialId = container.querySelector("#guide-material").value;
   const payload = {
     ...state.guide,
