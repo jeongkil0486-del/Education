@@ -25,6 +25,14 @@ import {
   compareEmployeeImportIdentity,
   employeeImportMismatchMessage,
 } from "../services/employee-import-identity.js";
+import {
+  deleteHistoryEvidence,
+  getHistoryEvidenceDownloadUrl,
+  historyEvidenceRef,
+  listHistoryEvidence,
+  uploadHistoryEvidence,
+  validateHistoryEvidenceFile,
+} from "../services/history-evidence-service.js";
 
 /* ──────────────────────────────────────────────────────────
    교육유형 → 섹션 매핑
@@ -60,6 +68,7 @@ let S = {
   rows:               [],
   templates:          [],
   items:              [],
+  evidenceByRef:      new Map(),
 };
 const MOVABLE_SECTION_KEYS = new Set(["job_initial", "job_recurring", "legal", "online", "other"]);
 const historyCardSortBySection = Object.fromEntries(
@@ -318,10 +327,25 @@ async function loadCard(uid) {
   if (loadingEl)   loadingEl.style.display = "block";
 
   try {
-    const { employee, rows } = await buildEmployeeHistoryRowsV2(uid);
+    const [{ employee, rows }, evidenceItems] = await Promise.all([
+      buildEmployeeHistoryRowsV2(uid),
+      canManageEmployeeHistory()
+        ? listHistoryEvidence(uid).catch((error) => {
+            console.warn("[history-evidence] metadata unavailable", {
+              code: error?.code,
+            });
+            return [];
+          })
+        : Promise.resolve([]),
+    ]);
     S.selectedEmployee = employee;
     S.employees = S.employees.map((item) => (item.id ?? item.uid) === uid ? { ...item, ...employee } : item);
     S.rows = rows;
+    S.evidenceByRef = new Map(
+      evidenceItems
+        .filter((item) => item?.historyRefKey)
+        .map((item) => [String(item.historyRefKey), item])
+    );
 
     if (dlBtn) dlBtn.disabled = false;
     const addManualBtn = document.getElementById("btn-add-manual-history");
@@ -356,6 +380,7 @@ function deselectEmployee() {
   S.selectedEmployeeId = "";
   S.selectedEmployee   = null;
   S.rows               = [];
+  S.evidenceByRef      = new Map();
 
   const cardSection = document.getElementById("hc-card-section");
   if (cardSection) cardSection.style.display = "none";
@@ -608,7 +633,7 @@ function renderSections(rows) {
           ${groups.length === 0
             ? `<div style="padding:var(--space-6);text-align:center;color:var(--gray-400);font-size:var(--text-sm)">이력 없음</div>`
             : `<div class="table-wrap">
-                <table class="hc-section-table" style="min-width:${isAdmin ? "940px" : "900px"}">
+                <table class="hc-section-table" style="min-width:${isAdmin ? "1160px" : "900px"}">
                   <thead>
                     <tr>
                       <th style="width:28px"></th>
@@ -622,6 +647,7 @@ function renderSections(rows) {
                       ${sortableHistoryCardHeader(secKey, "daysRemaining", "남은 일수")}
                       ${sortableHistoryCardHeader(secKey, "status", "상태")}
                       ${sortableHistoryCardHeader(secKey, "note", "비고")}
+                      ${isAdmin ? '<th class="hc-evidence-column">증빙</th>' : ""}
                       ${isAdmin ? '<th style="width:42px;text-align:center;white-space:nowrap">이동</th>' : ""}
                     </tr>
                   </thead>
@@ -731,6 +757,32 @@ function renderSections(rows) {
     });
   }
 
+  if (canManageEmployeeHistory()) {
+    el.querySelectorAll(".hc-evidence-action").forEach((button) => {
+      button.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        const row = findEvidenceRow(
+          button.dataset.evidenceSource,
+          button.dataset.evidenceRecordId
+        );
+        if (!row) {
+          toast.error("증빙을 연결할 교육이력을 찾을 수 없습니다.");
+          return;
+        }
+        const action = button.dataset.evidenceAction;
+        if (action === "upload" || action === "replace") {
+          selectEvidenceFile(row, button);
+        } else if (action === "view") {
+          await openEvidencePdf(row, "inline");
+        } else if (action === "download") {
+          await openEvidencePdf(row, "attachment");
+        } else if (action === "delete") {
+          confirmEvidenceDelete(row);
+        }
+      });
+    });
+  }
+
   // 수정 버튼
   if (canManageEmployeeHistory()) {
     el.querySelectorAll(".hc-edit-history").forEach((btn) => {
@@ -743,6 +795,15 @@ function renderSections(rows) {
     el.querySelectorAll(".hc-delete-history").forEach((btn) => {
       btn.addEventListener("click", async () => {
         if (!S.selectedEmployeeId) return;
+        const row = findEvidenceRow(
+          btn.dataset.source,
+          btn.dataset.historyId || btn.dataset.sessionId || btn.dataset.trainingId
+        );
+        const ref = row ? historyEvidenceRef(row) : null;
+        if (ref && S.evidenceByRef.has(ref.historyRefKey)) {
+          toast.warning("교육 증빙 PDF를 먼저 삭제한 뒤 교육이력을 삭제해 주세요.");
+          return;
+        }
         const ok = window.confirm("이 교육이력을 삭제하시겠습니까? 삭제 후 복구할 수 없습니다.");
         if (!ok) return;
         try {
@@ -760,7 +821,7 @@ function renderSections(rows) {
           console.error("[history-cards] delete history failed", err);
           toast.error(err?.code === "functions/permission-denied"
             ? "본사 교육관리자만 교육이력을 삭제할 수 있습니다."
-            : "교육이력 삭제에 실패했습니다.");
+            : err?.message || "교육이력 삭제에 실패했습니다.");
           btn.disabled = false;
         }
       });
@@ -909,6 +970,185 @@ function dateSummary(items) {
  * 2-level Accordion
  *  과정(1단계) ▶ 날짜그룹(2단계) ▶ 세부 이력
  */
+function formatEvidenceSize(bytes) {
+  const size = Number(bytes) || 0;
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function evidenceActionAttributes(row) {
+  const ref = historyEvidenceRef(row);
+  if (!ref) return "";
+  return [
+    `data-evidence-source="${esc(ref.source)}"`,
+    `data-evidence-record-id="${esc(ref.recordId)}"`,
+  ].join(" ");
+}
+
+function renderEvidenceControls(row) {
+  if (!canManageEmployeeHistory()) return "";
+  const ref = historyEvidenceRef(row);
+  if (!ref) {
+    return `<div class="hc-evidence-control"><span class="hc-evidence-label">증빙</span><span>–</span></div>`;
+  }
+  const evidence = S.evidenceByRef.get(ref.historyRefKey);
+  const attrs = evidenceActionAttributes(row);
+  if (!evidence?.hasEvidence) {
+    return `
+      <div class="hc-evidence-control">
+        <span class="hc-evidence-label">증빙</span>
+        <button type="button" class="btn btn--secondary btn--sm hc-evidence-action"
+          data-evidence-action="upload" ${attrs}>PDF 업로드</button>
+      </div>`;
+  }
+  const detail = [
+    evidence.fileName || "교육 증빙.pdf",
+    evidence.uploadedAt ? formatDate(evidence.uploadedAt) : "",
+    evidence.uploadedByName || "",
+    evidence.sizeBytes ? formatEvidenceSize(evidence.sizeBytes) : "",
+  ].filter(Boolean).join(" · ");
+  return `
+    <div class="hc-evidence-control" title="${esc(detail)}">
+      <span class="hc-evidence-label">증빙</span>
+      <div class="hc-evidence-file">${esc(evidence.fileName || "교육 증빙.pdf")}</div>
+      <div class="hc-evidence-actions">
+        <button type="button" class="btn btn--ghost btn--sm hc-evidence-action"
+          data-evidence-action="view" ${attrs}>PDF 보기</button>
+        <button type="button" class="btn btn--ghost btn--sm hc-evidence-action"
+          data-evidence-action="download" ${attrs}>다운로드</button>
+        <button type="button" class="btn btn--secondary btn--sm hc-evidence-action"
+          data-evidence-action="replace" ${attrs}>교체</button>
+        <button type="button" class="btn btn--ghost btn--sm hc-evidence-action"
+          data-evidence-action="delete" ${attrs} style="color:var(--color-danger)">삭제</button>
+      </div>
+    </div>`;
+}
+
+function findEvidenceRow(source, recordId) {
+  return S.rows.find((row) => {
+    const ref = historyEvidenceRef(row);
+    return ref?.source === source && ref?.recordId === recordId;
+  }) ?? null;
+}
+
+async function refreshEvidenceState() {
+  if (!S.selectedEmployeeId || !canManageEmployeeHistory()) return;
+  const items = await listHistoryEvidence(S.selectedEmployeeId);
+  S.evidenceByRef = new Map(
+    items
+      .filter((item) => item?.historyRefKey)
+      .map((item) => [String(item.historyRefKey), item])
+  );
+  renderSections(filteredRows());
+}
+
+function selectEvidenceFile(row, button) {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = ".pdf,application/pdf";
+  input.hidden = true;
+  document.body.appendChild(input);
+  input.addEventListener("change", async () => {
+    const file = input.files?.[0];
+    input.remove();
+    if (!file) return;
+    const validationMessage = validateHistoryEvidenceFile(file);
+    if (validationMessage) {
+      toast.error(validationMessage);
+      return;
+    }
+    const originalText = button.textContent;
+    button.disabled = true;
+    try {
+      const result = await uploadHistoryEvidence({
+        employeeUid: S.selectedEmployeeId,
+        row,
+        file,
+        onProgress: (label, percent) => {
+          button.textContent = `${label} ${percent}%`;
+        },
+      });
+      toast.success(result?.message || "교육 증빙 PDF가 저장되었습니다.");
+      await refreshEvidenceState();
+    } catch (error) {
+      console.error("[history-evidence] upload failed", {
+        code: error?.code,
+        message: error?.message,
+      });
+      toast.error(error?.message || "교육 증빙 PDF 업로드에 실패했습니다.");
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }, { once: true });
+  input.addEventListener("cancel", () => input.remove(), { once: true });
+  input.click();
+}
+
+async function openEvidencePdf(row, disposition) {
+  const popup = disposition === "inline" ? window.open("about:blank", "_blank") : null;
+  if (popup) popup.opener = null;
+  try {
+    const { downloadUrl, fileName } = await getHistoryEvidenceDownloadUrl({
+      employeeUid: S.selectedEmployeeId,
+      row,
+      disposition,
+    });
+    if (disposition === "inline") {
+      if (!popup) throw new Error("팝업이 차단됐습니다. 브라우저에서 팝업을 허용해 주세요.");
+      popup.location.replace(downloadUrl);
+      return;
+    }
+    const anchor = document.createElement("a");
+    anchor.href = downloadUrl;
+    anchor.download = fileName || "history-evidence.pdf";
+    anchor.rel = "noopener";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  } catch (error) {
+    popup?.close();
+    console.error("[history-evidence] open failed", {
+      code: error?.code,
+      message: error?.message,
+    });
+    toast.error(error?.message || "교육 증빙 PDF를 열지 못했습니다.");
+  }
+}
+
+function confirmEvidenceDelete(row) {
+  const ref = historyEvidenceRef(row);
+  const evidence = ref ? S.evidenceByRef.get(ref.historyRefKey) : null;
+  modal.open({
+    title: "교육 증빙 PDF 삭제",
+    size: "sm",
+    body: `
+      <p style="font-size:var(--text-sm);color:var(--gray-600);line-height:1.7">
+        <strong>${esc(evidence?.fileName || "교육 증빙 PDF")}</strong>를 삭제하시겠습니까?<br/>
+        교육이력 자체는 삭제되지 않습니다.
+      </p>`,
+    actions: [
+      { label: "취소", variant: "secondary", onClick: () => modal.close() },
+      { label: "삭제", variant: "danger", onClick: async () => {
+        modal.setLoading("삭제", true);
+        try {
+          const result = await deleteHistoryEvidence({ employeeUid: S.selectedEmployeeId, row });
+          toast.success(result?.message || "교육 증빙 PDF가 삭제되었습니다.");
+          modal.close();
+          await refreshEvidenceState();
+        } catch (error) {
+          console.error("[history-evidence] delete failed", {
+            code: error?.code,
+            message: error?.message,
+          });
+          toast.error(error?.message || "교육 증빙 PDF 삭제에 실패했습니다.");
+          modal.setLoading("삭제", false);
+        }
+      }},
+    ],
+  });
+}
+
 function courseGroupRows(group, gi, secKey, isAdmin) {
   const { rep, members } = group;
   const gid = `g_${secKey}_${gi}`;
@@ -949,6 +1189,7 @@ function courseGroupRows(group, gi, secKey, isAdmin) {
       <td style="white-space:nowrap">${days}</td>
       <td>${statusCell}</td>
       <td>${esc(rep.note || "–")}</td>
+      ${isAdmin ? '<td class="hc-evidence-column" style="text-align:center">–</td>' : ""}
       ${isAdmin ? `<td style="text-align:center;padding:0 4px"><button type="button" class="hc-course-move-handle" draggable="true" data-move-id="${esc(moveId)}" aria-label="과정 이동" title="끌어서 섹션 이동 · 클릭하면 이동 메뉴" style="border:0;background:transparent;color:var(--gray-400);cursor:grab;padding:6px 4px;font-size:13px;line-height:1">⋮⋮</button></td>` : ""}
     </tr>`;
 
@@ -967,7 +1208,7 @@ function courseGroupRows(group, gi, secKey, isAdmin) {
         <td style="border-left:3px solid var(--blue-400,#60a5fa);text-align:center;padding:0 4px">
           <span class="hc-date-icon" style="font-size:9px;color:var(--blue-500,#3b82f6)">▶</span>
         </td>
-        <td colspan="${isAdmin ? 11 : 10}" style="padding:6px var(--space-3);font-size:var(--text-sm)">
+        <td colspan="${isAdmin ? 12 : 10}" style="padding:6px var(--space-3);font-size:var(--text-sm)">
           <span style="font-weight:var(--weight-semibold);color:var(--blue-700,#1d4ed8)">${esc(dg.dateLabel)}</span>
           <span style="color:var(--gray-500);font-size:11px;margin-left:6px">(${dg.items.length}건)${summary}</span>
         </td>
@@ -994,7 +1235,7 @@ function courseGroupRows(group, gi, secKey, isAdmin) {
         <tr data-group-detail="${gid}" data-date-detail="${dgid}"
             style="display:none;background:var(--gray-50)">
           <td style="border-left:5px solid var(--blue-300,#93c5fd)"></td>
-          <td colspan="${isAdmin ? 11 : 10}" style="padding:var(--space-2) var(--space-3)">
+          <td colspan="10" style="padding:var(--space-2) var(--space-3)">
             <div style="display:flex;flex-wrap:wrap;gap:var(--space-4);font-size:var(--text-sm)">
               <div>
                 <span style="color:var(--gray-500);font-size:11px">수료일</span><br/>
@@ -1022,6 +1263,7 @@ function courseGroupRows(group, gi, secKey, isAdmin) {
             </div>
             ${adminBtns}
           </td>
+          ${isAdmin ? `<td class="hc-evidence-column">${renderEvidenceControls(m)}</td><td></td>` : ""}
         </tr>`;
     }).join("");
 
