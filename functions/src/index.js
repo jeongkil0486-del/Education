@@ -5,7 +5,13 @@ const logger = require("firebase-functions/logger");
 const { defineSecret } = require("firebase-functions/params");
 const admin = require("firebase-admin");
 const crypto = require("crypto");
-const { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand } = require("@aws-sdk/client-s3");
+const {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  DeleteObjectCommand,
+} = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { classifyTraining, reconcileHistoryRecords } = require("./training-classification");
 const {
@@ -20,6 +26,19 @@ const {
   normalizeImportEmployeeName,
   normalizeImportEmployeeNumber,
 } = require("./employee-import-identity");
+const {
+  HISTORY_EVIDENCE_MAX_FILE_SIZE,
+  HISTORY_EVIDENCE_MIME,
+  buildHistoryEvidenceR2Key,
+  historyEvidenceId,
+  isAllowedHistoryEvidenceR2Key,
+  normalizeHistoryEvidenceRef,
+  publicHistoryEvidenceMetadata,
+  validateHistoryEvidenceFile,
+} = require("./history-evidence");
+const {
+  normalizeGuideInput,
+} = require("./instructor-guide");
 
 admin.initializeApp();
 
@@ -50,6 +69,8 @@ const R2_OPTS = {
     R2_PUBLIC_BASE_URL,
   ],
 };
+const PUBLIC_CALLABLE_OPTS = { ...OPTS, invoker: "public" };
+const HISTORY_EVIDENCE_R2_OPTS = { ...R2_OPTS, invoker: "public" };
 
 const ALLOWED_MATERIAL_MIME = ["application/pdf"];
 const ALLOWED_MATERIAL_EXT = ".pdf";
@@ -57,6 +78,7 @@ const PRESIGN_EXPIRES_SEC = 300;
 const MAX_MATERIAL_FILE_SIZE = 50 * 1024 * 1024;
 const PDF_ONLY_MESSAGE = "교육자료는 PDF 파일만 업로드할 수 있습니다.";
 const PDF_SIZE_MESSAGE = "PDF 파일은 최대 50MB까지 업로드할 수 있습니다.";
+const HISTORY_EVIDENCE_UPLOAD_SESSION_TTL_MS = 15 * 60 * 1000;
 
 const NOTIFICATION_TYPES = Object.freeze({
   ANNOUNCEMENT: "ANNOUNCEMENT",
@@ -258,47 +280,6 @@ async function ensureGuideActor(uid) {
     throw new HttpsError("failed-precondition", "교안의 회사 범위를 결정할 수 없습니다.");
   }
   return actor;
-}
-
-function guideText(value, maxLength) {
-  return String(value ?? "").trim().slice(0, maxLength);
-}
-
-function normalizeGuidePageNotes(value) {
-  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  const pageNotes = {};
-  for (const [rawPage, rawNote] of Object.entries(source).slice(0, 2000)) {
-    const page = Number(rawPage);
-    if (!Number.isInteger(page) || page < 1 || page > 5000) continue;
-    const note = rawNote && typeof rawNote === "object" ? rawNote : {};
-    const normalized = {
-      note: guideText(note.note, 5000),
-      emphasis: guideText(note.emphasis, 1500),
-      question: guideText(note.question, 1500),
-      updatedAt: Date.now(),
-    };
-    if (normalized.note || normalized.emphasis || normalized.question) pageNotes[String(page)] = normalized;
-  }
-  return pageNotes;
-}
-
-function normalizeGuideInput(value) {
-  const input = value && typeof value === "object" ? value : {};
-  const title = guideText(input.title, 160);
-  const materialId = guideText(input.materialId, 140);
-  if (!title) throw new HttpsError("invalid-argument", "교안 제목을 입력해 주세요.");
-  if (!materialId) throw new HttpsError("invalid-argument", "연결할 PDF 교육자료를 선택해 주세요.");
-  return {
-    title,
-    materialId,
-    trainingItemId: guideText(input.trainingItemId, 120),
-    estimatedMinutes: Math.min(1440, Math.max(0, Math.round(Number(input.estimatedMinutes) || 0))),
-    objectives: guideText(input.objectives, 5000),
-    openingNotes: guideText(input.openingNotes, 5000),
-    closingNotes: guideText(input.closingNotes, 5000),
-    generalNotes: guideText(input.generalNotes, 10000),
-    pageNotes: normalizeGuidePageNotes(input.pageNotes),
-  };
 }
 
 function assertGuideId(guideId) {
@@ -584,6 +565,548 @@ exports.getMaterialDownloadUrl = onCall(R2_OPTS, async (request) => {
   }
 });
 
+function historyEvidencePath(employeeUid, evidenceId) {
+  return `historyEvidence/${employeeUid}/${evidenceId}`;
+}
+
+async function resolveHistoryEvidenceTarget(actorUid, input = {}) {
+  const actor = await ensureEmployeeHistoryManagerProfile(actorUid);
+  const employeeUid = normalizeText(input.employeeUid || input.uid);
+  if (!employeeUid) throw new HttpsError("invalid-argument", "직원 UID가 필요합니다.");
+
+  const employeeSnap = await db.ref(`users/${employeeUid}`).get();
+  if (!employeeSnap.exists() || employeeSnap.val()?.role !== "employee") {
+    throw new HttpsError("not-found", "직원 정보를 찾을 수 없습니다.");
+  }
+  const employee = { uid: employeeUid, ...employeeSnap.val() };
+  assertEmployeeHistoryScope(actor, employee);
+
+  let historyRef;
+  try {
+    historyRef = normalizeHistoryEvidenceRef(input);
+  } catch (error) {
+    throw new HttpsError("invalid-argument", error.message);
+  }
+
+  const historyPath = historyRef.source === "manual"
+    ? `manualTrainingHistories/${historyRef.recordId}`
+    : historyRef.source === "session"
+      ? `sessionCompletions/${historyRef.recordId}/${employeeUid}`
+      : `trainingCompletions/${historyRef.recordId}/${employeeUid}`;
+  const historySnap = await db.ref(historyPath).get();
+  if (!historySnap.exists()) {
+    throw new HttpsError("not-found", "증빙을 연결할 교육이력을 찾을 수 없습니다.");
+  }
+  const history = historySnap.val() ?? {};
+  if (historyRef.source === "manual" && normalizeText(history.uid) !== employeeUid) {
+    throw new HttpsError("permission-denied", "다른 직원의 교육이력에는 증빙을 연결할 수 없습니다.");
+  }
+
+  const actorCompanyId = normalizeText(actor.companyId || await resolveActorCompanyId(actor));
+  const companyId = normalizeText(employee.companyId || actorCompanyId);
+  if (!actorCompanyId || !companyId || actorCompanyId !== companyId) {
+    throw new HttpsError("permission-denied", "다른 회사 직원의 교육이력에는 접근할 수 없습니다.");
+  }
+  const evidenceId = historyEvidenceId(employeeUid, historyRef.source, historyRef.recordId);
+  return {
+    actor: { ...actor, companyId: actorCompanyId },
+    employee,
+    employeeUid,
+    companyId,
+    history,
+    historyRef,
+    evidenceId,
+    evidencePath: historyEvidencePath(employeeUid, evidenceId),
+  };
+}
+
+async function resolveHistoryEvidenceEmployee(actorUid, employeeUidValue) {
+  const actor = await ensureEmployeeHistoryManagerProfile(actorUid);
+  const employeeUid = normalizeText(employeeUidValue);
+  if (!employeeUid) throw new HttpsError("invalid-argument", "직원 UID가 필요합니다.");
+  const employeeSnap = await db.ref(`users/${employeeUid}`).get();
+  if (!employeeSnap.exists() || employeeSnap.val()?.role !== "employee") {
+    throw new HttpsError("not-found", "직원 정보를 찾을 수 없습니다.");
+  }
+  const employee = { uid: employeeUid, ...employeeSnap.val() };
+  assertEmployeeHistoryScope(actor, employee);
+  const actorCompanyId = normalizeText(actor.companyId || await resolveActorCompanyId(actor));
+  const companyId = normalizeText(employee.companyId || actorCompanyId);
+  if (!actorCompanyId || !companyId || actorCompanyId !== companyId) {
+    throw new HttpsError("permission-denied", "다른 회사 직원의 증빙은 조회할 수 없습니다.");
+  }
+  return { actor: { ...actor, companyId: actorCompanyId }, employee, employeeUid, companyId };
+}
+
+async function readR2ObjectPrefix(r2, bucket, key, maxBytes = 1024) {
+  const response = await r2.send(new GetObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Range: `bytes=0-${Math.max(4, maxBytes - 1)}`,
+  }));
+  const body = response.Body;
+  if (!body) return Buffer.alloc(0);
+  if (typeof body.transformToByteArray === "function") {
+    return Buffer.from(await body.transformToByteArray()).subarray(0, maxBytes);
+  }
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of body) {
+    const buffer = Buffer.from(chunk);
+    chunks.push(buffer);
+    total += buffer.length;
+    if (total >= maxBytes) break;
+  }
+  return Buffer.concat(chunks).subarray(0, maxBytes);
+}
+
+function assertPdfSignature(prefix) {
+  if (!Buffer.from(prefix).subarray(0, 5).equals(Buffer.from("%PDF-"))) {
+    throw new HttpsError("invalid-argument", "PDF 형식이 아닌 파일은 교육 증빙으로 저장할 수 없습니다.");
+  }
+}
+
+async function assertNoHistoryEvidenceForRecords(entries = []) {
+  const grouped = new Map();
+  for (const entry of entries) {
+    const employeeUid = normalizeText(entry?.employeeUid);
+    const source = normalizeText(entry?.source).toLowerCase();
+    const recordId = normalizeText(entry?.recordId);
+    if (!employeeUid || !source || !recordId) continue;
+    if (!grouped.has(employeeUid)) grouped.set(employeeUid, []);
+    grouped.get(employeeUid).push({ source, recordId });
+  }
+  for (const [employeeUid, refs] of grouped.entries()) {
+    const evidenceSnap = await db.ref(`historyEvidence/${employeeUid}`).get();
+    if (!evidenceSnap.exists()) continue;
+    const protectedIds = new Set(refs.map(({ source, recordId }) =>
+      historyEvidenceId(employeeUid, source, recordId)
+    ));
+    let evidenceExists = false;
+    evidenceSnap.forEach((child) => {
+      if (protectedIds.has(child.key) && normalizeText(child.val()?.r2Key)) {
+        evidenceExists = true;
+      }
+    });
+    if (evidenceExists) {
+      throw new HttpsError(
+        "failed-precondition",
+        "교육 증빙 PDF가 연결된 이력이 포함되어 있습니다. 증빙을 먼저 삭제한 뒤 다시 시도해 주세요.",
+        { evidenceExists: true }
+      );
+    }
+  }
+}
+
+async function deleteHistoryEvidenceR2Keys(record) {
+  const { bucket } = getR2Config();
+  if (!bucket) throw new HttpsError("failed-precondition", "R2_BUCKET 환경변수가 없습니다.");
+  const keys = Array.from(new Set([
+    normalizeText(record?.r2Key),
+    ...(Array.isArray(record?.staleR2Keys) ? record.staleR2Keys.map(normalizeText) : []),
+  ].filter(Boolean)));
+  const r2 = buildR2Client();
+  for (const key of keys) {
+    await r2.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+  }
+}
+
+async function rejectHistoryEvidenceUpload({ r2, bucket, key, sessionRef, error }) {
+  try {
+    await r2.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+  } catch (cleanupError) {
+    logger.warn("[history-evidence] rejected object cleanup pending", {
+      code: cleanupError?.code,
+    });
+  }
+  await sessionRef.update({
+    status: "failed",
+    failedAt: Date.now(),
+    failureCode: normalizeText(error?.code || "invalid-upload"),
+  });
+  throw error;
+}
+
+exports.listHistoryEvidence = onCall(PUBLIC_CALLABLE_OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const { employeeUid } = await resolveHistoryEvidenceEmployee(
+    request.auth.uid,
+    request.data?.employeeUid || request.data?.uid
+  );
+  const snap = await db.ref(`historyEvidence/${employeeUid}`).get();
+  const items = [];
+  if (snap.exists()) {
+    snap.forEach((child) => {
+      const record = child.val() ?? {};
+      if (!record.deletionPending && normalizeText(record.employeeUid) === employeeUid) {
+        items.push(publicHistoryEvidenceMetadata({ evidenceId: child.key, ...record }));
+      }
+    });
+  }
+  return { employeeUid, items };
+});
+
+exports.createHistoryEvidenceUploadUrl = onCall(HISTORY_EVIDENCE_R2_OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const target = await resolveHistoryEvidenceTarget(request.auth.uid, request.data);
+  const fileName = normalizeText(request.data?.fileName);
+  const fileType = normalizeText(request.data?.fileType).toLowerCase();
+  const fileSize = Number(request.data?.fileSize ?? 0);
+  const validationMessage = validateHistoryEvidenceFile({ fileName, fileType, fileSize });
+  if (validationMessage) throw new HttpsError("invalid-argument", validationMessage);
+
+  const { bucket } = getR2Config();
+  if (!bucket) throw new HttpsError("failed-precondition", "R2_BUCKET 환경변수가 없습니다.");
+
+  const objectId = crypto.randomUUID();
+  const key = buildHistoryEvidenceR2Key({
+    companyId: target.companyId,
+    employeeUid: target.employeeUid,
+    evidenceId: target.evidenceId,
+    objectId,
+  });
+  const uploadId = crypto.randomUUID().replace(/-/g, "");
+  const now = Date.now();
+  const existingSnap = await db.ref(target.evidencePath).get();
+  const existing = existingSnap.val() ?? {};
+  const uploadMetadata = {
+    "evidence-id": target.evidenceId,
+    "employee-uid": target.employeeUid,
+    "history-source": target.historyRef.source,
+    "source-record-id": target.historyRef.recordId,
+    "uploaded-by": request.auth.uid,
+    "original-name": encodeURIComponent(fileName),
+  };
+  const command = new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    ContentType: HISTORY_EVIDENCE_MIME,
+    Metadata: uploadMetadata,
+  });
+  let uploadUrl;
+  try {
+    uploadUrl = await getSignedUrl(buildR2Client(), command, {
+      expiresIn: PRESIGN_EXPIRES_SEC,
+      unhoistableHeaders: new Set(Object.keys(uploadMetadata).map((name) => `x-amz-meta-${name}`)),
+    });
+  } catch (error) {
+    logger.error("[history-evidence] upload presign failed", {
+      actorUid: request.auth.uid,
+      evidenceId: target.evidenceId,
+      code: error?.code,
+    });
+    throw new HttpsError("internal", "교육 증빙 업로드 URL을 생성하지 못했습니다.");
+  }
+
+  await db.ref(`historyEvidenceUploadSessions/${uploadId}`).set({
+    uploadId,
+    actorUid: request.auth.uid,
+    employeeUid: target.employeeUid,
+    companyId: target.companyId,
+    evidenceId: target.evidenceId,
+    historySource: target.historyRef.source,
+    sourceRecordId: target.historyRef.recordId,
+    historyRefKey: target.historyRef.historyRefKey,
+    key,
+    fileName,
+    fileType,
+    fileSize,
+    previousR2Key: normalizeText(existing.r2Key),
+    status: "pending",
+    createdAt: now,
+    expiresAt: now + HISTORY_EVIDENCE_UPLOAD_SESSION_TTL_MS,
+  });
+
+  return {
+    uploadId,
+    uploadUrl,
+    uploadHeaders: {
+      "Content-Type": HISTORY_EVIDENCE_MIME,
+      ...Object.fromEntries(Object.entries(uploadMetadata).map(([name, value]) => [`x-amz-meta-${name}`, value])),
+    },
+    evidenceId: target.evidenceId,
+    replacing: Boolean(existing.r2Key),
+    expiresAt: now + PRESIGN_EXPIRES_SEC * 1000,
+  };
+});
+
+exports.finalizeHistoryEvidenceUpload = onCall(HISTORY_EVIDENCE_R2_OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const uploadId = normalizeText(request.data?.uploadId);
+  if (!/^[a-f0-9]{32}$/i.test(uploadId)) {
+    throw new HttpsError("invalid-argument", "업로드 세션이 올바르지 않습니다.");
+  }
+  const sessionRef = db.ref(`historyEvidenceUploadSessions/${uploadId}`);
+  const sessionSnap = await sessionRef.get();
+  if (!sessionSnap.exists()) throw new HttpsError("not-found", "업로드 세션을 찾을 수 없습니다.");
+  const session = sessionSnap.val() ?? {};
+  if (normalizeText(session.actorUid) !== request.auth.uid) {
+    throw new HttpsError("permission-denied", "다른 사용자의 업로드를 완료할 수 없습니다.");
+  }
+  if (session.status === "finalized") {
+    const existingSnap = await db.ref(historyEvidencePath(session.employeeUid, session.evidenceId)).get();
+    if (existingSnap.exists() && normalizeText(existingSnap.val()?.r2Key) === normalizeText(session.key)) {
+      return {
+        item: publicHistoryEvidenceMetadata(existingSnap.val()),
+        created: false,
+        fileReplaced: false,
+        idempotent: true,
+        message: "이미 완료된 교육 증빙 업로드입니다.",
+      };
+    }
+  }
+  if (session.status !== "pending" || Number(session.expiresAt) < Date.now()) {
+    throw new HttpsError("failed-precondition", "업로드 세션이 만료됐습니다. 다시 업로드해 주세요.");
+  }
+
+  const target = await resolveHistoryEvidenceTarget(request.auth.uid, {
+    employeeUid: session.employeeUid,
+    source: session.historySource,
+    recordId: session.sourceRecordId,
+  });
+  if (target.evidenceId !== normalizeText(session.evidenceId)
+    || !isAllowedHistoryEvidenceR2Key({
+      companyId: target.companyId,
+      employeeUid: target.employeeUid,
+      evidenceId: target.evidenceId,
+      key: session.key,
+    })) {
+    throw new HttpsError("permission-denied", "허용되지 않은 교육 증빙 파일 경로입니다.");
+  }
+
+  const { bucket } = getR2Config();
+  if (!bucket) throw new HttpsError("failed-precondition", "R2_BUCKET 환경변수가 없습니다.");
+  const r2 = buildR2Client();
+  let object;
+  try {
+    object = await r2.send(new HeadObjectCommand({ Bucket: bucket, Key: session.key }));
+    const prefix = await readR2ObjectPrefix(r2, bucket, session.key);
+    assertPdfSignature(prefix);
+  } catch (error) {
+    const failure = error instanceof HttpsError
+      ? error
+      : new HttpsError("failed-precondition", "R2에 업로드된 교육 증빙 파일을 확인할 수 없습니다.");
+    if (!(error instanceof HttpsError)) {
+      logger.error("[history-evidence] uploaded object validation failed", {
+        actorUid: request.auth.uid,
+        evidenceId: target.evidenceId,
+        code: error?.code,
+      });
+    }
+    return rejectHistoryEvidenceUpload({
+      r2,
+      bucket,
+      key: session.key,
+      sessionRef,
+      error: failure,
+    });
+  }
+
+  const actualSize = Number(object.ContentLength ?? 0);
+  const actualType = normalizeText(object.ContentType).toLowerCase();
+  const validationMessage = validateHistoryEvidenceFile({
+    fileName: session.fileName,
+    fileType: actualType,
+    fileSize: actualSize,
+  });
+  if (validationMessage) {
+    return rejectHistoryEvidenceUpload({
+      r2,
+      bucket,
+      key: session.key,
+      sessionRef,
+      error: new HttpsError("invalid-argument", validationMessage),
+    });
+  }
+  const objectMetadata = object.Metadata ?? {};
+  if (normalizeText(objectMetadata["evidence-id"]) !== target.evidenceId
+    || normalizeText(objectMetadata["employee-uid"]) !== target.employeeUid) {
+    return rejectHistoryEvidenceUpload({
+      r2,
+      bucket,
+      key: session.key,
+      sessionRef,
+      error: new HttpsError("permission-denied", "업로드된 파일의 연결 정보가 일치하지 않습니다."),
+    });
+  }
+
+  const evidenceRef = db.ref(target.evidencePath);
+  const existingSnap = await evidenceRef.get();
+  const existing = existingSnap.val() ?? {};
+  const now = Date.now();
+  const created = !existingSnap.exists();
+  const previousR2Key = normalizeText(existing.r2Key || session.previousR2Key);
+  const staleR2Keys = Array.from(new Set([
+    ...(Array.isArray(existing.staleR2Keys) ? existing.staleR2Keys : []),
+    previousR2Key && previousR2Key !== session.key ? previousR2Key : "",
+  ].map(normalizeText).filter(Boolean)));
+  const record = {
+    evidenceId: target.evidenceId,
+    historyId: target.historyRef.recordId,
+    historySource: target.historyRef.source,
+    sourceRecordId: target.historyRef.recordId,
+    historyRefKey: target.historyRef.historyRefKey,
+    employeeUid: target.employeeUid,
+    companyId: target.companyId,
+    branchId: normalizeText(target.employee.branchId),
+    r2Key: session.key,
+    fileName: normalizeText(session.fileName),
+    contentType: actualType,
+    sizeBytes: actualSize,
+    uploadedByUid: normalizeText(existing.uploadedByUid || target.actor.uid),
+    uploadedByName: normalizeText(existing.uploadedByName || target.actor.name),
+    uploadedByRole: normalizeText(existing.uploadedByRole || target.actor.role),
+    uploadedAt: Number(existing.uploadedAt) || now,
+    updatedByUid: target.actor.uid,
+    updatedByName: normalizeText(target.actor.name),
+    updatedByRole: normalizeText(target.actor.role),
+    updatedAt: now,
+    staleR2Keys,
+  };
+  await db.ref().update({
+    [target.evidencePath]: record,
+    [`historyEvidenceUploadSessions/${uploadId}/status`]: "finalized",
+    [`historyEvidenceUploadSessions/${uploadId}/finalizedAt`]: now,
+  });
+
+  let cleanupPending = false;
+  if (staleR2Keys.length) {
+    const failed = [];
+    for (const staleKey of staleR2Keys) {
+      try {
+        await r2.send(new DeleteObjectCommand({ Bucket: bucket, Key: staleKey }));
+      } catch (error) {
+        failed.push(staleKey);
+        logger.warn("[history-evidence] previous object cleanup pending", {
+          evidenceId: target.evidenceId,
+          code: error?.code,
+        });
+      }
+    }
+    cleanupPending = failed.length > 0;
+    await evidenceRef.update({
+      staleR2Keys: failed.length ? failed : null,
+      cleanupPending: failed.length > 0 || null,
+      cleanupPendingAt: failed.length ? Date.now() : null,
+    });
+  }
+
+  await writeAuditLogSafe({
+    actor: target.actor,
+    companyId: target.companyId,
+    action: created ? "HISTORY_EVIDENCE_UPLOAD" : "HISTORY_EVIDENCE_REPLACE",
+    category: "HISTORY",
+    target: employeeTarget(target.employee, target.employeeUid),
+    summary: `${target.employee.name ?? "직원"}(${target.employee.empNo ?? "-"}) 교육 증빙 ${created ? "업로드" : "교체"}`,
+    metadata: {
+      evidenceId: target.evidenceId,
+      historySource: target.historyRef.source,
+      sourceRecordId: target.historyRef.recordId,
+      fileName: record.fileName,
+      sizeBytes: record.sizeBytes,
+    },
+  });
+
+  return {
+    item: publicHistoryEvidenceMetadata(record),
+    created,
+    fileReplaced: !created,
+    cleanupPending,
+    message: created ? "교육 증빙 PDF가 업로드되었습니다." : "교육 증빙 PDF가 교체되었습니다.",
+  };
+});
+
+exports.getHistoryEvidenceDownloadUrl = onCall(HISTORY_EVIDENCE_R2_OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const target = await resolveHistoryEvidenceTarget(request.auth.uid, request.data);
+  const snap = await db.ref(target.evidencePath).get();
+  if (!snap.exists() || !normalizeText(snap.val()?.r2Key)) {
+    throw new HttpsError("not-found", "교육 증빙 PDF를 찾을 수 없습니다.");
+  }
+  const record = snap.val();
+  if (record.deletionPending) {
+    throw new HttpsError("failed-precondition", "교육 증빙 PDF를 삭제하는 중입니다.");
+  }
+  const disposition = normalizeText(request.data?.disposition).toLowerCase() === "attachment"
+    ? "attachment"
+    : "inline";
+  const { bucket } = getR2Config();
+  if (!bucket) throw new HttpsError("failed-precondition", "R2_BUCKET 환경변수가 없습니다.");
+  try {
+    const downloadUrl = await getSignedUrl(buildR2Client(), new GetObjectCommand({
+      Bucket: bucket,
+      Key: record.r2Key,
+      ResponseContentType: HISTORY_EVIDENCE_MIME,
+      ResponseContentDisposition: `${disposition}; filename*=UTF-8''${encodeURIComponent(record.fileName || "history-evidence.pdf")}`,
+    }), { expiresIn: PRESIGN_EXPIRES_SEC });
+    return {
+      downloadUrl,
+      fileName: normalizeText(record.fileName),
+      expiresAt: Date.now() + PRESIGN_EXPIRES_SEC * 1000,
+    };
+  } catch (error) {
+    logger.error("[history-evidence] download presign failed", {
+      actorUid: request.auth.uid,
+      evidenceId: target.evidenceId,
+      code: error?.code,
+    });
+    throw new HttpsError("internal", "교육 증빙 PDF 보기 URL을 생성하지 못했습니다.");
+  }
+});
+
+exports.deleteHistoryEvidence = onCall(HISTORY_EVIDENCE_R2_OPTS, async (request) => {
+  ensureAuthenticated(request);
+  const target = await resolveHistoryEvidenceTarget(request.auth.uid, request.data);
+  const evidenceRef = db.ref(target.evidencePath);
+  const snap = await evidenceRef.get();
+  if (!snap.exists()) throw new HttpsError("not-found", "삭제할 교육 증빙 PDF를 찾을 수 없습니다.");
+  const record = snap.val() ?? {};
+  const deletionToken = crypto.randomUUID();
+  await evidenceRef.update({
+    deletionPending: true,
+    deletionToken,
+    deletionRequestedAt: Date.now(),
+    deletionRequestedByUid: request.auth.uid,
+  });
+  try {
+    await deleteHistoryEvidenceR2Keys(record);
+  } catch (error) {
+    await evidenceRef.update({
+      deletionPending: null,
+      deletionToken: null,
+      deletionRequestedAt: null,
+      deletionRequestedByUid: null,
+    });
+    logger.error("[history-evidence] R2 delete failed", {
+      actorUid: request.auth.uid,
+      evidenceId: target.evidenceId,
+      code: error?.code,
+    });
+    throw new HttpsError("unavailable", "R2 교육 증빙 삭제에 실패했습니다. 기존 증빙은 유지됩니다.");
+  }
+  const currentSnap = await evidenceRef.get();
+  if (normalizeText(currentSnap.val()?.deletionToken) !== deletionToken) {
+    throw new HttpsError("aborted", "교육 증빙이 변경되어 삭제를 중단했습니다. 다시 시도해 주세요.");
+  }
+  await evidenceRef.remove();
+  await writeAuditLogSafe({
+    actor: target.actor,
+    companyId: target.companyId,
+    action: "HISTORY_EVIDENCE_DELETE",
+    category: "HISTORY",
+    target: employeeTarget(target.employee, target.employeeUid),
+    summary: `${target.employee.name ?? "직원"}(${target.employee.empNo ?? "-"}) 교육 증빙 삭제`,
+    metadata: {
+      evidenceId: target.evidenceId,
+      historySource: target.historyRef.source,
+      sourceRecordId: target.historyRef.recordId,
+      fileName: normalizeText(record.fileName),
+      sizeBytes: Number(record.sizeBytes) || 0,
+    },
+  });
+  return { evidenceId: target.evidenceId, message: "교육 증빙 PDF가 삭제되었습니다." };
+});
+
 let materialStreamR2Client = null;
 
 exports.streamMaterialPdf = onRequest(R2_OPTS, async (request, response) => {
@@ -767,29 +1290,41 @@ exports.saveInstructorGuide = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
   const actor = await ensureGuideActor(request.auth.uid);
   const inputGuide = request.data?.guide;
-  const normalized = normalizeGuideInput(inputGuide);
   const requestedGuideId = normalizeText(inputGuide?.id || request.data?.guideId);
   if (requestedGuideId) await assertGuideOwner(request.auth.uid, requestedGuideId);
+
+  const guideId = requestedGuideId || db.ref(`instructorGuides/${request.auth.uid}`).push().key;
+  const existingSnap = await db.ref(`instructorGuides/${request.auth.uid}/${guideId}`).get();
+  if (requestedGuideId && !existingSnap.exists()) {
+    throw new HttpsError("not-found", "수정할 교안을 찾을 수 없습니다.");
+  }
+  const existing = existingSnap.val() ?? {};
+  const normalized = normalizeGuideInput(inputGuide, existing);
+  if (!normalized.title) throw new HttpsError("invalid-argument", "교안 제목을 입력해 주세요.");
+  if (!normalized.materialId) {
+    throw new HttpsError("invalid-argument", "연결할 PDF 교육자료를 선택해 주세요.");
+  }
 
   const { material } = await resolveMaterialAccess(request.auth.uid, normalized.materialId);
   if (!material.r2Key || !hasPdfExtension(material.fileName)) {
     throw new HttpsError("failed-precondition", "PDF 교육자료만 교안에 연결할 수 있습니다.");
   }
 
-  const guideId = requestedGuideId || db.ref(`instructorGuides/${request.auth.uid}`).push().key;
-  const existingSnap = await db.ref(`instructorGuides/${request.auth.uid}/${guideId}`).get();
   const now = Date.now();
   const guide = {
+    ...existing,
     ...normalized,
     id: guideId,
-    ownerUid: request.auth.uid,
-    ownerName: actor.name ?? "",
-    companyId: actor.companyId,
-    branchId: actor.branchId ?? "",
+    ownerUid: existing.ownerUid ?? request.auth.uid,
+    ownerName: existing.ownerName ?? actor.name ?? "",
+    companyId: existing.companyId ?? actor.companyId,
+    branchId: existing.branchId ?? actor.branchId ?? "",
     materialTitle: material.title || material.materialName || material.fileName || "교육자료",
     materialFileName: material.fileName || "",
-    createdAt: existingSnap.val()?.createdAt ?? now,
+    createdAt: existing.createdAt ?? now,
     updatedAt: now,
+    updatedBy: request.auth.uid,
+    updatedByName: actor.name ?? "",
   };
   await db.ref().update({
     [`instructorGuides/${request.auth.uid}/${guideId}`]: guide,
@@ -1724,6 +2259,13 @@ exports.replaceEmployeeManualTrainingHistories = onCall(OPTS, async (request) =>
   const matchingRecords = Object.entries(currentRecords)
     .filter(([, record]) => ["manual", "manual_excel"].includes(normalizeText(record?.source).toLowerCase()) && matchesIdentity(record))
     .map(([historyId, record]) => ({ historyId, ...record }));
+  await assertNoHistoryEvidenceForRecords(
+    matchingRecords.map(({ historyId }) => ({
+      employeeUid: uid,
+      source: "manual",
+      recordId: historyId,
+    }))
+  );
   const latestExisting = [...matchingRecords].sort((a, b) => Number(b.completedAt ?? 0) - Number(a.completedAt ?? 0))[0] ?? {};
   const updates = {};
   let deletedCount = 0;
@@ -1834,6 +2376,22 @@ exports.deleteEmployeeHistory = onCall(OPTS, async (request) => {
   }
   const employee = employeeSnap.val();
   assertEmployeeHistoryScope(actor, employee);
+
+  const evidenceRef = normalizeHistoryEvidenceRef({
+    source,
+    historyId,
+    sessionId,
+    trainingId,
+  });
+  const evidenceId = historyEvidenceId(uid, evidenceRef.source, evidenceRef.recordId);
+  const evidenceSnap = await db.ref(historyEvidencePath(uid, evidenceId)).get();
+  if (evidenceSnap.exists()) {
+    throw new HttpsError(
+      "failed-precondition",
+      "교육 증빙 PDF가 연결된 이력입니다. 증빙을 먼저 삭제한 뒤 교육이력을 삭제해 주세요.",
+      { evidenceExists: true, evidenceId }
+    );
+  }
 
   const updates = {};
   let deletedRecord = null;
@@ -2145,6 +2703,7 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
   const updates = {};
   const deletedHistoryIds = [];
   const deletedByUid = {};
+  const deletedUidById = {};
   const deletedSourceById = {};
 
   // 두 미러 경로가 과거 오류/부분 저장으로 서로 어긋나도 초기화가 누락되지 않게
@@ -2193,6 +2752,7 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
       updates[`manualTrainingHistories/${historyId}`] = null;
       updates[`userManualTrainingHistories/${record.uid}/${historyId}`] = null;
       deletedHistoryIds.push(historyId);
+      deletedUidById[historyId] = normalizeText(record.uid);
       deletedSourceById[historyId] = normalizeText(record.source).toLowerCase();
       deletedByUid[record.uid] = (deletedByUid[record.uid] ?? 0) + 1;
     }
@@ -2231,6 +2791,7 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
         updates[`manualTrainingHistories/${historyId}`] = null;
         updates[`userManualTrainingHistories/${targetUid}/${historyId}`] = null;
         deletedHistoryIds.push(historyId);
+        deletedUidById[historyId] = targetUid;
         deletedSourceById[historyId] = inferResetSource(record);
         deletedByUid[targetUid] = (deletedByUid[targetUid] ?? 0) + 1;
       }
@@ -2238,6 +2799,13 @@ exports.resetSelectedManualTrainingHistories = onCall(OPTS, async (request) => {
   }
 
   const uniqueDeletedHistoryIds = Array.from(new Set(deletedHistoryIds));
+  await assertNoHistoryEvidenceForRecords(
+    uniqueDeletedHistoryIds.map((historyId) => ({
+      employeeUid: deletedUidById[historyId],
+      source: "manual",
+      recordId: historyId,
+    }))
+  );
   if (Object.keys(updates).length) {
     await db.ref().update(updates);
   }

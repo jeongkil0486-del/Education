@@ -129,7 +129,14 @@ export function putFileToR2(uploadUrl, file, opts = {}) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", uploadUrl);
-    xhr.setRequestHeader("Content-Type", file.type);
+    const headers = {
+      "Content-Type": file.type,
+      ...(opts.headers ?? {}),
+    };
+    for (const [name, value] of Object.entries(headers)) {
+      if (!String(name ?? "").trim() || value == null) continue;
+      xhr.setRequestHeader(String(name).trim(), String(value));
+    }
 
     if (opts.onProgress) {
       xhr.upload.addEventListener("progress", (event) => {
