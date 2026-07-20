@@ -36,6 +36,9 @@ const {
   publicHistoryEvidenceMetadata,
   validateHistoryEvidenceFile,
 } = require("./history-evidence");
+const {
+  normalizeGuideInput,
+} = require("./instructor-guide");
 
 admin.initializeApp();
 
@@ -277,47 +280,6 @@ async function ensureGuideActor(uid) {
     throw new HttpsError("failed-precondition", "교안의 회사 범위를 결정할 수 없습니다.");
   }
   return actor;
-}
-
-function guideText(value, maxLength) {
-  return String(value ?? "").trim().slice(0, maxLength);
-}
-
-function normalizeGuidePageNotes(value) {
-  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  const pageNotes = {};
-  for (const [rawPage, rawNote] of Object.entries(source).slice(0, 2000)) {
-    const page = Number(rawPage);
-    if (!Number.isInteger(page) || page < 1 || page > 5000) continue;
-    const note = rawNote && typeof rawNote === "object" ? rawNote : {};
-    const normalized = {
-      note: guideText(note.note, 5000),
-      emphasis: guideText(note.emphasis, 1500),
-      question: guideText(note.question, 1500),
-      updatedAt: Date.now(),
-    };
-    if (normalized.note || normalized.emphasis || normalized.question) pageNotes[String(page)] = normalized;
-  }
-  return pageNotes;
-}
-
-function normalizeGuideInput(value) {
-  const input = value && typeof value === "object" ? value : {};
-  const title = guideText(input.title, 160);
-  const materialId = guideText(input.materialId, 140);
-  if (!title) throw new HttpsError("invalid-argument", "교안 제목을 입력해 주세요.");
-  if (!materialId) throw new HttpsError("invalid-argument", "연결할 PDF 교육자료를 선택해 주세요.");
-  return {
-    title,
-    materialId,
-    trainingItemId: guideText(input.trainingItemId, 120),
-    estimatedMinutes: Math.min(1440, Math.max(0, Math.round(Number(input.estimatedMinutes) || 0))),
-    objectives: guideText(input.objectives, 5000),
-    openingNotes: guideText(input.openingNotes, 5000),
-    closingNotes: guideText(input.closingNotes, 5000),
-    generalNotes: guideText(input.generalNotes, 10000),
-    pageNotes: normalizeGuidePageNotes(input.pageNotes),
-  };
 }
 
 function assertGuideId(guideId) {
@@ -1328,29 +1290,41 @@ exports.saveInstructorGuide = onCall(OPTS, async (request) => {
   ensureAuthenticated(request);
   const actor = await ensureGuideActor(request.auth.uid);
   const inputGuide = request.data?.guide;
-  const normalized = normalizeGuideInput(inputGuide);
   const requestedGuideId = normalizeText(inputGuide?.id || request.data?.guideId);
   if (requestedGuideId) await assertGuideOwner(request.auth.uid, requestedGuideId);
+
+  const guideId = requestedGuideId || db.ref(`instructorGuides/${request.auth.uid}`).push().key;
+  const existingSnap = await db.ref(`instructorGuides/${request.auth.uid}/${guideId}`).get();
+  if (requestedGuideId && !existingSnap.exists()) {
+    throw new HttpsError("not-found", "수정할 교안을 찾을 수 없습니다.");
+  }
+  const existing = existingSnap.val() ?? {};
+  const normalized = normalizeGuideInput(inputGuide, existing);
+  if (!normalized.title) throw new HttpsError("invalid-argument", "교안 제목을 입력해 주세요.");
+  if (!normalized.materialId) {
+    throw new HttpsError("invalid-argument", "연결할 PDF 교육자료를 선택해 주세요.");
+  }
 
   const { material } = await resolveMaterialAccess(request.auth.uid, normalized.materialId);
   if (!material.r2Key || !hasPdfExtension(material.fileName)) {
     throw new HttpsError("failed-precondition", "PDF 교육자료만 교안에 연결할 수 있습니다.");
   }
 
-  const guideId = requestedGuideId || db.ref(`instructorGuides/${request.auth.uid}`).push().key;
-  const existingSnap = await db.ref(`instructorGuides/${request.auth.uid}/${guideId}`).get();
   const now = Date.now();
   const guide = {
+    ...existing,
     ...normalized,
     id: guideId,
-    ownerUid: request.auth.uid,
-    ownerName: actor.name ?? "",
-    companyId: actor.companyId,
-    branchId: actor.branchId ?? "",
+    ownerUid: existing.ownerUid ?? request.auth.uid,
+    ownerName: existing.ownerName ?? actor.name ?? "",
+    companyId: existing.companyId ?? actor.companyId,
+    branchId: existing.branchId ?? actor.branchId ?? "",
     materialTitle: material.title || material.materialName || material.fileName || "교육자료",
     materialFileName: material.fileName || "",
-    createdAt: existingSnap.val()?.createdAt ?? now,
+    createdAt: existing.createdAt ?? now,
     updatedAt: now,
+    updatedBy: request.auth.uid,
+    updatedByName: actor.name ?? "",
   };
   await db.ref().update({
     [`instructorGuides/${request.auth.uid}/${guideId}`]: guide,
