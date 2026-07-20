@@ -66,6 +66,8 @@ const R2_OPTS = {
     R2_PUBLIC_BASE_URL,
   ],
 };
+const PUBLIC_CALLABLE_OPTS = { ...OPTS, invoker: "public" };
+const HISTORY_EVIDENCE_R2_OPTS = { ...R2_OPTS, invoker: "public" };
 
 const ALLOWED_MATERIAL_MIME = ["application/pdf"];
 const ALLOWED_MATERIAL_EXT = ".pdf";
@@ -763,7 +765,7 @@ async function rejectHistoryEvidenceUpload({ r2, bucket, key, sessionRef, error 
   throw error;
 }
 
-exports.listHistoryEvidence = onCall(R2_OPTS, async (request) => {
+exports.listHistoryEvidence = onCall(PUBLIC_CALLABLE_OPTS, async (request) => {
   ensureAuthenticated(request);
   const { employeeUid } = await resolveHistoryEvidenceEmployee(
     request.auth.uid,
@@ -782,7 +784,7 @@ exports.listHistoryEvidence = onCall(R2_OPTS, async (request) => {
   return { employeeUid, items };
 });
 
-exports.createHistoryEvidenceUploadUrl = onCall(R2_OPTS, async (request) => {
+exports.createHistoryEvidenceUploadUrl = onCall(HISTORY_EVIDENCE_R2_OPTS, async (request) => {
   ensureAuthenticated(request);
   const target = await resolveHistoryEvidenceTarget(request.auth.uid, request.data);
   const fileName = normalizeText(request.data?.fileName);
@@ -859,7 +861,7 @@ exports.createHistoryEvidenceUploadUrl = onCall(R2_OPTS, async (request) => {
   };
 });
 
-exports.finalizeHistoryEvidenceUpload = onCall(R2_OPTS, async (request) => {
+exports.finalizeHistoryEvidenceUpload = onCall(HISTORY_EVIDENCE_R2_OPTS, async (request) => {
   ensureAuthenticated(request);
   const uploadId = normalizeText(request.data?.uploadId);
   if (!/^[a-f0-9]{32}$/i.test(uploadId)) {
@@ -1045,7 +1047,7 @@ exports.finalizeHistoryEvidenceUpload = onCall(R2_OPTS, async (request) => {
   };
 });
 
-exports.getHistoryEvidenceDownloadUrl = onCall(R2_OPTS, async (request) => {
+exports.getHistoryEvidenceDownloadUrl = onCall(HISTORY_EVIDENCE_R2_OPTS, async (request) => {
   ensureAuthenticated(request);
   const target = await resolveHistoryEvidenceTarget(request.auth.uid, request.data);
   const snap = await db.ref(target.evidencePath).get();
@@ -1083,7 +1085,7 @@ exports.getHistoryEvidenceDownloadUrl = onCall(R2_OPTS, async (request) => {
   }
 });
 
-exports.deleteHistoryEvidence = onCall(R2_OPTS, async (request) => {
+exports.deleteHistoryEvidence = onCall(HISTORY_EVIDENCE_R2_OPTS, async (request) => {
   ensureAuthenticated(request);
   const target = await resolveHistoryEvidenceTarget(request.auth.uid, request.data);
   const evidenceRef = db.ref(target.evidencePath);
