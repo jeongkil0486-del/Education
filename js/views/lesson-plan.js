@@ -146,6 +146,7 @@ function bindEditor(container) {
   ];
   noteBindings.forEach(([id, key]) => container.querySelector(`#${id}`)?.addEventListener("input", (event) => {
     const pageKey = String(state.page);
+    state.guide.pageNotes ??= {};
     state.guide.pageNotes[pageKey] ??= {};
     state.guide.pageNotes[pageKey][key] = event.target.value;
   }));
@@ -238,8 +239,9 @@ async function selectPage(container, pageNumber) {
 }
 
 function captureCurrentPageNotes(container) {
-  if (!state.page || !state.guide?.pageNotes) return;
+  if (!state.page || !state.guide) return;
   if (container.querySelector("#guide-page-note-fields")?.classList.contains("hidden")) return;
+  state.guide.pageNotes ??= {};
   const pageKey = String(state.page);
   const note = {
     note: container.querySelector("#guide-page-note")?.value ?? "",
